@@ -45,8 +45,8 @@
 - [x] **#Q13** ADX trend strength indicator not implemented (FIXED: Created core/technical_indicators.py with ADXCalculator, ADXResult, trend strength/direction classification)
 - [x] **#Q14** Bollinger Bands indicator not implemented (FIXED: Added BollingerBandsCalculator with squeeze detection, percent_b, bandwidth metrics)
 - [x] **#Q15** Volume-weighted indicators missing (FIXED: Added VWAPCalculator, OBVCalculator, MFICalculator with complete volume analysis)
-- [ ] **#Q16** No mean reversion signal validation
-- [ ] **#Q17** Spread ratio validation incomplete for stat arb
+- [x] **#Q16** No mean reversion signal validation (FIXED: Created core/signal_validation.py with MeanReversionValidator, ADF test, half-life, Hurst exponent, support/resistance checks)
+- [x] **#Q17** Spread ratio validation incomplete for stat arb (FIXED: Added SpreadRatioValidator in core/signal_validation.py with cointegration test, hedge ratio stability, beta neutrality checks)
 - [x] **#Q18** No signal decay/half-life modeling (FIXED: Created core/signal_decay.py with SignalDecayManager, multiple decay models, half-life calibration, aggregate signals)
 
 ### LOW (6)
@@ -84,10 +84,10 @@
 - [x] **#R16** No risk contribution attribution by strategy (FIXED: Added RiskContributionAnalyzer in core/margin_optimizer.py with VaR decomposition, marginal VaR, strategy risk attribution)
 - [x] **#R17** Missing worst-case scenario reporting (FIXED: Created core/scenario_analysis.py with ScenarioEngine, worst-case identification, comprehensive reporting)
 - [x] **#R18** No historical stress event playback (FIXED: Added HistoricalEventLibrary in core/scenario_analysis.py with Black Monday, GFC, COVID and other crisis scenarios)
-- [ ] **#R19** Risk limits not time-of-day aware
+- [x] **#R19** Risk limits not time-of-day aware (FIXED: Created core/time_based_risk.py with TimeBasedRiskManager, session-based limits, market hours awareness)
 - [ ] **#R20** No risk exposure trending/forecasting
 - [ ] **#R21** Missing P&L attribution by risk factor
-- [ ] **#R22** No overnight vs intraday risk differentiation
+- [x] **#R22** No overnight vs intraday risk differentiation (FIXED: Added OvernightRiskManager in core/time_based_risk.py with overnight VaR, gap risk, position reduction suggestions)
 - [x] **#R23** Tail risk metrics (skew/kurtosis) not calculated (FIXED: Included in calculate_fat_tail_metrics under #R9 - provides skewness, excess_kurtosis, tail_ratio, extreme event counts, Jarque-Bera test)
 - [ ] **#R24** No scenario-specific position limits
 - [x] **#R25** Missing risk report generation (FIXED: Created core/risk_reports.py with RiskReportGenerator, daily summaries, position risk, limit utilization, export to JSON/CSV/HTML)
@@ -395,7 +395,7 @@
 ## Fix Progress Tracking
 
 **Last Updated**: 2026-02-02
-**Total Issues Fixed**: 128 CRITICAL/HIGH issues + 35 MEDIUM priority issues = 163 total
+**Total Issues Fixed**: 128 CRITICAL/HIGH issues + 41 MEDIUM priority issues = 169 total
 
 ### Completed Fixes (CRITICAL)
 - [x] #Q1 - MACD signal line calculation (momentum_strategy.py)
@@ -507,7 +507,7 @@
 ### Remaining Priority (Next to Fix)
 All CRITICAL and HIGH priority issues have been addressed! (128 total)
 
-### Recently Completed MEDIUM Fixes (35 total)
+### Recently Completed MEDIUM Fixes (41 total)
 - [x] #Q7 - Backtesting framework (core/backtest.py)
 - [x] #Q8 - Walk-forward optimization (core/backtest.py)
 - [x] #Q9 - Regime detection (core/regime_detector.py)
@@ -517,6 +517,8 @@ All CRITICAL and HIGH priority issues have been addressed! (128 total)
 - [x] #Q13 - ADX indicator (core/technical_indicators.py)
 - [x] #Q14 - Bollinger Bands (core/technical_indicators.py)
 - [x] #Q15 - Volume-weighted indicators (core/technical_indicators.py)
+- [x] #Q16 - Mean reversion signal validation (core/signal_validation.py)
+- [x] #Q17 - Spread ratio validation (core/signal_validation.py)
 - [x] #Q18 - Signal decay/half-life modeling (core/signal_decay.py)
 - [x] #R12 - Risk factor decomposition (core/risk_factors.py)
 - [x] #R13 - CVaR threshold alerts (agents/risk_agent.py)
@@ -524,6 +526,8 @@ All CRITICAL and HIGH priority issues have been addressed! (128 total)
 - [x] #R16 - Risk contribution attribution by strategy (core/margin_optimizer.py)
 - [x] #R17 - Worst-case scenario reporting (core/scenario_analysis.py)
 - [x] #R18 - Historical stress event playback (core/scenario_analysis.py)
+- [x] #R19 - Time-of-day risk limits (core/time_based_risk.py)
+- [x] #R22 - Overnight vs intraday risk (core/time_based_risk.py)
 - [x] #R25 - Risk report generation (core/risk_reports.py)
 - [x] #R27 - Risk limit breach notifications (core/notifications.py)
 - [x] #C33 - Compliance officer notifications (core/notifications.py)
