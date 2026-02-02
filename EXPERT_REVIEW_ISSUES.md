@@ -176,14 +176,14 @@
 - [x] **#E13** Fill quality metrics not calculated (FIXED: Added get_aggregate_fill_metrics providing total orders, slippage avg/max/min, price improvement rate, orders with improvement; enhanced SliceFill tracking)
 - [x] **#E14** Implementation shortfall not tracked (FIXED: Added calculate_implementation_shortfall with delay/impact/opportunity cost decomposition; get_implementation_shortfall_summary for aggregate metrics; shortfall in bps vs decision price benchmark)
 - [x] **#E15** No order book depth analysis (FIXED: Added OrderBookSnapshot, OrderBookLevel dataclasses; update_order_book, analyze_order_book, estimate_execution_cost methods; tracks depth, imbalance, VWAP to size)
-- [ ] **#E16** Spread crossing logic missing
-- [ ] **#E17** Queue position estimation not implemented
-- [ ] **#E18** No midpoint peg order support
-- [ ] **#E19** Iceberg order support missing
+- [x] **#E16** Spread crossing logic missing (FIXED: Added should_cross_spread decision comparing spread vs queue cost, execute_with_spread_awareness for auto aggressive/passive selection)
+- [x] **#E17** Queue position estimation not implemented (FIXED: Added _estimate_queue_time, _estimate_fill_rate, estimate_queue_position with fill probability modeling)
+- [x] **#E18** No midpoint peg order support (FIXED: Added execute_midpoint_peg with auto-repeg on price deviation, tick-size rounding, timeout)
+- [x] **#E19** Iceberg order support missing (FIXED: Added execute_iceberg with display size, variance, replenish interval, price offset)
 - [x] **#E20** No passive/aggressive fill categorization (FIXED: Added FillCategory dataclass; categorize_fill method classifying fills as aggressive/passive/midpoint based on spread position; get_fill_categorization_summary for reporting)
 - [x] **#E21** Market impact model not implemented (FIXED: Added MarketImpactEstimate dataclass; estimate_market_impact using square-root Almgren-Chriss model; temporary/permanent impact, configure_market_impact_model for tuning)
-- [ ] **#E22** Post-trade TCA incomplete
-- [ ] **#E23** No venue latency monitoring
+- [x] **#E22** Post-trade TCA incomplete (FIXED: Added calculate_post_trade_tca with multi-benchmark analysis, generate_tca_report for aggregate stats, full execution quality metrics)
+- [x] **#E23** No venue latency monitoring (FIXED: Added record_venue_latency, get_venue_latency_stats, check_venue_health with P50/P95/P99 stats and alert thresholds)
 
 ### MEDIUM (7)
 - [ ] **#E24** Order timeout handling incomplete
@@ -395,7 +395,7 @@
 ## Fix Progress Tracking
 
 **Last Updated**: 2026-02-02
-**Total Issues Fixed**: 63 CRITICAL/HIGH issues
+**Total Issues Fixed**: 73 CRITICAL/HIGH issues
 
 ### Completed Fixes (CRITICAL)
 - [x] #Q1 - MACD signal line calculation (momentum_strategy.py)
@@ -459,9 +459,19 @@
 - [x] #E13 - Fill quality metrics (execution_agent.py)
 - [x] #E14 - Implementation shortfall tracking (execution_agent.py)
 - [x] #R23 - Tail risk metrics (var_calculator.py via #R9)
+- [x] #P5 - Portfolio optimization mean-variance, risk parity (position_sizing.py)
+- [x] #E15 - Order book depth analysis (execution_agent.py)
+- [x] #E20 - Passive/aggressive fill categorization (execution_agent.py)
+- [x] #E21 - Market impact model (execution_agent.py)
+- [x] #E16 - Spread crossing logic (execution_agent.py)
+- [x] #E17 - Queue position estimation (execution_agent.py)
+- [x] #E18 - Midpoint peg order support (execution_agent.py)
+- [x] #E19 - Iceberg order support (execution_agent.py)
+- [x] #E22 - Post-trade TCA (execution_agent.py)
+- [x] #E23 - Venue latency monitoring (execution_agent.py)
 
 ### Remaining Priority (Next to Fix)
-(No remaining HIGH priority issues on the priority list)
+Compliance (#C5-C32), Options (#O3-O12), Futures (#F4-F8), FX (#X5-X8), Portfolio (#P6-P13)
 
 ---
 

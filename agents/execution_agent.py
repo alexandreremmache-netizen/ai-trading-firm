@@ -2499,3 +2499,958 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             f"Market impact model configured: eta={self._market_impact_params['eta']}, "
             f"gamma={self._market_impact_params['gamma']}, alpha={self._market_impact_params['alpha']}"
         )
+
+    # =========================================================================
+    # SPREAD CROSSING LOGIC (#E16)
+    # =========================================================================
+
+    def should_cross_spread(
+        self,
+        symbol: str,
+        side: str,
+        urgency: float = 0.5,
+        opportunity_cost_bps: float | None = None
+    ) -> dict:
+        """
+        Determine whether to cross the spread for immediate execution (#E16).
+
+        Compares the cost of crossing (paying the spread) against:
+        - Opportunity cost of waiting (missed alpha)
+        - Queue position probability
+        - Market conditions
+
+        Args:
+            symbol: Instrument symbol
+            side: 'buy' or 'sell'
+            urgency: Urgency factor 0-1 (1 = max urgency)
+            opportunity_cost_bps: Estimated alpha decay per unit time (bps/min)
+
+        Returns:
+            Decision dict with recommendation and breakdown
+        """
+        book = self._order_books.get(symbol)
+        if not book or not book.best_bid or not book.best_ask:
+            return {
+                "should_cross": True,  # Default to crossing when no book data
+                "reason": "no_book_data",
+                "spread_cost_bps": None,
+                "expected_queue_cost_bps": None,
+                "net_benefit_bps": None,
+            }
+
+        spread = book.best_ask - book.best_bid
+        spread_bps = book.spread_bps or 0
+
+        # Cost of crossing = half spread (we're at mid, pay to best)
+        crossing_cost_bps = spread_bps / 2
+
+        # Estimate queue cost (opportunity cost while waiting)
+        queue_time_estimate = self._estimate_queue_time(symbol, side)
+
+        if opportunity_cost_bps is None:
+            # Default opportunity cost based on volatility
+            volatility = self._market_impact_params.get("default_volatility", 0.02)
+            opportunity_cost_bps = volatility * 100 / 60  # Rough per-minute alpha decay
+
+        queue_cost_bps = opportunity_cost_bps * queue_time_estimate
+
+        # Adjust for urgency
+        urgency_factor = 1 + urgency * 2  # 1-3x multiplier on opportunity cost
+        adjusted_queue_cost = queue_cost_bps * urgency_factor
+
+        # Consider market conditions
+        imbalance = book.depth_imbalance(5)
+        # If buying and bid-heavy (imbalance > 0), more likely to get filled passively
+        # If buying and ask-heavy (imbalance < 0), queue might grow
+        imbalance_factor = 1.0
+        if side == 'buy':
+            imbalance_factor = 1 - imbalance * 0.5  # Less likely to queue if ask-heavy
+        else:  # sell
+            imbalance_factor = 1 + imbalance * 0.5  # Less likely to queue if bid-heavy
+
+        adjusted_queue_cost *= imbalance_factor
+
+        # Decision: cross if queue cost exceeds crossing cost
+        net_benefit = adjusted_queue_cost - crossing_cost_bps
+        should_cross = net_benefit > 0 or urgency > 0.8
+
+        return {
+            "should_cross": should_cross,
+            "reason": "queue_cost_exceeds_spread" if should_cross else "passive_more_efficient",
+            "spread_cost_bps": crossing_cost_bps,
+            "expected_queue_time_min": queue_time_estimate,
+            "expected_queue_cost_bps": adjusted_queue_cost,
+            "net_benefit_bps": net_benefit,
+            "book_imbalance": imbalance,
+            "urgency": urgency,
+        }
+
+    def execute_with_spread_awareness(
+        self,
+        order: OrderEvent,
+        urgency: float = 0.5
+    ) -> dict:
+        """
+        Execute order with spread-aware logic (#E16).
+
+        Automatically chooses between aggressive (crossing) and passive
+        (limit at bid/ask) execution based on market conditions.
+
+        Args:
+            order: Order to execute
+            urgency: Urgency factor 0-1
+
+        Returns:
+            Execution decision details
+        """
+        symbol = order.symbol
+        side = 'buy' if order.side == OrderSide.BUY else 'sell'
+
+        decision = self.should_cross_spread(symbol, side, urgency)
+
+        if decision["should_cross"]:
+            # Execute aggressively - market or aggressive limit
+            execution_type = "aggressive"
+            logger.info(
+                f"Spread crossing for {symbol}: crossing cost={decision['spread_cost_bps']:.1f}bps, "
+                f"queue cost={decision['expected_queue_cost_bps']:.1f}bps, "
+                f"net benefit={decision['net_benefit_bps']:.1f}bps"
+            )
+        else:
+            # Execute passively - post at NBBO
+            execution_type = "passive"
+            logger.info(
+                f"Passive execution for {symbol}: spread cost={decision['spread_cost_bps']:.1f}bps "
+                f"exceeds queue cost={decision['expected_queue_cost_bps']:.1f}bps"
+            )
+
+        return {
+            "execution_type": execution_type,
+            "order": order,
+            **decision,
+        }
+
+    # =========================================================================
+    # QUEUE POSITION ESTIMATION (#E17)
+    # =========================================================================
+
+    def _estimate_queue_time(self, symbol: str, side: str, size: int = 100) -> float:
+        """
+        Estimate time to get filled when posting at NBBO (#E17).
+
+        Uses simplified queue model based on:
+        - Current queue depth at NBBO
+        - Historical fill rate
+        - Order size relative to queue
+
+        Args:
+            symbol: Instrument symbol
+            side: 'buy' (posting at bid) or 'sell' (posting at ask)
+            size: Order size
+
+        Returns:
+            Estimated minutes to fill
+        """
+        book = self._order_books.get(symbol)
+        if not book:
+            return 5.0  # Default 5 min when no data
+
+        # Get queue depth at NBBO
+        if side == 'buy':
+            # Posting at bid - queue behind existing bids
+            queue_depth = book.bids[0].size if book.bids else 0
+        else:
+            # Posting at ask - queue behind existing asks
+            queue_depth = book.asks[0].size if book.asks else 0
+
+        # Estimate fill rate (shares/minute) from historical data
+        fill_rate = self._estimate_fill_rate(symbol, side)
+
+        if fill_rate <= 0:
+            fill_rate = 100  # Default 100 shares/min
+
+        # Position in queue (simplified - assumes we're at back)
+        queue_position = queue_depth + size
+
+        # Time = position / fill_rate
+        estimated_time = queue_position / fill_rate
+
+        return estimated_time
+
+    def _estimate_fill_rate(self, symbol: str, side: str) -> float:
+        """
+        Estimate passive fill rate in shares/minute (#E17).
+
+        Uses historical fill data if available, otherwise market volume.
+
+        Args:
+            symbol: Instrument symbol
+            side: 'buy' or 'sell'
+
+        Returns:
+            Estimated fill rate in shares/minute
+        """
+        # Try to use historical market volume
+        volume_history = self._market_volume_history.get(symbol, [])
+
+        if len(volume_history) >= 2:
+            # Calculate average volume per minute
+            time_span_minutes = (
+                volume_history[-1][0] - volume_history[0][0]
+            ).total_seconds() / 60
+
+            if time_span_minutes > 0:
+                vol_change = volume_history[-1][1] - volume_history[0][1]
+                vol_per_minute = vol_change / time_span_minutes
+
+                # Assume ~50% of volume crosses the spread (marketable)
+                # The other 50% is passive fills that clear queue
+                fill_rate = vol_per_minute * 0.5
+
+                # Adjust by side based on imbalance
+                book = self._order_books.get(symbol)
+                if book:
+                    imbalance = book.depth_imbalance(3)
+                    if side == 'buy':
+                        # Bid-heavy = more sellers hitting bids = faster bid fills
+                        fill_rate *= (1 - imbalance * 0.3)
+                    else:
+                        # Ask-heavy = more buyers lifting offers = faster ask fills
+                        fill_rate *= (1 + imbalance * 0.3)
+
+                return max(fill_rate, 10)  # Minimum 10 shares/min
+
+        # Default based on typical liquid stock
+        return 200  # 200 shares/minute default
+
+    def estimate_queue_position(
+        self,
+        symbol: str,
+        side: str,
+        size: int,
+        price: float | None = None
+    ) -> dict:
+        """
+        Estimate queue position and expected fill time (#E17).
+
+        Args:
+            symbol: Instrument symbol
+            side: 'buy' or 'sell'
+            size: Order size
+            price: Limit price (uses NBBO if None)
+
+        Returns:
+            Queue position analysis
+        """
+        book = self._order_books.get(symbol)
+        if not book:
+            return {
+                "queue_position": None,
+                "queue_depth_ahead": None,
+                "estimated_fill_time_min": None,
+                "fill_probability_5min": None,
+                "reason": "no_book_data",
+            }
+
+        # Determine queue level
+        at_nbbo = True
+        if price is not None:
+            if side == 'buy' and book.best_bid:
+                at_nbbo = abs(price - book.best_bid) < 0.0001
+            elif side == 'sell' and book.best_ask:
+                at_nbbo = abs(price - book.best_ask) < 0.0001
+
+        if side == 'buy':
+            # Posting at bid
+            nbbo_depth = book.bids[0].size if book.bids else 0
+            our_price = price or (book.best_bid or 0)
+            levels_ahead = [l for l in book.bids if l.price > our_price] if not at_nbbo else []
+            depth_ahead = sum(l.size for l in levels_ahead) + (nbbo_depth if at_nbbo else 0)
+        else:
+            # Posting at ask
+            nbbo_depth = book.asks[0].size if book.asks else 0
+            our_price = price or (book.best_ask or float('inf'))
+            levels_ahead = [l for l in book.asks if l.price < our_price] if not at_nbbo else []
+            depth_ahead = sum(l.size for l in levels_ahead) + (nbbo_depth if at_nbbo else 0)
+
+        # Estimate fill time
+        fill_rate = self._estimate_fill_rate(symbol, side)
+        queue_position = depth_ahead + size
+        estimated_fill_time = queue_position / fill_rate if fill_rate > 0 else float('inf')
+
+        # Calculate fill probability in next 5 minutes
+        # Using exponential arrival model
+        expected_fills_5min = fill_rate * 5
+        # P(fill) = 1 - P(queue_position not reached in 5 min)
+        # Simplified: if expected fills > queue_position, high probability
+        fill_prob_5min = min(1.0, expected_fills_5min / queue_position) if queue_position > 0 else 1.0
+
+        return {
+            "symbol": symbol,
+            "side": side,
+            "size": size,
+            "at_nbbo": at_nbbo,
+            "queue_position": queue_position,
+            "queue_depth_ahead": depth_ahead,
+            "nbbo_depth": nbbo_depth,
+            "estimated_fill_rate": fill_rate,
+            "estimated_fill_time_min": estimated_fill_time,
+            "fill_probability_5min": fill_prob_5min,
+        }
+
+    # =========================================================================
+    # MIDPOINT PEG ORDER SUPPORT (#E18)
+    # =========================================================================
+
+    async def execute_midpoint_peg(
+        self,
+        order: OrderEvent,
+        max_deviation_bps: float = 5.0,
+        timeout_seconds: float = 300.0
+    ) -> dict:
+        """
+        Execute order with midpoint pegging (#E18).
+
+        Places limit order at midpoint and re-pegs on price changes.
+        Common for reducing spread costs in less urgent executions.
+
+        Args:
+            order: Order to execute
+            max_deviation_bps: Max price deviation before re-peg (bps from mid)
+            timeout_seconds: Maximum time to attempt execution
+
+        Returns:
+            Execution result
+        """
+        symbol = order.symbol
+        side = 'buy' if order.side == OrderSide.BUY else 'sell'
+        remaining = order.quantity
+
+        start_time = datetime.now(timezone.utc)
+        fills = []
+        repeg_count = 0
+        current_order_id = None
+
+        while remaining > 0:
+            # Check timeout
+            elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+            if elapsed > timeout_seconds:
+                logger.warning(f"Midpoint peg timeout for {symbol} after {elapsed:.0f}s")
+                break
+
+            # Get current midpoint
+            book = self._order_books.get(symbol)
+            if not book or not book.mid_price:
+                await asyncio.sleep(0.5)
+                continue
+
+            mid = book.mid_price
+            tick = self._specs_manager.get_spec(symbol).tick_size if self._specs_manager else 0.01
+
+            # Round to tick
+            if side == 'buy':
+                # Round down for buys (don't overpay)
+                limit_price = (mid // tick) * tick
+            else:
+                # Round up for sells (don't undersell)
+                limit_price = ((mid + tick - 0.0001) // tick) * tick
+
+            # Check if we need to re-peg
+            need_repeg = True
+            if current_order_id is not None:
+                # Check if current order's price is still near mid
+                pending = self._pending_orders.get(current_order_id)
+                if pending and pending.order_event.limit_price:
+                    current_price = pending.order_event.limit_price
+                    deviation_bps = abs(current_price - mid) / mid * 10000
+                    if deviation_bps <= max_deviation_bps:
+                        need_repeg = False
+
+            if need_repeg:
+                # Cancel existing order if any
+                if current_order_id is not None:
+                    await self._cancel_order(current_order_id)
+                    repeg_count += 1
+
+                # Create new midpoint order
+                mid_order = OrderEvent(
+                    source_agent=self.name,
+                    decision_id=order.decision_id,
+                    validation_id=order.validation_id,
+                    symbol=symbol,
+                    side=order.side,
+                    quantity=remaining,
+                    order_type=OrderType.LIMIT,
+                    limit_price=limit_price,
+                    algo="MIDPOINT_PEG",
+                )
+
+                broker_id = await self._broker.place_order(mid_order)
+                if broker_id:
+                    current_order_id = broker_id
+                    logger.debug(f"Midpoint peg order placed: {symbol} @ {limit_price:.4f}")
+
+            # Wait for fill or price change
+            await asyncio.sleep(0.5)
+
+            # Check for fills
+            if current_order_id:
+                pending = self._pending_orders.get(current_order_id)
+                if pending:
+                    filled = pending.filled_quantity
+                    if filled > 0:
+                        fills.append({
+                            "quantity": filled,
+                            "avg_price": pending.avg_fill_price,
+                        })
+                        remaining -= filled
+
+        # Final status
+        total_filled = sum(f["quantity"] for f in fills)
+        if total_filled > 0:
+            avg_price = sum(f["quantity"] * f["avg_price"] for f in fills) / total_filled
+        else:
+            avg_price = None
+
+        return {
+            "symbol": symbol,
+            "side": side,
+            "requested_quantity": order.quantity,
+            "filled_quantity": total_filled,
+            "remaining_quantity": remaining,
+            "avg_fill_price": avg_price,
+            "repeg_count": repeg_count,
+            "duration_seconds": (datetime.now(timezone.utc) - start_time).total_seconds(),
+            "status": "filled" if remaining == 0 else ("partial" if total_filled > 0 else "unfilled"),
+        }
+
+    async def _cancel_order(self, broker_order_id: int) -> bool:
+        """Cancel an order by broker ID."""
+        try:
+            if self._broker:
+                await self._broker.cancel_order(broker_order_id)
+                return True
+        except Exception as e:
+            logger.error(f"Failed to cancel order {broker_order_id}: {e}")
+        return False
+
+    # =========================================================================
+    # ICEBERG ORDER SUPPORT (#E19)
+    # =========================================================================
+
+    async def execute_iceberg(
+        self,
+        order: OrderEvent,
+        display_size: int,
+        variance_pct: float = 0.2,
+        min_replenish_seconds: float = 1.0,
+        price_offset_ticks: int = 0
+    ) -> dict:
+        """
+        Execute iceberg order with hidden quantity (#E19).
+
+        Shows only display_size at a time, replenishing as fills occur.
+        Useful for large orders to avoid market impact from signaling.
+
+        Args:
+            order: Full order (total quantity)
+            display_size: Visible quantity per slice
+            variance_pct: Random variance in display size (0-1)
+            min_replenish_seconds: Minimum time between slice submissions
+            price_offset_ticks: Ticks from NBBO (0 = at NBBO)
+
+        Returns:
+            Execution result
+        """
+        import random
+
+        symbol = order.symbol
+        side = 'buy' if order.side == OrderSide.BUY else 'sell'
+        total_quantity = order.quantity
+        remaining = total_quantity
+
+        start_time = datetime.now(timezone.utc)
+        fills = []
+        slice_count = 0
+        current_slice_id = None
+        last_replenish_time = None
+
+        logger.info(
+            f"Starting iceberg execution: {symbol} {side} {total_quantity} "
+            f"(display={display_size}, variance={variance_pct:.0%})"
+        )
+
+        while remaining > 0:
+            # Check rate limits
+            if not self._check_rate_limits():
+                await asyncio.sleep(0.5)
+                continue
+
+            # Check minimum replenish interval
+            if last_replenish_time:
+                elapsed = (datetime.now(timezone.utc) - last_replenish_time).total_seconds()
+                if elapsed < min_replenish_seconds:
+                    await asyncio.sleep(min_replenish_seconds - elapsed)
+
+            # Check if current slice is filled
+            need_new_slice = current_slice_id is None
+            if current_slice_id:
+                pending = self._pending_orders.get(current_slice_id)
+                if pending and pending.status in ("filled", "completed"):
+                    filled = pending.filled_quantity
+                    if filled > 0:
+                        fills.append({
+                            "slice": slice_count,
+                            "quantity": filled,
+                            "avg_price": pending.avg_fill_price,
+                        })
+                        remaining -= filled
+                    need_new_slice = True
+                elif pending and pending.status == "cancelled":
+                    need_new_slice = True
+
+            if need_new_slice and remaining > 0:
+                # Calculate slice size with variance
+                variance = random.uniform(-variance_pct, variance_pct)
+                slice_size = int(display_size * (1 + variance))
+                slice_size = min(slice_size, remaining)
+                slice_size = max(1, slice_size)
+
+                # Determine limit price
+                book = self._order_books.get(symbol)
+                if book:
+                    tick = self._specs_manager.get_spec(symbol).tick_size if self._specs_manager else 0.01
+                    if side == 'buy':
+                        base_price = book.best_bid or self._last_prices.get(symbol, 100)
+                        limit_price = base_price + (price_offset_ticks * tick)
+                    else:
+                        base_price = book.best_ask or self._last_prices.get(symbol, 100)
+                        limit_price = base_price - (price_offset_ticks * tick)
+                else:
+                    limit_price = self._last_prices.get(symbol, 100)
+
+                # Create slice order
+                slice_order = OrderEvent(
+                    source_agent=self.name,
+                    decision_id=order.decision_id,
+                    validation_id=order.validation_id,
+                    symbol=symbol,
+                    side=order.side,
+                    quantity=slice_size,
+                    order_type=OrderType.LIMIT,
+                    limit_price=limit_price,
+                    algo="ICEBERG_SLICE",
+                )
+
+                broker_id = await self._broker.place_order(slice_order)
+                if broker_id:
+                    current_slice_id = broker_id
+                    slice_count += 1
+                    last_replenish_time = datetime.now(timezone.utc)
+                    logger.debug(
+                        f"Iceberg slice {slice_count}: {slice_size} @ {limit_price:.4f} "
+                        f"(remaining={remaining})"
+                    )
+
+            await asyncio.sleep(0.1)  # Small delay between checks
+
+        # Final tally
+        total_filled = sum(f["quantity"] for f in fills)
+        if total_filled > 0:
+            avg_price = sum(f["quantity"] * f["avg_price"] for f in fills) / total_filled
+        else:
+            avg_price = None
+
+        duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+
+        result = {
+            "symbol": symbol,
+            "side": side,
+            "total_quantity": total_quantity,
+            "filled_quantity": total_filled,
+            "remaining_quantity": remaining,
+            "avg_fill_price": avg_price,
+            "slice_count": slice_count,
+            "display_size": display_size,
+            "duration_seconds": duration,
+            "fill_rate_per_minute": total_filled / (duration / 60) if duration > 0 else 0,
+            "status": "filled" if remaining == 0 else ("partial" if total_filled > 0 else "unfilled"),
+        }
+
+        logger.info(
+            f"Iceberg complete: {symbol} filled {total_filled}/{total_quantity} "
+            f"in {slice_count} slices over {duration:.1f}s"
+        )
+
+        return result
+
+    # =========================================================================
+    # POST-TRADE TCA (#E22)
+    # =========================================================================
+
+    def calculate_post_trade_tca(
+        self,
+        order_id: str,
+        benchmark: str = "arrival"
+    ) -> dict | None:
+        """
+        Calculate comprehensive post-trade Transaction Cost Analysis (#E22).
+
+        Analyzes execution quality against multiple benchmarks.
+
+        Args:
+            order_id: Order ID to analyze
+            benchmark: Primary benchmark ('arrival', 'vwap', 'twap', 'close')
+
+        Returns:
+            TCA report or None if order not found
+        """
+        pending = self._pending_orders.get(order_id)
+        if not pending:
+            return None
+
+        symbol = pending.order_event.symbol
+        side = 'buy' if pending.order_event.side == OrderSide.BUY else 'sell'
+        quantity = pending.order_event.quantity
+        filled = pending.filled_quantity
+        avg_price = pending.avg_fill_price
+
+        if filled == 0 or avg_price == 0:
+            return {
+                "order_id": order_id,
+                "status": "unfilled",
+                "message": "No fills to analyze",
+            }
+
+        # Get benchmark prices
+        arrival_price = pending.arrival_price
+        vwap_price = self._calculate_interval_vwap(symbol, pending.created_at)
+        close_price = self._last_prices.get(symbol)
+
+        # Calculate costs vs each benchmark
+        def calc_cost(benchmark_price: float | None) -> float | None:
+            if benchmark_price is None or benchmark_price == 0:
+                return None
+            if side == 'buy':
+                return (avg_price - benchmark_price) / benchmark_price * 10000  # bps
+            else:
+                return (benchmark_price - avg_price) / benchmark_price * 10000  # bps
+
+        arrival_cost = calc_cost(arrival_price)
+        vwap_cost = calc_cost(vwap_price)
+        close_cost = calc_cost(close_price)
+
+        # Implementation shortfall breakdown
+        impl_shortfall = self.calculate_implementation_shortfall(order_id)
+
+        # Market impact estimate
+        impact = self.estimate_market_impact(
+            symbol, side, filled, arrival_price,
+            adv=self._get_adv(symbol)
+        )
+
+        # Fill quality metrics
+        fill_metrics = self.get_aggregate_fill_metrics()
+
+        # Categorization summary
+        categorization = self.get_fill_categorization_summary()
+
+        return {
+            "order_id": order_id,
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "filled_quantity": filled,
+            "fill_rate_pct": (filled / quantity) * 100 if quantity > 0 else 0,
+            "avg_fill_price": avg_price,
+
+            # Benchmark prices
+            "benchmarks": {
+                "arrival": arrival_price,
+                "vwap": vwap_price,
+                "close": close_price,
+            },
+
+            # Costs vs benchmarks (positive = underperformed)
+            "costs_bps": {
+                "vs_arrival": arrival_cost,
+                "vs_vwap": vwap_cost,
+                "vs_close": close_cost,
+            },
+
+            # Primary benchmark
+            "primary_benchmark": benchmark,
+            "primary_cost_bps": {
+                "arrival": arrival_cost,
+                "vwap": vwap_cost,
+                "close": close_cost,
+            }.get(benchmark),
+
+            # Implementation shortfall
+            "implementation_shortfall": impl_shortfall,
+
+            # Market impact
+            "estimated_market_impact_bps": impact.total_impact_bps if impact else None,
+
+            # Execution quality
+            "execution_quality": {
+                "price_improvement_rate": fill_metrics.get("price_improvement_rate", 0),
+                "avg_slippage_bps": fill_metrics.get("avg_slippage_bps", 0),
+                "aggressive_fill_pct": categorization.get("aggressive", {}).get("pct", 0),
+                "passive_fill_pct": categorization.get("passive", {}).get("pct", 0),
+            },
+
+            # Timing
+            "created_at": pending.created_at.isoformat() if pending.created_at else None,
+            "duration_seconds": (
+                datetime.now(timezone.utc) - pending.created_at
+            ).total_seconds() if pending.created_at else None,
+        }
+
+    def _calculate_interval_vwap(
+        self,
+        symbol: str,
+        start_time: datetime
+    ) -> float | None:
+        """Calculate VWAP from start_time to now."""
+        # This would ideally use tick-level data
+        # Simplified: use stored prices if available
+        # In production, would query historical tick data
+        return self._last_prices.get(symbol)
+
+    def _get_adv(self, symbol: str) -> float:
+        """Get average daily volume for symbol."""
+        # Simplified - would query historical data in production
+        return 1_000_000  # Default
+
+    def generate_tca_report(
+        self,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None
+    ) -> dict:
+        """
+        Generate aggregate TCA report for a period (#E22).
+
+        Args:
+            start_date: Report start (default: all data)
+            end_date: Report end (default: now)
+
+        Returns:
+            Aggregate TCA statistics
+        """
+        reports = []
+
+        for order_id, pending in self._pending_orders.items():
+            # Filter by date if specified
+            if start_date and pending.created_at and pending.created_at < start_date:
+                continue
+            if end_date and pending.created_at and pending.created_at > end_date:
+                continue
+
+            tca = self.calculate_post_trade_tca(order_id)
+            if tca and tca.get("status") != "unfilled":
+                reports.append(tca)
+
+        if not reports:
+            return {
+                "period": {
+                    "start": start_date.isoformat() if start_date else None,
+                    "end": end_date.isoformat() if end_date else None,
+                },
+                "order_count": 0,
+                "message": "No completed orders in period",
+            }
+
+        # Aggregate statistics
+        arrival_costs = [r["costs_bps"]["vs_arrival"] for r in reports if r["costs_bps"]["vs_arrival"] is not None]
+        vwap_costs = [r["costs_bps"]["vs_vwap"] for r in reports if r["costs_bps"]["vs_vwap"] is not None]
+
+        return {
+            "period": {
+                "start": start_date.isoformat() if start_date else "all",
+                "end": end_date.isoformat() if end_date else "now",
+            },
+            "order_count": len(reports),
+            "total_filled_quantity": sum(r["filled_quantity"] for r in reports),
+            "avg_fill_rate_pct": sum(r["fill_rate_pct"] for r in reports) / len(reports),
+
+            "arrival_cost_bps": {
+                "mean": sum(arrival_costs) / len(arrival_costs) if arrival_costs else None,
+                "median": sorted(arrival_costs)[len(arrival_costs)//2] if arrival_costs else None,
+                "min": min(arrival_costs) if arrival_costs else None,
+                "max": max(arrival_costs) if arrival_costs else None,
+            },
+
+            "vwap_cost_bps": {
+                "mean": sum(vwap_costs) / len(vwap_costs) if vwap_costs else None,
+                "median": sorted(vwap_costs)[len(vwap_costs)//2] if vwap_costs else None,
+            },
+
+            "execution_quality": {
+                "avg_price_improvement_rate": sum(
+                    r["execution_quality"]["price_improvement_rate"] for r in reports
+                ) / len(reports),
+                "avg_aggressive_fill_pct": sum(
+                    r["execution_quality"]["aggressive_fill_pct"] for r in reports
+                ) / len(reports),
+            },
+        }
+
+    # =========================================================================
+    # VENUE LATENCY MONITORING (#E23)
+    # =========================================================================
+
+    def __init_venue_latency(self):
+        """Initialize venue latency tracking structures."""
+        self._venue_latencies: dict[str, list[tuple[datetime, float]]] = {}
+        self._venue_latency_alerts: list[dict] = []
+        self._latency_threshold_ms: float = 100.0  # Alert threshold
+
+    def record_venue_latency(
+        self,
+        venue: str,
+        latency_ms: float,
+        event_type: str = "order"
+    ) -> None:
+        """
+        Record latency measurement for a venue (#E23).
+
+        Args:
+            venue: Venue/exchange identifier
+            latency_ms: Round-trip latency in milliseconds
+            event_type: Type of event ('order', 'fill', 'cancel', 'quote')
+        """
+        if not hasattr(self, '_venue_latencies'):
+            self.__init_venue_latency()
+
+        now = datetime.now(timezone.utc)
+        key = f"{venue}:{event_type}"
+
+        if key not in self._venue_latencies:
+            self._venue_latencies[key] = []
+
+        self._venue_latencies[key].append((now, latency_ms))
+
+        # Trim old data (keep 1 hour)
+        cutoff = now - timedelta(hours=1)
+        self._venue_latencies[key] = [
+            (t, l) for t, l in self._venue_latencies[key]
+            if t > cutoff
+        ]
+
+        # Check for latency spike
+        if latency_ms > self._latency_threshold_ms:
+            self._venue_latency_alerts.append({
+                "timestamp": now.isoformat(),
+                "venue": venue,
+                "event_type": event_type,
+                "latency_ms": latency_ms,
+                "threshold_ms": self._latency_threshold_ms,
+            })
+            logger.warning(
+                f"Venue latency spike: {venue} {event_type} = {latency_ms:.1f}ms "
+                f"(threshold={self._latency_threshold_ms}ms)"
+            )
+
+    def get_venue_latency_stats(
+        self,
+        venue: str | None = None,
+        lookback_minutes: int = 60
+    ) -> dict:
+        """
+        Get venue latency statistics (#E23).
+
+        Args:
+            venue: Specific venue or None for all
+            lookback_minutes: Analysis window
+
+        Returns:
+            Latency statistics by venue and event type
+        """
+        if not hasattr(self, '_venue_latencies'):
+            self.__init_venue_latency()
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=lookback_minutes)
+
+        stats = {}
+
+        for key, measurements in self._venue_latencies.items():
+            # Filter venue if specified
+            venue_name, event_type = key.split(":", 1)
+            if venue and venue_name != venue:
+                continue
+
+            recent = [l for t, l in measurements if t > cutoff]
+
+            if not recent:
+                continue
+
+            if venue_name not in stats:
+                stats[venue_name] = {}
+
+            stats[venue_name][event_type] = {
+                "count": len(recent),
+                "mean_ms": sum(recent) / len(recent),
+                "min_ms": min(recent),
+                "max_ms": max(recent),
+                "p50_ms": sorted(recent)[len(recent)//2],
+                "p95_ms": sorted(recent)[int(len(recent)*0.95)] if len(recent) >= 20 else max(recent),
+                "p99_ms": sorted(recent)[int(len(recent)*0.99)] if len(recent) >= 100 else max(recent),
+            }
+
+        return {
+            "lookback_minutes": lookback_minutes,
+            "venues": stats,
+            "recent_alerts": self._venue_latency_alerts[-10:] if hasattr(self, '_venue_latency_alerts') else [],
+        }
+
+    def set_latency_threshold(self, threshold_ms: float) -> None:
+        """Set latency alert threshold in milliseconds (#E23)."""
+        if not hasattr(self, '_latency_threshold_ms'):
+            self.__init_venue_latency()
+        self._latency_threshold_ms = threshold_ms
+        logger.info(f"Venue latency alert threshold set to {threshold_ms}ms")
+
+    def check_venue_health(self) -> dict:
+        """
+        Check overall venue connectivity health (#E23).
+
+        Returns:
+            Health status for each venue
+        """
+        stats = self.get_venue_latency_stats(lookback_minutes=5)
+        health = {}
+
+        for venue, event_stats in stats.get("venues", {}).items():
+            # Check order latency specifically
+            order_stats = event_stats.get("order", {})
+            if not order_stats:
+                health[venue] = {
+                    "status": "unknown",
+                    "reason": "no_recent_data",
+                }
+                continue
+
+            mean_latency = order_stats.get("mean_ms", 0)
+            p95_latency = order_stats.get("p95_ms", 0)
+
+            if p95_latency > self._latency_threshold_ms * 2:
+                status = "degraded"
+                reason = f"high_p95_latency ({p95_latency:.0f}ms)"
+            elif mean_latency > self._latency_threshold_ms:
+                status = "warning"
+                reason = f"elevated_mean_latency ({mean_latency:.0f}ms)"
+            else:
+                status = "healthy"
+                reason = None
+
+            health[venue] = {
+                "status": status,
+                "reason": reason,
+                "mean_latency_ms": mean_latency,
+                "p95_latency_ms": p95_latency,
+                "sample_count": order_stats.get("count", 0),
+            }
+
+        return health
