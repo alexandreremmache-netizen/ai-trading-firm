@@ -1,0 +1,1944 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intégration Interactive Brokers - AI Trading Firm</title>
+    <style>
+        :root {
+            --primary: #d32f2f;
+            --secondary: #c62828;
+            --accent: #ff5722;
+            --success: #2e7d32;
+            --warning: #f57f17;
+            --info: #1565c0;
+            --bg: #fafafa;
+            --card: #ffffff;
+            --text: #212121;
+            --border: #e0e0e0;
+            --ib-red: #d32f2f;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+        .header {
+            background: linear-gradient(135deg, var(--primary), #b71c1c);
+            color: white;
+            padding: 3rem 2rem;
+            text-align: center;
+        }
+        .header h1 { font-size: 2.5rem; margin-bottom: 0.5rem; }
+        .header .subtitle { opacity: 0.9; font-size: 1.2rem; }
+        .ib-logo {
+            display: inline-block;
+            background: white;
+            color: var(--ib-red);
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            font-weight: bold;
+            margin-top: 1rem;
+        }
+        .badge {
+            display: inline-block;
+            padding: 0.3rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin: 0.5rem 0.25rem;
+        }
+        .badge-paper { background: #4caf50; color: white; }
+        .badge-live { background: #f44336; color: white; }
+        .badge-api { background: #2196f3; color: white; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 2rem; }
+        .nav {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .nav h3 { color: var(--primary); margin-bottom: 1rem; }
+        .nav-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 0.5rem;
+        }
+        .nav a {
+            color: var(--secondary);
+            text-decoration: none;
+            padding: 0.5rem;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+        .nav a:hover { background: #ffebee; }
+        .section {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .section h2 {
+            color: var(--primary);
+            border-bottom: 3px solid var(--accent);
+            padding-bottom: 0.5rem;
+            margin-bottom: 1.5rem;
+        }
+        .section h3 { color: var(--secondary); margin: 1.5rem 0 1rem; }
+        .section h4 { color: #455a64; margin: 1rem 0 0.5rem; }
+        .ib-box {
+            background: linear-gradient(135deg, #ffebee, #ffcdd2);
+            border-left: 4px solid var(--primary);
+            padding: 1.5rem;
+            border-radius: 0 8px 8px 0;
+            margin: 1rem 0;
+        }
+        .ib-box .title {
+            font-weight: 700;
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+        }
+        .code-block {
+            background: #263238;
+            color: #aed581;
+            padding: 1.5rem;
+            border-radius: 8px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+            margin: 1rem 0;
+        }
+        .code-block .comment { color: #78909c; }
+        .code-block .key { color: #81d4fa; }
+        .code-block .string { color: #c5e1a5; }
+        .code-block .number { color: #ffcc80; }
+        .code-block .bool { color: #f48fb1; }
+        .code-block .class { color: #ce93d8; }
+        .code-block .func { color: #80deea; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        th {
+            background: #ffebee;
+            color: var(--primary);
+            font-weight: 600;
+        }
+        tr:hover { background: #fafafa; }
+        .flow-diagram {
+            background: #fafafa;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 2rem;
+            margin: 1rem 0;
+            overflow-x: auto;
+        }
+        .flow-node {
+            display: inline-block;
+            padding: 0.75rem 1.25rem;
+            border-radius: 8px;
+            margin: 0.25rem;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        .flow-agent { background: #e3f2fd; border: 2px solid #1976d2; }
+        .flow-ib { background: #ffebee; border: 2px solid #d32f2f; }
+        .flow-event { background: #fff3e0; border: 2px solid #f57c00; }
+        .flow-data { background: #e8f5e9; border: 2px solid #388e3c; }
+        .flow-arrow {
+            display: inline-block;
+            color: #666;
+            margin: 0 0.5rem;
+            font-size: 1.2rem;
+        }
+        .error-box {
+            background: #ffebee;
+            border-left: 4px solid var(--primary);
+            padding: 1rem;
+            margin: 0.5rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .error-code {
+            font-family: monospace;
+            background: var(--primary);
+            color: white;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            margin-right: 0.5rem;
+        }
+        .success-box {
+            background: #e8f5e9;
+            border-left: 4px solid var(--success);
+            padding: 1rem;
+            margin: 0.5rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .warning-box {
+            background: #fff8e1;
+            border-left: 4px solid var(--warning);
+            padding: 1rem;
+            margin: 0.5rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .info-box {
+            background: #e3f2fd;
+            border-left: 4px solid var(--info);
+            padding: 1rem;
+            margin: 0.5rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .timeline {
+            position: relative;
+            padding-left: 2.5rem;
+            margin: 1.5rem 0;
+        }
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 0.75rem;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: linear-gradient(to bottom, var(--primary), var(--success));
+        }
+        .timeline-item {
+            position: relative;
+            padding: 1rem 0;
+            padding-left: 1rem;
+        }
+        .timeline-item::before {
+            content: attr(data-step);
+            position: absolute;
+            left: -2.5rem;
+            top: 1rem;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: var(--primary);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 0.8rem;
+        }
+        .timeline-item.success::before { background: var(--success); }
+        .timeline-item .title { font-weight: 600; color: var(--text); }
+        .timeline-item .desc { color: #666; font-size: 0.9rem; margin-top: 0.25rem; }
+        .timeline-item .time { color: #999; font-size: 0.8rem; font-family: monospace; }
+        .api-card {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin: 1rem 0;
+            overflow: hidden;
+        }
+        .api-card-header {
+            background: #ffebee;
+            padding: 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .api-card-header .method {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            margin-right: 0.5rem;
+        }
+        .method-get { background: #4caf50; color: white; }
+        .method-post { background: #2196f3; color: white; }
+        .method-sub { background: #9c27b0; color: white; }
+        .api-card-body { padding: 1rem; }
+        .sequence-diagram {
+            font-family: monospace;
+            background: #f5f5f5;
+            padding: 1.5rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            line-height: 1.4;
+        }
+        @media (max-width: 768px) {
+            .header h1 { font-size: 1.8rem; }
+            .container { padding: 1rem; }
+            .section { padding: 1.5rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Intégration Interactive Brokers</h1>
+        <p class="subtitle">Market Data • Portfolio State • Execution</p>
+        <div class="ib-logo">Interactive Brokers</div>
+        <div style="margin-top: 1rem;">
+            <span class="badge badge-paper">Paper Trading (Défaut)</span>
+            <span class="badge badge-api">TWS API / IB Gateway</span>
+        </div>
+    </div>
+
+    <div class="container">
+        <nav class="nav">
+            <h3>Navigation</h3>
+            <div class="nav-grid">
+                <a href="#overview">1. Vue d'Ensemble</a>
+                <a href="#architecture">2. Architecture Connexion</a>
+                <a href="#market-data">3. Market Data Live</a>
+                <a href="#portfolio">4. État du Portefeuille</a>
+                <a href="#execution">5. Exécution des Ordres</a>
+                <a href="#flow">6. Flux Décision → IB</a>
+                <a href="#mapping">7. Mapping API → Agents</a>
+                <a href="#example">8. Trade End-to-End</a>
+                <a href="#errors">9. Gestion des Erreurs</a>
+                <a href="#config">10. Configuration</a>
+            </div>
+        </nav>
+
+        <!-- Section 1: Vue d'Ensemble -->
+        <section id="overview" class="section">
+            <h2>1. Vue d'Ensemble</h2>
+
+            <div class="ib-box">
+                <div class="title">Conformité CLAUDE.md - Articles 43-49</div>
+                <p><strong>"Interactive Brokers (IB) est utilisé exclusivement pour: les données de marché,
+                l'état du portefeuille, l'exécution. Le paper trading est le mode par défaut."</strong></p>
+            </div>
+
+            <h3>1.1 Rôle d'Interactive Brokers</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Fonction</th>
+                        <th>Description</th>
+                        <th>Agents Consommateurs</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Market Data</strong></td>
+                        <td>Cotations temps réel, historiques, news</td>
+                        <td>Tous les Signal Agents, CIO</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Portfolio State</strong></td>
+                        <td>Positions, cash, P&L, margin</td>
+                        <td>Risk Agent, CIO Agent</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Execution</strong></td>
+                        <td>Envoi d'ordres, fills, status</td>
+                        <td>Execution Agent (exclusif)</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>1.2 Modes de Connexion</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Mode</th>
+                        <th>Port</th>
+                        <th>Usage</th>
+                        <th>Statut</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Paper Trading</strong></td>
+                        <td>7497</td>
+                        <td>Développement, tests, simulation</td>
+                        <td><span class="badge badge-paper">DÉFAUT</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Live Trading</strong></td>
+                        <td>7496</td>
+                        <td>Production avec capital réel</td>
+                        <td><span class="badge badge-live">RESTREINT</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>IB Gateway</strong></td>
+                        <td>4001/4002</td>
+                        <td>Headless, serveurs</td>
+                        <td><span class="badge badge-api">RECOMMANDÉ</span></td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>1.3 Bibliothèque Utilisée: ib_insync</h3>
+            <div class="code-block">
+<span class="comment"># Installation</span>
+pip install ib_insync
+
+<span class="comment"># ib_insync est un wrapper asyncio autour de l'API TWS</span>
+<span class="comment"># Avantages:</span>
+<span class="comment"># - API Pythonique et moderne</span>
+<span class="comment"># - Support natif asyncio</span>
+<span class="comment"># - Reconnexion automatique</span>
+<span class="comment"># - Gestion des callbacks simplifiée</span>
+            </div>
+        </section>
+
+        <!-- Section 2: Architecture Connexion -->
+        <section id="architecture" class="section">
+            <h2>2. Architecture de Connexion</h2>
+
+            <h3>2.1 Diagramme de Connexion</h3>
+            <div class="flow-diagram" style="text-align: center;">
+                <div style="margin-bottom: 1rem;">
+                    <span class="flow-node flow-agent">Signal Agents</span>
+                    <span class="flow-node flow-agent">CIO Agent</span>
+                    <span class="flow-node flow-agent">Risk Agent</span>
+                    <span class="flow-node flow-agent">Execution Agent</span>
+                </div>
+                <div style="font-size: 1.5rem; color: #666;">↓ ↓ ↓ ↓</div>
+                <div style="margin: 1rem 0;">
+                    <span class="flow-node" style="background: #fff3e0; border-color: #ff9800; padding: 1rem 2rem;">
+                        <strong>IBBroker</strong><br>
+                        <small>Singleton / Connection Pool</small>
+                    </span>
+                </div>
+                <div style="font-size: 1.5rem; color: #666;">↓</div>
+                <div style="margin: 1rem 0;">
+                    <span class="flow-node flow-ib" style="padding: 1rem 2rem;">
+                        <strong>TWS / IB Gateway</strong><br>
+                        <small>Port 7497 (Paper) / 4002 (Gateway)</small>
+                    </span>
+                </div>
+                <div style="font-size: 1.5rem; color: #666;">↓</div>
+                <div>
+                    <span class="flow-node flow-data" style="padding: 1rem 2rem;">
+                        <strong>Interactive Brokers Servers</strong><br>
+                        <small>Market Data • Order Routing • Account</small>
+                    </span>
+                </div>
+            </div>
+
+            <h3>2.2 Classe IBBroker</h3>
+            <div class="code-block">
+<span class="key">from</span> ib_insync <span class="key">import</span> IB, Stock, LimitOrder, MarketOrder, util
+<span class="key">import</span> asyncio
+<span class="key">from</span> typing <span class="key">import</span> Optional, Dict, List
+<span class="key">from</span> dataclasses <span class="key">import</span> dataclass
+
+<span class="class">@dataclass</span>
+<span class="key">class</span> <span class="class">IBConfig</span>:
+    host: str = <span class="string">"127.0.0.1"</span>
+    port: int = <span class="number">7497</span>  <span class="comment"># Paper trading par défaut</span>
+    client_id: int = <span class="number">1</span>
+    timeout: int = <span class="number">30</span>
+    readonly: bool = <span class="bool">False</span>
+
+<span class="key">class</span> <span class="class">IBBroker</span>:
+    <span class="string">"""
+    Singleton de connexion à Interactive Brokers.
+    Conforme CLAUDE.md: IB est le broker EXCLUSIF.
+    """</span>
+
+    _instance: Optional[<span class="string">'IBBroker'</span>] = <span class="bool">None</span>
+
+    <span class="key">def</span> <span class="func">__new__</span>(cls, config: IBConfig = <span class="bool">None</span>):
+        <span class="key">if</span> cls._instance <span class="key">is</span> <span class="bool">None</span>:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = <span class="bool">False</span>
+        <span class="key">return</span> cls._instance
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, config: IBConfig = <span class="bool">None</span>):
+        <span class="key">if</span> self._initialized:
+            <span class="key">return</span>
+
+        self.config = config <span class="key">or</span> IBConfig()
+        self.ib = IB()
+        self._connected = <span class="bool">False</span>
+        self._subscriptions: Dict[str, int] = {}
+        self._initialized = <span class="bool">True</span>
+
+    <span class="key">async def</span> <span class="func">connect</span>(self) -> <span class="bool">bool</span>:
+        <span class="string">"""Établit la connexion à TWS/Gateway"""</span>
+        <span class="key">try</span>:
+            <span class="key">await</span> self.ib.connectAsync(
+                host=self.config.host,
+                port=self.config.port,
+                clientId=self.config.client_id,
+                timeout=self.config.timeout,
+                readonly=self.config.readonly
+            )
+            self._connected = <span class="bool">True</span>
+            <span class="key">return</span> <span class="bool">True</span>
+        <span class="key">except</span> Exception <span class="key">as</span> e:
+            self._connected = <span class="bool">False</span>
+            <span class="key">raise</span> IBConnectionError(f<span class="string">"Connection failed: {e}"</span>)
+
+    <span class="key">async def</span> <span class="func">disconnect</span>(self):
+        <span class="string">"""Ferme proprement la connexion"""</span>
+        <span class="key">if</span> self._connected:
+            self.ib.disconnect()
+            self._connected = <span class="bool">False</span>
+
+    <span class="key">@property</span>
+    <span class="key">def</span> <span class="func">is_connected</span>(self) -> <span class="bool">bool</span>:
+        <span class="key">return</span> self._connected <span class="key">and</span> self.ib.isConnected()
+            </div>
+
+            <h3>2.3 Gestion de la Connexion</h3>
+            <div class="warning-box">
+                <strong>Important:</strong> La connexion IB doit être établie au démarrage de l'orchestrateur
+                et maintenue pendant toute la durée de la session. La reconnexion automatique est activée.
+            </div>
+
+            <div class="code-block">
+<span class="comment"># Intégration dans l'orchestrateur principal</span>
+
+<span class="key">class</span> <span class="class">TradingFirmOrchestrator</span>:
+    <span class="key">async def</span> <span class="func">startup</span>(self):
+        <span class="comment"># 1. Connexion IB (PREMIER)</span>
+        self.broker = IBBroker(IBConfig(
+            port=<span class="number">7497</span>,  <span class="comment"># Paper trading</span>
+            client_id=<span class="number">1</span>
+        ))
+        <span class="key">await</span> self.broker.connect()
+
+        <span class="comment"># 2. Vérifier le mode</span>
+        <span class="key">if</span> self.broker.is_paper_trading:
+            logger.info(<span class="string">"Mode Paper Trading activé (conforme CLAUDE.md)"</span>)
+        <span class="key">else</span>:
+            logger.warning(<span class="string">"ATTENTION: Mode Live Trading!"</span>)
+
+        <span class="comment"># 3. Initialiser les agents avec le broker</span>
+        self.execution_agent = ExecutionAgent(self.broker)
+        self.risk_agent = RiskAgent(self.broker)
+        <span class="comment"># ... autres agents</span>
+            </div>
+        </section>
+
+        <!-- Section 3: Market Data Live -->
+        <section id="market-data" class="section">
+            <h2>3. Market Data Live</h2>
+
+            <h3>3.1 Types de Données Disponibles</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Type</th>
+                        <th>Méthode IB</th>
+                        <th>Usage</th>
+                        <th>Agents</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Streaming Quotes</strong></td>
+                        <td><code>reqMktData()</code></td>
+                        <td>Prix temps réel (bid/ask/last)</td>
+                        <td>Tous</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Historical Bars</strong></td>
+                        <td><code>reqHistoricalData()</code></td>
+                        <td>OHLCV historique</td>
+                        <td>Momentum, StatArb</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Real-time Bars</strong></td>
+                        <td><code>reqRealTimeBars()</code></td>
+                        <td>Barres 5s temps réel</td>
+                        <td>Market Making</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Option Chain</strong></td>
+                        <td><code>reqSecDefOptParams()</code></td>
+                        <td>Chaîne d'options, Greeks</td>
+                        <td>Options Vol</td>
+                    </tr>
+                    <tr>
+                        <td><strong>News</strong></td>
+                        <td><code>reqNewsArticle()</code></td>
+                        <td>Flux d'actualités</td>
+                        <td>Macro</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>3.2 Subscription Manager</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">MarketDataManager</span>:
+    <span class="string">"""Gestionnaire centralisé des abonnements market data"""</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, broker: IBBroker):
+        self.broker = broker
+        self.subscriptions: Dict[str, Ticker] = {}
+        self.callbacks: Dict[str, List[Callable]] = {}
+
+    <span class="key">async def</span> <span class="func">subscribe</span>(self, symbol: str, data_type: str = <span class="string">"TRADES"</span>) -> Ticker:
+        <span class="string">"""
+        Abonne aux données de marché pour un symbole.
+        Retourne un Ticker avec mise à jour automatique.
+        """</span>
+        <span class="key">if</span> symbol <span class="key">in</span> self.subscriptions:
+            <span class="key">return</span> self.subscriptions[symbol]
+
+        <span class="comment"># Créer le contrat</span>
+        contract = Stock(symbol, <span class="string">'SMART'</span>, <span class="string">'USD'</span>)
+        <span class="key">await</span> self.broker.ib.qualifyContractsAsync(contract)
+
+        <span class="comment"># Demander les données streaming</span>
+        ticker = self.broker.ib.reqMktData(
+            contract,
+            genericTickList=<span class="string">""</span>,
+            snapshot=<span class="bool">False</span>,
+            regulatorySnapshot=<span class="bool">False</span>
+        )
+
+        self.subscriptions[symbol] = ticker
+        <span class="key">return</span> ticker
+
+    <span class="key">async def</span> <span class="func">get_historical</span>(
+        self,
+        symbol: str,
+        duration: str = <span class="string">"1 D"</span>,
+        bar_size: str = <span class="string">"1 min"</span>,
+        what_to_show: str = <span class="string">"TRADES"</span>
+    ) -> List[BarData]:
+        <span class="string">"""Récupère les données historiques"""</span>
+        contract = Stock(symbol, <span class="string">'SMART'</span>, <span class="string">'USD'</span>)
+        <span class="key">await</span> self.broker.ib.qualifyContractsAsync(contract)
+
+        bars = <span class="key">await</span> self.broker.ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime=<span class="string">""</span>,
+            durationStr=duration,
+            barSizeSetting=bar_size,
+            whatToShow=what_to_show,
+            useRTH=<span class="bool">True</span>,
+            formatDate=<span class="number">1</span>
+        )
+        <span class="key">return</span> bars
+
+    <span class="key">async def</span> <span class="func">get_realtime_bars</span>(self, symbol: str, callback: Callable):
+        <span class="string">"""Barres 5 secondes temps réel"""</span>
+        contract = Stock(symbol, <span class="string">'SMART'</span>, <span class="string">'USD'</span>)
+        <span class="key">await</span> self.broker.ib.qualifyContractsAsync(contract)
+
+        bars = self.broker.ib.reqRealTimeBars(
+            contract,
+            barSize=<span class="number">5</span>,
+            whatToShow=<span class="string">'TRADES'</span>,
+            useRTH=<span class="bool">True</span>
+        )
+        bars.updateEvent += callback
+        <span class="key">return</span> bars
+
+    <span class="key">async def</span> <span class="func">unsubscribe</span>(self, symbol: str):
+        <span class="string">"""Annule l'abonnement"""</span>
+        <span class="key">if</span> symbol <span class="key">in</span> self.subscriptions:
+            ticker = self.subscriptions.pop(symbol)
+            self.broker.ib.cancelMktData(ticker.contract)
+            </div>
+
+            <h3>3.3 Événements Market Data → Signal Agents</h3>
+            <div class="code-block">
+<span class="comment"># Conversion des ticks IB en MarketDataEvent du système</span>
+
+<span class="key">class</span> <span class="class">IBMarketDataAdapter</span>:
+    <span class="string">"""Adapte les données IB au format interne"""</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, event_bus: EventBus, market_data: MarketDataManager):
+        self.event_bus = event_bus
+        self.market_data = market_data
+
+    <span class="key">async def</span> <span class="func">start_feed</span>(self, symbols: List[str]):
+        <span class="string">"""Démarre le flux pour l'univers d'investissement"""</span>
+        <span class="key">for</span> symbol <span class="key">in</span> symbols:
+            ticker = <span class="key">await</span> self.market_data.subscribe(symbol)
+            ticker.updateEvent += <span class="key">lambda</span> t: self._on_tick(t)
+
+    <span class="key">def</span> <span class="func">_on_tick</span>(self, ticker: Ticker):
+        <span class="string">"""Callback sur chaque tick IB"""</span>
+        <span class="key">if</span> ticker.last:
+            event = MarketDataEvent(
+                timestamp=datetime.utcnow(),
+                symbol=ticker.contract.symbol,
+                price=ticker.last,
+                bid=ticker.bid,
+                ask=ticker.ask,
+                volume=ticker.volume,
+                source=<span class="string">"interactive_brokers"</span>
+            )
+            <span class="comment"># Publier sur le bus d'événements</span>
+            asyncio.create_task(self.event_bus.publish(event))
+            </div>
+        </section>
+
+        <!-- Section 4: État du Portefeuille -->
+        <section id="portfolio" class="section">
+            <h2>4. État du Portefeuille</h2>
+
+            <h3>4.1 Données de Compte Disponibles</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Donnée</th>
+                        <th>Méthode IB</th>
+                        <th>Utilisation</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Account Summary</strong></td>
+                        <td><code>reqAccountSummary()</code></td>
+                        <td>NAV, cash, margin, buying power</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Positions</strong></td>
+                        <td><code>reqPositions()</code></td>
+                        <td>Positions actuelles par symbole</td>
+                    </tr>
+                    <tr>
+                        <td><strong>P&L</strong></td>
+                        <td><code>reqPnL()</code></td>
+                        <td>Profit/Loss temps réel</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Open Orders</strong></td>
+                        <td><code>reqOpenOrders()</code></td>
+                        <td>Ordres en attente</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Executions</strong></td>
+                        <td><code>reqExecutions()</code></td>
+                        <td>Historique des fills</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>4.2 Portfolio State Manager</h3>
+            <div class="code-block">
+<span class="key">from</span> dataclasses <span class="key">import</span> dataclass, field
+<span class="key">from</span> typing <span class="key">import</span> Dict, List
+
+<span class="class">@dataclass</span>
+<span class="key">class</span> <span class="class">PortfolioState</span>:
+    <span class="string">"""État complet du portefeuille"""</span>
+    timestamp: datetime
+    nav: float                         <span class="comment"># Net Asset Value</span>
+    cash: float                        <span class="comment"># Liquidités disponibles</span>
+    buying_power: float                <span class="comment"># Pouvoir d'achat</span>
+    margin_used: float                 <span class="comment"># Marge utilisée</span>
+    margin_available: float            <span class="comment"># Marge disponible</span>
+    unrealized_pnl: float              <span class="comment"># P&L non réalisé</span>
+    realized_pnl_today: float          <span class="comment"># P&L réalisé du jour</span>
+    positions: Dict[str, Position] = field(default_factory=dict)
+
+
+<span class="class">@dataclass</span>
+<span class="key">class</span> <span class="class">Position</span>:
+    <span class="string">"""Position sur un instrument"""</span>
+    symbol: str
+    quantity: int
+    avg_cost: float
+    market_value: float
+    unrealized_pnl: float
+    realized_pnl: float
+    weight: float  <span class="comment"># % du portefeuille</span>
+
+
+<span class="key">class</span> <span class="class">PortfolioManager</span>:
+    <span class="string">"""Gestion de l'état du portefeuille via IB"""</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, broker: IBBroker):
+        self.broker = broker
+        self._state: Optional[PortfolioState] = <span class="bool">None</span>
+        self._positions: Dict[str, Position] = {}
+
+    <span class="key">async def</span> <span class="func">refresh</span>(self) -> PortfolioState:
+        <span class="string">"""Rafraîchit l'état complet du portefeuille"""</span>
+
+        <span class="comment"># 1. Account values</span>
+        account_values = self.broker.ib.accountValues()
+        account_dict = {v.tag: float(v.value) <span class="key">for</span> v <span class="key">in</span> account_values
+                        <span class="key">if</span> v.currency == <span class="string">'USD'</span>}
+
+        <span class="comment"># 2. Positions</span>
+        ib_positions = self.broker.ib.positions()
+        positions = {}
+        <span class="key">for</span> pos <span class="key">in</span> ib_positions:
+            positions[pos.contract.symbol] = Position(
+                symbol=pos.contract.symbol,
+                quantity=pos.position,
+                avg_cost=pos.avgCost,
+                market_value=pos.position * pos.avgCost,  <span class="comment"># Approximation</span>
+                unrealized_pnl=<span class="number">0</span>,  <span class="comment"># Mis à jour via PnL</span>
+                realized_pnl=<span class="number">0</span>,
+                weight=<span class="number">0</span>
+            )
+
+        <span class="comment"># 3. Calculer les poids</span>
+        nav = account_dict.get(<span class="string">'NetLiquidation'</span>, <span class="number">0</span>)
+        <span class="key">for</span> symbol, pos <span class="key">in</span> positions.items():
+            pos.weight = pos.market_value / nav <span class="key">if</span> nav > <span class="number">0</span> <span class="key">else</span> <span class="number">0</span>
+
+        self._state = PortfolioState(
+            timestamp=datetime.utcnow(),
+            nav=nav,
+            cash=account_dict.get(<span class="string">'TotalCashValue'</span>, <span class="number">0</span>),
+            buying_power=account_dict.get(<span class="string">'BuyingPower'</span>, <span class="number">0</span>),
+            margin_used=account_dict.get(<span class="string">'MaintMarginReq'</span>, <span class="number">0</span>),
+            margin_available=account_dict.get(<span class="string">'AvailableFunds'</span>, <span class="number">0</span>),
+            unrealized_pnl=account_dict.get(<span class="string">'UnrealizedPnL'</span>, <span class="number">0</span>),
+            realized_pnl_today=account_dict.get(<span class="string">'RealizedPnL'</span>, <span class="number">0</span>),
+            positions=positions
+        )
+
+        <span class="key">return</span> self._state
+
+    <span class="key">async def</span> <span class="func">get_position</span>(self, symbol: str) -> Optional[Position]:
+        <span class="string">"""Obtient la position pour un symbole"""</span>
+        <span class="key">if</span> self._state <span class="key">is</span> <span class="bool">None</span>:
+            <span class="key">await</span> self.refresh()
+        <span class="key">return</span> self._state.positions.get(symbol)
+
+    <span class="key">async def</span> <span class="func">get_exposure</span>(self, symbol: str) -> float:
+        <span class="string">"""Retourne l'exposition en % du NAV"""</span>
+        pos = <span class="key">await</span> self.get_position(symbol)
+        <span class="key">return</span> pos.weight <span class="key">if</span> pos <span class="key">else</span> <span class="number">0.0</span>
+            </div>
+
+            <h3>4.3 Intégration avec Risk Agent</h3>
+            <div class="code-block">
+<span class="comment"># Le Risk Agent utilise le PortfolioManager pour ses calculs</span>
+
+<span class="key">class</span> <span class="class">RiskAgent</span>(ValidationAgent):
+    <span class="key">def</span> <span class="func">__init__</span>(self, broker: IBBroker):
+        super().__init__(<span class="string">"risk_agent"</span>)
+        self.portfolio = PortfolioManager(broker)
+
+    <span class="key">async def</span> <span class="func">check_position_limit</span>(self, symbol: str, new_qty: int) -> <span class="bool">bool</span>:
+        <span class="string">"""Vérifie la limite de position (5% max par CLAUDE.md)"""</span>
+        state = <span class="key">await</span> self.portfolio.refresh()
+        current_pos = state.positions.get(symbol)
+        current_qty = current_pos.quantity <span class="key">if</span> current_pos <span class="key">else</span> <span class="number">0</span>
+
+        <span class="comment"># Calculer nouvelle exposition</span>
+        price = <span class="key">await</span> self._get_current_price(symbol)
+        new_value = (current_qty + new_qty) * price
+        new_weight = new_value / state.nav
+
+        <span class="key">return</span> new_weight <= <span class="number">0.05</span>  <span class="comment"># 5% max</span>
+
+    <span class="key">async def</span> <span class="func">check_drawdown</span>(self) -> <span class="bool">bool</span>:
+        <span class="string">"""Vérifie les limites de drawdown"""</span>
+        state = <span class="key">await</span> self.portfolio.refresh()
+
+        <span class="comment"># Drawdown journalier</span>
+        daily_pnl_pct = state.realized_pnl_today / state.nav
+        <span class="key">if</span> daily_pnl_pct < -<span class="number">0.03</span>:  <span class="comment"># -3%</span>
+            <span class="key">return</span> <span class="bool">False</span>
+
+        <span class="key">return</span> <span class="bool">True</span>
+            </div>
+        </section>
+
+        <!-- Section 5: Exécution des Ordres -->
+        <section id="execution" class="section">
+            <h2>5. Exécution des Ordres</h2>
+
+            <div class="ib-box">
+                <div class="title">Règle CLAUDE.md</div>
+                <p>Seul l'Execution Agent est autorisé à envoyer des ordres à IB.
+                Aucun autre agent ne peut interagir directement avec le système d'exécution.</p>
+            </div>
+
+            <h3>5.1 Types d'Ordres Supportés</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Type</th>
+                        <th>Classe IB</th>
+                        <th>Usage</th>
+                        <th>Algorithme</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Market</strong></td>
+                        <td><code>MarketOrder</code></td>
+                        <td>Exécution immédiate</td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Limit</strong></td>
+                        <td><code>LimitOrder</code></td>
+                        <td>Prix garanti</td>
+                        <td>TWAP, VWAP</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Stop</strong></td>
+                        <td><code>StopOrder</code></td>
+                        <td>Stop loss</td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Stop Limit</strong></td>
+                        <td><code>StopLimitOrder</code></td>
+                        <td>Stop avec limite</td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Adaptive</strong></td>
+                        <td><code>Order(algoStrategy='Adaptive')</code></td>
+                        <td>Algo IB natif</td>
+                        <td>IB Adaptive</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>5.2 Order Manager</h3>
+            <div class="code-block">
+<span class="key">from</span> ib_insync <span class="key">import</span> Order, Trade, OrderStatus
+<span class="key">from</span> enum <span class="key">import</span> Enum
+
+<span class="key">class</span> <span class="class">OrderState</span>(Enum):
+    PENDING = <span class="string">"pending"</span>
+    SUBMITTED = <span class="string">"submitted"</span>
+    FILLED = <span class="string">"filled"</span>
+    CANCELLED = <span class="string">"cancelled"</span>
+    ERROR = <span class="string">"error"</span>
+
+
+<span class="key">class</span> <span class="class">OrderManager</span>:
+    <span class="string">"""Gestion des ordres via IB - EXCLUSIF à ExecutionAgent"""</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, broker: IBBroker, audit_logger: AuditLogger):
+        self.broker = broker
+        self.logger = audit_logger
+        self.pending_orders: Dict[int, Trade] = {}
+        self._setup_callbacks()
+
+    <span class="key">def</span> <span class="func">_setup_callbacks</span>(self):
+        <span class="string">"""Configure les callbacks IB pour les événements d'ordre"""</span>
+        self.broker.ib.orderStatusEvent += self._on_order_status
+        self.broker.ib.execDetailsEvent += self._on_execution
+        self.broker.ib.errorEvent += self._on_error
+
+    <span class="key">async def</span> <span class="func">submit_order</span>(
+        self,
+        symbol: str,
+        action: str,  <span class="comment"># "BUY" or "SELL"</span>
+        quantity: int,
+        order_type: str = <span class="string">"LIMIT"</span>,
+        limit_price: Optional[float] = <span class="bool">None</span>,
+        algo: Optional[str] = <span class="bool">None</span>
+    ) -> Trade:
+        <span class="string">"""
+        Soumet un ordre à IB.
+        Retourne un objet Trade pour le suivi.
+        """</span>
+
+        <span class="comment"># 1. Créer le contrat</span>
+        contract = Stock(symbol, <span class="string">'SMART'</span>, <span class="string">'USD'</span>)
+        <span class="key">await</span> self.broker.ib.qualifyContractsAsync(contract)
+
+        <span class="comment"># 2. Créer l'ordre selon le type</span>
+        <span class="key">if</span> order_type == <span class="string">"MARKET"</span>:
+            order = MarketOrder(action, quantity)
+        <span class="key">elif</span> order_type == <span class="string">"LIMIT"</span>:
+            order = LimitOrder(action, quantity, limit_price)
+        <span class="key">elif</span> order_type == <span class="string">"ADAPTIVE"</span>:
+            order = Order(
+                action=action,
+                totalQuantity=quantity,
+                orderType=<span class="string">'LMT'</span>,
+                lmtPrice=limit_price,
+                algoStrategy=<span class="string">'Adaptive'</span>,
+                algoParams=[
+                    TagValue(<span class="string">'adaptivePriority'</span>, <span class="string">'Normal'</span>)
+                ]
+            )
+        <span class="key">else</span>:
+            <span class="key">raise</span> ValueError(f<span class="string">"Unknown order type: {order_type}"</span>)
+
+        <span class="comment"># 3. Soumettre l'ordre</span>
+        trade = self.broker.ib.placeOrder(contract, order)
+        self.pending_orders[trade.order.orderId] = trade
+
+        <span class="comment"># 4. Logger pour audit</span>
+        <span class="key">await</span> self.logger.log_order_submitted(trade)
+
+        <span class="key">return</span> trade
+
+    <span class="key">async def</span> <span class="func">cancel_order</span>(self, order_id: int) -> <span class="bool">bool</span>:
+        <span class="string">"""Annule un ordre en attente"""</span>
+        <span class="key">if</span> order_id <span class="key">in</span> self.pending_orders:
+            trade = self.pending_orders[order_id]
+            self.broker.ib.cancelOrder(trade.order)
+            <span class="key">return</span> <span class="bool">True</span>
+        <span class="key">return</span> <span class="bool">False</span>
+
+    <span class="key">def</span> <span class="func">_on_order_status</span>(self, trade: Trade):
+        <span class="string">"""Callback sur changement de statut"""</span>
+        asyncio.create_task(self._handle_status_change(trade))
+
+    <span class="key">async def</span> <span class="func">_handle_status_change</span>(self, trade: Trade):
+        status = trade.orderStatus.status
+        <span class="key">if</span> status == <span class="string">'Filled'</span>:
+            <span class="key">await</span> self._on_fill(trade)
+        <span class="key">elif</span> status == <span class="string">'Cancelled'</span>:
+            <span class="key">await</span> self.logger.log_order_cancelled(trade)
+            </div>
+
+            <h3>5.3 Algorithmes d'Exécution (TWAP/VWAP)</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">TWAPExecutor</span>:
+    <span class="string">"""
+    Time-Weighted Average Price - Découpe l'ordre en tranches temporelles.
+    Conforme anti-HFT: respecte le rate limiting.
+    """</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, order_manager: OrderManager, config: dict):
+        self.order_manager = order_manager
+        self.slice_interval = config.get(<span class="string">'slice_interval_sec'</span>, <span class="number">60</span>)
+        self.num_slices = config.get(<span class="string">'num_slices'</span>, <span class="number">10</span>)
+        self.min_order_interval = <span class="number">0.1</span>  <span class="comment"># 100ms minimum (anti-HFT)</span>
+
+    <span class="key">async def</span> <span class="func">execute</span>(
+        self,
+        symbol: str,
+        action: str,
+        total_quantity: int,
+        duration_minutes: int = <span class="number">10</span>
+    ) -> List[Trade]:
+        <span class="string">"""Exécute un ordre TWAP"""</span>
+
+        <span class="comment"># Calculer la taille de chaque slice</span>
+        slice_qty = total_quantity // self.num_slices
+        remainder = total_quantity % self.num_slices
+        interval = (duration_minutes * <span class="number">60</span>) / self.num_slices
+
+        trades = []
+        <span class="key">for</span> i <span class="key">in</span> range(self.num_slices):
+            qty = slice_qty + (<span class="number">1</span> <span class="key">if</span> i < remainder <span class="key">else</span> <span class="number">0</span>)
+            <span class="key">if</span> qty > <span class="number">0</span>:
+                <span class="comment"># Obtenir le prix actuel pour limit order</span>
+                price = <span class="key">await</span> self._get_limit_price(symbol, action)
+
+                trade = <span class="key">await</span> self.order_manager.submit_order(
+                    symbol=symbol,
+                    action=action,
+                    quantity=qty,
+                    order_type=<span class="string">"LIMIT"</span>,
+                    limit_price=price
+                )
+                trades.append(trade)
+
+                <span class="comment"># Attendre avant la prochaine tranche</span>
+                <span class="key">if</span> i < self.num_slices - <span class="number">1</span>:
+                    <span class="key">await</span> asyncio.sleep(max(interval, self.min_order_interval))
+
+        <span class="key">return</span> trades
+            </div>
+        </section>
+
+        <!-- Section 6: Flux Décision → IB -->
+        <section id="flow" class="section">
+            <h2>6. Flux Décision → IB</h2>
+
+            <h3>6.1 Pipeline Complet</h3>
+            <div class="flow-diagram">
+                <div style="text-align: center;">
+                    <div style="margin-bottom: 0.5rem;">
+                        <span class="flow-node flow-event">MarketDataEvent</span>
+                        <span style="color: #666; font-size: 0.8rem;"><br>← IB Market Data</span>
+                    </div>
+                    <div style="font-size: 1.2rem; color: #666;">↓</div>
+
+                    <div style="margin: 0.5rem 0;">
+                        <span class="flow-node flow-agent">Signal Agents (Parallel)</span>
+                    </div>
+                    <div style="font-size: 1.2rem; color: #666;">↓</div>
+
+                    <div style="margin: 0.5rem 0;">
+                        <span class="flow-node flow-event">SignalEvent(s)</span>
+                    </div>
+                    <div style="font-size: 1.2rem; color: #666;">↓ Fan-in Barrier</div>
+
+                    <div style="margin: 0.5rem 0;">
+                        <span class="flow-node flow-agent">CIO Agent</span>
+                        <span style="color: #666; font-size: 0.8rem;"><br>+ Portfolio State ← IB</span>
+                    </div>
+                    <div style="font-size: 1.2rem; color: #666;">↓</div>
+
+                    <div style="margin: 0.5rem 0;">
+                        <span class="flow-node flow-event">DecisionEvent</span>
+                    </div>
+                    <div style="font-size: 1.2rem; color: #666;">↓</div>
+
+                    <div style="margin: 0.5rem 0;">
+                        <span class="flow-node flow-agent">Risk Agent</span>
+                        <span style="color: #666; font-size: 0.8rem;"><br>+ Portfolio State ← IB</span>
+                    </div>
+                    <div style="font-size: 1.2rem; color: #666;">↓</div>
+
+                    <div style="margin: 0.5rem 0;">
+                        <span class="flow-node flow-agent">Compliance Agent</span>
+                    </div>
+                    <div style="font-size: 1.2rem; color: #666;">↓</div>
+
+                    <div style="margin: 0.5rem 0;">
+                        <span class="flow-node flow-event">ComplianceApprovedEvent</span>
+                    </div>
+                    <div style="font-size: 1.2rem; color: #666;">↓</div>
+
+                    <div style="margin: 0.5rem 0;">
+                        <span class="flow-node flow-agent">Execution Agent</span>
+                    </div>
+                    <div style="font-size: 1.2rem; color: #d32f2f;">↓ SEUL agent autorisé</div>
+
+                    <div style="margin: 0.5rem 0;">
+                        <span class="flow-node flow-ib">IB Order Submission</span>
+                    </div>
+                    <div style="font-size: 1.2rem; color: #666;">↓</div>
+
+                    <div style="margin: 0.5rem 0;">
+                        <span class="flow-node flow-data">Fill Confirmation</span>
+                    </div>
+                </div>
+            </div>
+
+            <h3>6.2 Diagramme de Séquence Détaillé</h3>
+            <div class="sequence-diagram">
+IB Gateway    MarketDataMgr    SignalAgents    CIO    Risk    Compliance    Execution    OrderMgr    IB
+    │              │               │            │       │          │            │           │        │
+    │──tick───────>│               │            │       │          │            │           │        │
+    │              │──MarketData──>│            │       │          │            │           │        │
+    │              │               │──Signals──>│       │          │            │           │        │
+    │              │               │            │       │          │            │           │        │
+    │<─────────────portfolio state─────────────>│       │          │            │           │        │
+    │              │               │            │       │          │            │           │        │
+    │              │               │            │──Dec─>│          │            │           │        │
+    │<─────────────portfolio state─────────────────────>│          │            │           │        │
+    │              │               │            │       │──Valid──>│            │           │        │
+    │              │               │            │       │          │──Approved─>│           │        │
+    │              │               │            │       │          │            │──submit──>│        │
+    │              │               │            │       │          │            │           │─order─>│
+    │              │               │            │       │          │            │           │<─ack───│
+    │              │               │            │       │          │            │           │<─fill──│
+    │              │               │            │       │          │            │<──fill────│        │
+    │              │               │            │       │          │            │           │        │
+            </div>
+
+            <h3>6.3 Code du Flux Execution Agent → IB</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">ExecutionAgent</span>(BaseAgent):
+    <span class="string">"""
+    SEUL agent autorisé à interagir avec IB pour l'exécution.
+    Conforme CLAUDE.md: séparation stricte des responsabilités.
+    """</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, broker: IBBroker, config: dict):
+        super().__init__(<span class="string">"execution_agent"</span>)
+        self.broker = broker
+        self.order_manager = OrderManager(broker, self.audit_logger)
+        self.twap_executor = TWAPExecutor(self.order_manager, config)
+        self.rate_limiter = RateLimiter(
+            max_orders_per_minute=<span class="number">10</span>,  <span class="comment"># Anti-HFT</span>
+            min_interval_ms=<span class="number">100</span>
+        )
+
+    <span class="key">async def</span> <span class="func">handle_event</span>(self, event: ComplianceApprovedEvent):
+        <span class="string">"""Traite un événement approuvé et exécute l'ordre"""</span>
+
+        <span class="comment"># 1. Vérifier le rate limiting</span>
+        <span class="key">if not await</span> self.rate_limiter.can_proceed():
+            <span class="key">await</span> self._queue_for_later(event)
+            <span class="key">return</span>
+
+        <span class="comment"># 2. Déterminer l'algorithme d'exécution</span>
+        algo = self._select_execution_algo(event)
+
+        <span class="comment"># 3. Exécuter selon l'algorithme</span>
+        <span class="key">if</span> algo == <span class="string">"TWAP"</span>:
+            trades = <span class="key">await</span> self.twap_executor.execute(
+                symbol=event.symbol,
+                action=event.action,
+                total_quantity=event.quantity,
+                duration_minutes=event.execution_params.get(<span class="string">'duration'</span>, <span class="number">10</span>)
+            )
+        <span class="key">elif</span> algo == <span class="string">"MARKET"</span>:
+            trade = <span class="key">await</span> self.order_manager.submit_order(
+                symbol=event.symbol,
+                action=event.action,
+                quantity=event.quantity,
+                order_type=<span class="string">"MARKET"</span>
+            )
+            trades = [trade]
+        <span class="key">else</span>:  <span class="comment"># LIMIT par défaut</span>
+            price = <span class="key">await</span> self._calculate_limit_price(event)
+            trade = <span class="key">await</span> self.order_manager.submit_order(
+                symbol=event.symbol,
+                action=event.action,
+                quantity=event.quantity,
+                order_type=<span class="string">"LIMIT"</span>,
+                limit_price=price
+            )
+            trades = [trade]
+
+        <span class="comment"># 4. Publier l'OrderEvent</span>
+        order_event = OrderEvent(
+            decision_id=event.decision_id,
+            symbol=event.symbol,
+            action=event.action,
+            quantity=event.quantity,
+            order_ids=[t.order.orderId <span class="key">for</span> t <span class="key">in</span> trades],
+            algorithm=algo,
+            timestamp=datetime.utcnow()
+        )
+        <span class="key">await</span> self.event_bus.publish(order_event)
+
+    <span class="key">def</span> <span class="func">_select_execution_algo</span>(self, event) -> str:
+        <span class="string">"""Sélectionne l'algo selon la taille et l'urgence"""</span>
+        <span class="key">if</span> event.urgency == <span class="string">"HIGH"</span>:
+            <span class="key">return</span> <span class="string">"MARKET"</span>
+        <span class="key">elif</span> event.quantity > <span class="number">1000</span>:
+            <span class="key">return</span> <span class="string">"TWAP"</span>
+        <span class="key">else</span>:
+            <span class="key">return</span> <span class="string">"LIMIT"</span>
+            </div>
+        </section>
+
+        <!-- Section 7: Mapping API → Agents -->
+        <section id="mapping" class="section">
+            <h2>7. Mapping API IB → Agents</h2>
+
+            <h3>7.1 Tableau de Correspondance</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Agent</th>
+                        <th>API IB Utilisée</th>
+                        <th>Données</th>
+                        <th>Accès</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Macro Agent</strong></td>
+                        <td>
+                            <code>reqMktData()</code><br>
+                            <code>reqHistoricalData()</code>
+                        </td>
+                        <td>VIX, indices, yields</td>
+                        <td>Lecture seule</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Momentum Agent</strong></td>
+                        <td>
+                            <code>reqHistoricalData()</code><br>
+                            <code>reqMktData()</code>
+                        </td>
+                        <td>OHLCV historique, prix live</td>
+                        <td>Lecture seule</td>
+                    </tr>
+                    <tr>
+                        <td><strong>StatArb Agent</strong></td>
+                        <td>
+                            <code>reqHistoricalData()</code>
+                        </td>
+                        <td>Séries de prix pour cointegration</td>
+                        <td>Lecture seule</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Market Making Agent</strong></td>
+                        <td>
+                            <code>reqMktData()</code><br>
+                            <code>reqRealTimeBars()</code>
+                        </td>
+                        <td>Bid/Ask, profondeur</td>
+                        <td>Lecture seule</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Options Vol Agent</strong></td>
+                        <td>
+                            <code>reqSecDefOptParams()</code><br>
+                            <code>reqMktData()</code>
+                        </td>
+                        <td>Chaîne d'options, Greeks</td>
+                        <td>Lecture seule</td>
+                    </tr>
+                    <tr>
+                        <td><strong>CIO Agent</strong></td>
+                        <td>
+                            <code>reqAccountSummary()</code><br>
+                            <code>reqPositions()</code>
+                        </td>
+                        <td>NAV, positions pour allocation</td>
+                        <td>Lecture seule</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Risk Agent</strong></td>
+                        <td>
+                            <code>reqAccountSummary()</code><br>
+                            <code>reqPositions()</code><br>
+                            <code>reqPnL()</code>
+                        </td>
+                        <td>Margin, P&L, exposure</td>
+                        <td>Lecture seule</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Compliance Agent</strong></td>
+                        <td>(Aucune directe)</td>
+                        <td>Via Risk Agent</td>
+                        <td>Indirect</td>
+                    </tr>
+                    <tr style="background: #ffebee;">
+                        <td><strong>Execution Agent</strong></td>
+                        <td>
+                            <code>placeOrder()</code><br>
+                            <code>cancelOrder()</code><br>
+                            <code>reqOpenOrders()</code>
+                        </td>
+                        <td>Soumission, annulation, suivi</td>
+                        <td><strong>ÉCRITURE</strong></td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>7.2 Diagramme d'Accès</h3>
+            <div class="flow-diagram" style="text-align: center;">
+                <table style="margin: 0 auto; border-collapse: separate; border-spacing: 10px;">
+                    <tr>
+                        <td colspan="3" style="text-align: center;">
+                            <span class="flow-node flow-ib" style="padding: 1rem 3rem;">
+                                <strong>Interactive Brokers API</strong>
+                            </span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="text-align: center; padding: 1rem;">
+                            <div style="background: #e8f5e9; padding: 1rem; border-radius: 8px;">
+                                <strong>Market Data</strong><br>
+                                <small>reqMktData<br>reqHistoricalData<br>reqRealTimeBars</small>
+                            </div>
+                            <div style="margin-top: 0.5rem; font-size: 0.8rem; color: #666;">
+                                ↓ READ ONLY<br>
+                                Signal Agents<br>
+                                CIO Agent
+                            </div>
+                        </td>
+                        <td style="text-align: center; padding: 1rem;">
+                            <div style="background: #fff3e0; padding: 1rem; border-radius: 8px;">
+                                <strong>Account Data</strong><br>
+                                <small>reqAccountSummary<br>reqPositions<br>reqPnL</small>
+                            </div>
+                            <div style="margin-top: 0.5rem; font-size: 0.8rem; color: #666;">
+                                ↓ READ ONLY<br>
+                                Risk Agent<br>
+                                CIO Agent
+                            </div>
+                        </td>
+                        <td style="text-align: center; padding: 1rem;">
+                            <div style="background: #ffebee; padding: 1rem; border-radius: 8px;">
+                                <strong>Order Execution</strong><br>
+                                <small>placeOrder<br>cancelOrder<br>reqOpenOrders</small>
+                            </div>
+                            <div style="margin-top: 0.5rem; font-size: 0.8rem; color: #d32f2f;">
+                                ↓ WRITE<br>
+                                <strong>Execution Agent<br>UNIQUEMENT</strong>
+                            </div>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+
+            <h3>7.3 API Cards par Fonction</h3>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="method method-sub">STREAM</span>
+                    <strong>reqMktData(contract, genericTickList, snapshot, regulatorySnapshot)</strong>
+                </div>
+                <div class="api-card-body">
+                    <p><strong>Description:</strong> Abonnement aux cotations temps réel</p>
+                    <p><strong>Agents:</strong> Macro, Momentum, MarketMaking, OptionsVol</p>
+                    <p><strong>Retour:</strong> Ticker avec bid, ask, last, volume mis à jour en continu</p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="method method-get">GET</span>
+                    <strong>reqHistoricalData(contract, endDateTime, durationStr, barSizeSetting, whatToShow)</strong>
+                </div>
+                <div class="api-card-body">
+                    <p><strong>Description:</strong> Données historiques OHLCV</p>
+                    <p><strong>Agents:</strong> Momentum, StatArb</p>
+                    <p><strong>Retour:</strong> Liste de BarData (open, high, low, close, volume)</p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="method method-get">GET</span>
+                    <strong>reqAccountSummary(groupName, tags)</strong>
+                </div>
+                <div class="api-card-body">
+                    <p><strong>Description:</strong> Résumé du compte (NAV, cash, margin)</p>
+                    <p><strong>Agents:</strong> Risk, CIO</p>
+                    <p><strong>Retour:</strong> Liste d'AccountValue</p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="method method-post">POST</span>
+                    <strong>placeOrder(contract, order)</strong>
+                </div>
+                <div class="api-card-body">
+                    <p><strong>Description:</strong> Soumet un ordre au marché</p>
+                    <p><strong>Agents:</strong> <span style="color: #d32f2f; font-weight: bold;">Execution UNIQUEMENT</span></p>
+                    <p><strong>Retour:</strong> Trade object avec statut et fills</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 8: Trade End-to-End -->
+        <section id="example" class="section">
+            <h2>8. Exemple Trade End-to-End</h2>
+
+            <div class="info-box">
+                <strong>Scénario:</strong> Le système détecte une opportunité d'achat sur AAPL basée sur
+                les signaux Momentum et Macro convergents. Nous suivons le flux complet jusqu'à l'exécution.
+            </div>
+
+            <h3>8.1 Timeline du Trade</h3>
+            <div class="timeline">
+                <div class="timeline-item" data-step="1">
+                    <div class="time">T+0ms</div>
+                    <div class="title">IB Market Data → MarketDataEvent</div>
+                    <div class="desc">IB envoie un tick: AAPL last=185.50, bid=185.48, ask=185.52</div>
+                </div>
+                <div class="timeline-item" data-step="2">
+                    <div class="time">T+5ms</div>
+                    <div class="title">Signal Agents (Parallel)</div>
+                    <div class="desc">Momentum détecte breakout (+0.7), Macro confirme risk-on (+0.5)</div>
+                </div>
+                <div class="timeline-item" data-step="3">
+                    <div class="time">T+50ms</div>
+                    <div class="title">SignalBarrier Fan-in</div>
+                    <div class="desc">Tous les signaux collectés, barrier libérée</div>
+                </div>
+                <div class="timeline-item" data-step="4">
+                    <div class="time">T+55ms</div>
+                    <div class="title">CIO Agent Decision</div>
+                    <div class="desc">Agrégation: conviction=0.72, décision BUY 100 AAPL</div>
+                </div>
+                <div class="timeline-item" data-step="5">
+                    <div class="time">T+60ms</div>
+                    <div class="title">Risk Agent Validation</div>
+                    <div class="desc">Portfolio check via IB: position OK, margin OK, drawdown OK</div>
+                </div>
+                <div class="timeline-item" data-step="6">
+                    <div class="time">T+65ms</div>
+                    <div class="title">Compliance Agent Validation</div>
+                    <div class="desc">Blackout clear, no MNPI, instrument allowed</div>
+                </div>
+                <div class="timeline-item" data-step="7">
+                    <div class="time">T+70ms</div>
+                    <div class="title">Execution Agent → IB placeOrder</div>
+                    <div class="desc">Limit order @ 185.55, qty=100</div>
+                </div>
+                <div class="timeline-item success" data-step="8">
+                    <div class="time">T+250ms</div>
+                    <div class="title">IB Fill Confirmation</div>
+                    <div class="desc">Filled 100 @ 185.52 (amélioration de 3 cents)</div>
+                </div>
+            </div>
+
+            <h3>8.2 Logs Détaillés</h3>
+
+            <h4>Étape 1: Market Data Event</h4>
+            <div class="code-block">
+{
+    <span class="key">"event_type"</span>: <span class="string">"MARKET_DATA"</span>,
+    <span class="key">"timestamp"</span>: <span class="string">"2024-01-15T14:30:00.000Z"</span>,
+    <span class="key">"symbol"</span>: <span class="string">"AAPL"</span>,
+    <span class="key">"last"</span>: <span class="number">185.50</span>,
+    <span class="key">"bid"</span>: <span class="number">185.48</span>,
+    <span class="key">"ask"</span>: <span class="number">185.52</span>,
+    <span class="key">"volume"</span>: <span class="number">12500000</span>,
+    <span class="key">"source"</span>: <span class="string">"interactive_brokers"</span>
+}
+            </div>
+
+            <h4>Étape 2-3: Signal Events</h4>
+            <div class="code-block">
+<span class="comment">// Momentum Agent Signal</span>
+{
+    <span class="key">"signal_id"</span>: <span class="string">"SIG-20240115-143000-MOM-001"</span>,
+    <span class="key">"agent"</span>: <span class="string">"momentum_agent"</span>,
+    <span class="key">"symbol"</span>: <span class="string">"AAPL"</span>,
+    <span class="key">"direction"</span>: <span class="string">"LONG"</span>,
+    <span class="key">"strength"</span>: <span class="number">0.7</span>,
+    <span class="key">"confidence"</span>: <span class="number">0.85</span>,
+    <span class="key">"rationale"</span>: <span class="string">"20-day breakout confirmed, RSI momentum"</span>,
+    <span class="key">"data_sources"</span>: [
+        {<span class="key">"provider"</span>: <span class="string">"interactive_brokers"</span>, <span class="key">"type"</span>: <span class="string">"historical_bars"</span>}
+    ]
+}
+
+<span class="comment">// Macro Agent Signal</span>
+{
+    <span class="key">"signal_id"</span>: <span class="string">"SIG-20240115-143000-MACRO-001"</span>,
+    <span class="key">"agent"</span>: <span class="string">"macro_agent"</span>,
+    <span class="key">"regime"</span>: <span class="string">"RISK_ON"</span>,
+    <span class="key">"strength"</span>: <span class="number">0.5</span>,
+    <span class="key">"vix_level"</span>: <span class="number">14.5</span>,
+    <span class="key">"rationale"</span>: <span class="string">"Low VIX, positive yield curve"</span>
+}
+            </div>
+
+            <h4>Étape 4: CIO Decision</h4>
+            <div class="code-block">
+{
+    <span class="key">"decision_id"</span>: <span class="string">"DEC-20240115-143000-001"</span>,
+    <span class="key">"timestamp"</span>: <span class="string">"2024-01-15T14:30:00.055Z"</span>,
+    <span class="key">"symbol"</span>: <span class="string">"AAPL"</span>,
+    <span class="key">"action"</span>: <span class="string">"BUY"</span>,
+    <span class="key">"quantity"</span>: <span class="number">100</span>,
+    <span class="key">"conviction"</span>: <span class="number">0.72</span>,
+    <span class="key">"weighted_signal"</span>: <span class="number">0.62</span>,
+    <span class="key">"contributing_signals"</span>: [
+        {<span class="key">"agent"</span>: <span class="string">"momentum_agent"</span>, <span class="key">"weight"</span>: <span class="number">0.4</span>, <span class="key">"strength"</span>: <span class="number">0.7</span>},
+        {<span class="key">"agent"</span>: <span class="string">"macro_agent"</span>, <span class="key">"weight"</span>: <span class="number">0.3</span>, <span class="key">"strength"</span>: <span class="number">0.5</span>}
+    ],
+    <span class="key">"portfolio_context"</span>: {
+        <span class="key">"nav"</span>: <span class="number">1000000</span>,
+        <span class="key">"current_aapl_weight"</span>: <span class="number">0.02</span>,
+        <span class="key">"target_weight"</span>: <span class="number">0.04</span>
+    },
+    <span class="key">"execution_params"</span>: {
+        <span class="key">"urgency"</span>: <span class="string">"NORMAL"</span>,
+        <span class="key">"algo"</span>: <span class="string">"LIMIT"</span>
+    }
+}
+            </div>
+
+            <h4>Étape 5: Risk Validation</h4>
+            <div class="code-block">
+{
+    <span class="key">"validation_id"</span>: <span class="string">"RISK-20240115-143000-001"</span>,
+    <span class="key">"decision_id"</span>: <span class="string">"DEC-20240115-143000-001"</span>,
+    <span class="key">"result"</span>: <span class="string">"APPROVED"</span>,
+    <span class="key">"checks"</span>: {
+        <span class="key">"position_limit"</span>: {<span class="key">"passed"</span>: <span class="bool">true</span>, <span class="key">"current"</span>: <span class="number">0.02</span>, <span class="key">"after"</span>: <span class="number">0.04</span>, <span class="key">"limit"</span>: <span class="number">0.05</span>},
+        <span class="key">"sector_limit"</span>: {<span class="key">"passed"</span>: <span class="bool">true</span>, <span class="key">"tech_exposure"</span>: <span class="number">0.15</span>},
+        <span class="key">"var_limit"</span>: {<span class="key">"passed"</span>: <span class="bool">true</span>, <span class="key">"var_95"</span>: <span class="number">0.018</span>},
+        <span class="key">"drawdown"</span>: {<span class="key">"passed"</span>: <span class="bool">true</span>, <span class="key">"daily_pnl"</span>: <span class="number">0.005</span>},
+        <span class="key">"margin"</span>: {<span class="key">"passed"</span>: <span class="bool">true</span>, <span class="key">"available"</span>: <span class="number">500000</span>}
+    },
+    <span class="key">"ib_portfolio_state"</span>: {
+        <span class="key">"nav"</span>: <span class="number">1000000</span>,
+        <span class="key">"margin_used"</span>: <span class="number">150000</span>,
+        <span class="key">"buying_power"</span>: <span class="number">500000</span>
+    }
+}
+            </div>
+
+            <h4>Étape 7: Order Submission</h4>
+            <div class="code-block">
+{
+    <span class="key">"order_id"</span>: <span class="string">"ORD-20240115-143000-001"</span>,
+    <span class="key">"decision_id"</span>: <span class="string">"DEC-20240115-143000-001"</span>,
+    <span class="key">"timestamp"</span>: <span class="string">"2024-01-15T14:30:00.070Z"</span>,
+    <span class="key">"ib_order_id"</span>: <span class="number">12345</span>,
+    <span class="key">"contract"</span>: {
+        <span class="key">"symbol"</span>: <span class="string">"AAPL"</span>,
+        <span class="key">"exchange"</span>: <span class="string">"SMART"</span>,
+        <span class="key">"currency"</span>: <span class="string">"USD"</span>
+    },
+    <span class="key">"order"</span>: {
+        <span class="key">"action"</span>: <span class="string">"BUY"</span>,
+        <span class="key">"quantity"</span>: <span class="number">100</span>,
+        <span class="key">"type"</span>: <span class="string">"LMT"</span>,
+        <span class="key">"limit_price"</span>: <span class="number">185.55</span>
+    },
+    <span class="key">"status"</span>: <span class="string">"SUBMITTED"</span>
+}
+            </div>
+
+            <h4>Étape 8: Fill Event</h4>
+            <div class="code-block">
+{
+    <span class="key">"fill_id"</span>: <span class="string">"FILL-20240115-143000-001"</span>,
+    <span class="key">"order_id"</span>: <span class="string">"ORD-20240115-143000-001"</span>,
+    <span class="key">"ib_exec_id"</span>: <span class="string">"0001f4e8.65a5b2c3.01.01"</span>,
+    <span class="key">"timestamp"</span>: <span class="string">"2024-01-15T14:30:00.250Z"</span>,
+    <span class="key">"symbol"</span>: <span class="string">"AAPL"</span>,
+    <span class="key">"action"</span>: <span class="string">"BUY"</span>,
+    <span class="key">"quantity"</span>: <span class="number">100</span>,
+    <span class="key">"fill_price"</span>: <span class="number">185.52</span>,
+    <span class="key">"commission"</span>: <span class="number">1.00</span>,
+    <span class="key">"slippage"</span>: -<span class="number">0.03</span>,  <span class="comment">// Négatif = amélioration</span>
+    <span class="key">"status"</span>: <span class="string">"FILLED"</span>,
+    <span class="key">"latency_ms"</span>: <span class="number">180</span>
+}
+            </div>
+
+            <h3>8.3 Résumé du Trade</h3>
+            <div class="success-box">
+                <strong>Trade Complété avec Succès</strong>
+                <table style="margin-top: 1rem;">
+                    <tr><td>Symbole</td><td>AAPL</td></tr>
+                    <tr><td>Action</td><td>BUY</td></tr>
+                    <tr><td>Quantité</td><td>100</td></tr>
+                    <tr><td>Prix Limite</td><td>$185.55</td></tr>
+                    <tr><td>Prix Exécuté</td><td>$185.52</td></tr>
+                    <tr><td>Amélioration</td><td>$0.03/action = $3.00 total</td></tr>
+                    <tr><td>Commission</td><td>$1.00</td></tr>
+                    <tr><td>Latence Totale</td><td>250ms</td></tr>
+                </table>
+            </div>
+        </section>
+
+        <!-- Section 9: Gestion des Erreurs -->
+        <section id="errors" class="section">
+            <h2>9. Gestion des Erreurs IB</h2>
+
+            <h3>9.1 Codes d'Erreur Critiques</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Code</th>
+                        <th>Message</th>
+                        <th>Cause</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="error-code">502</span></td>
+                        <td>Couldn't connect to TWS</td>
+                        <td>TWS/Gateway non démarré</td>
+                        <td>Retry avec backoff, alerte</td>
+                    </tr>
+                    <tr>
+                        <td><span class="error-code">504</span></td>
+                        <td>Not connected</td>
+                        <td>Connexion perdue</td>
+                        <td>Reconnexion automatique</td>
+                    </tr>
+                    <tr>
+                        <td><span class="error-code">1100</span></td>
+                        <td>Connectivity lost</td>
+                        <td>Déconnexion IB</td>
+                        <td>Pause trading, reconnect</td>
+                    </tr>
+                    <tr>
+                        <td><span class="error-code">1102</span></td>
+                        <td>Connectivity restored</td>
+                        <td>Reconnexion réussie</td>
+                        <td>Reprendre trading</td>
+                    </tr>
+                    <tr>
+                        <td><span class="error-code">2104</span></td>
+                        <td>Market data farm connected</td>
+                        <td>Flux data OK</td>
+                        <td>Info, continuer</td>
+                    </tr>
+                    <tr>
+                        <td><span class="error-code">2106</span></td>
+                        <td>Historical data farm connected</td>
+                        <td>Historical OK</td>
+                        <td>Info, continuer</td>
+                    </tr>
+                    <tr>
+                        <td><span class="error-code">201</span></td>
+                        <td>Order rejected</td>
+                        <td>Ordre invalide</td>
+                        <td>Log, notifier, ne pas retry</td>
+                    </tr>
+                    <tr>
+                        <td><span class="error-code">202</span></td>
+                        <td>Order cancelled</td>
+                        <td>Annulation (user ou système)</td>
+                        <td>Log, mettre à jour état</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>9.2 Error Handler</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">IBErrorHandler</span>:
+    <span class="string">"""Gestionnaire centralisé des erreurs IB"""</span>
+
+    <span class="comment"># Erreurs nécessitant une reconnexion</span>
+    RECONNECT_ERRORS = {<span class="number">502</span>, <span class="number">504</span>, <span class="number">1100</span>, <span class="number">1300</span>}
+
+    <span class="comment"># Erreurs fatales (arrêt du système)</span>
+    FATAL_ERRORS = {<span class="number">10197</span>}  <span class="comment"># No trading permissions</span>
+
+    <span class="comment"># Erreurs d'ordre à logger mais non fatales</span>
+    ORDER_ERRORS = {<span class="number">201</span>, <span class="number">202</span>, <span class="number">203</span>, <span class="number">399</span>}
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, broker: IBBroker, orchestrator):
+        self.broker = broker
+        self.orchestrator = orchestrator
+        self.reconnect_attempts = <span class="number">0</span>
+        self.max_reconnect_attempts = <span class="number">5</span>
+        self._setup_handler()
+
+    <span class="key">def</span> <span class="func">_setup_handler</span>(self):
+        <span class="string">"""Configure le callback d'erreur IB"""</span>
+        self.broker.ib.errorEvent += self._on_error
+
+    <span class="key">async def</span> <span class="func">_on_error</span>(self, reqId: int, errorCode: int, errorString: str, contract):
+        <span class="string">"""Callback principal pour toutes les erreurs IB"""</span>
+
+        <span class="comment"># Log systématique</span>
+        <span class="key">await</span> self._log_error(reqId, errorCode, errorString, contract)
+
+        <span class="comment"># Erreur de connexion</span>
+        <span class="key">if</span> errorCode <span class="key">in</span> self.RECONNECT_ERRORS:
+            <span class="key">await</span> self._handle_connection_error(errorCode)
+
+        <span class="comment"># Erreur fatale</span>
+        <span class="key">elif</span> errorCode <span class="key">in</span> self.FATAL_ERRORS:
+            <span class="key">await</span> self._handle_fatal_error(errorCode, errorString)
+
+        <span class="comment"># Erreur d'ordre</span>
+        <span class="key">elif</span> errorCode <span class="key">in</span> self.ORDER_ERRORS:
+            <span class="key">await</span> self._handle_order_error(reqId, errorCode, errorString)
+
+        <span class="comment"># Reconnexion réussie</span>
+        <span class="key">elif</span> errorCode == <span class="number">1102</span>:
+            <span class="key">await</span> self._handle_reconnection()
+
+    <span class="key">async def</span> <span class="func">_handle_connection_error</span>(self, errorCode: int):
+        <span class="string">"""Gère les erreurs de connexion avec retry"""</span>
+        <span class="key">if</span> self.reconnect_attempts >= self.max_reconnect_attempts:
+            <span class="key">await</span> self.orchestrator.emergency_shutdown(
+                reason=f<span class="string">"IB connection failed after {self.max_reconnect_attempts} attempts"</span>
+            )
+            <span class="key">return</span>
+
+        self.reconnect_attempts += <span class="number">1</span>
+        backoff = min(<span class="number">2</span> ** self.reconnect_attempts, <span class="number">60</span>)  <span class="comment"># Max 60s</span>
+
+        logger.warning(f<span class="string">"IB connection error {errorCode}, retry in {backoff}s"</span>)
+        <span class="key">await</span> asyncio.sleep(backoff)
+
+        <span class="key">try</span>:
+            <span class="key">await</span> self.broker.connect()
+            self.reconnect_attempts = <span class="number">0</span>
+            logger.info(<span class="string">"IB reconnection successful"</span>)
+        <span class="key">except</span> Exception <span class="key">as</span> e:
+            logger.error(f<span class="string">"Reconnection failed: {e}"</span>)
+            <span class="key">await</span> self._handle_connection_error(errorCode)
+
+    <span class="key">async def</span> <span class="func">_handle_order_error</span>(self, reqId: int, errorCode: int, msg: str):
+        <span class="string">"""Gère les erreurs liées aux ordres"""</span>
+        <span class="key">if</span> errorCode == <span class="number">201</span>:  <span class="comment"># Order rejected</span>
+            <span class="key">await</span> self.orchestrator.event_bus.publish(
+                OrderRejectedEvent(
+                    order_id=reqId,
+                    reason=msg,
+                    timestamp=datetime.utcnow()
+                )
+            )
+
+    <span class="key">async def</span> <span class="func">_handle_fatal_error</span>(self, errorCode: int, msg: str):
+        <span class="string">"""Arrêt d'urgence sur erreur fatale"""</span>
+        logger.critical(f<span class="string">"FATAL IB ERROR {errorCode}: {msg}"</span>)
+        <span class="key">await</span> self.orchestrator.emergency_shutdown(
+            reason=f<span class="string">"Fatal IB error: {msg}"</span>
+        )
+            </div>
+
+            <h3>9.3 Stratégies de Résilience</h3>
+
+            <div class="info-box">
+                <strong>Reconnexion Automatique</strong>
+                <p>Backoff exponentiel: 2s → 4s → 8s → 16s → 32s → 60s (max)</p>
+                <p>Maximum 5 tentatives avant arrêt d'urgence</p>
+            </div>
+
+            <div class="warning-box">
+                <strong>Pause Trading sur Déconnexion</strong>
+                <p>Lors d'une perte de connexion (code 1100), le système:</p>
+                <ul style="margin-left: 1.5rem; margin-top: 0.5rem;">
+                    <li>Suspend immédiatement tous les nouveaux ordres</li>
+                    <li>Conserve les ordres en attente (ils restent côté IB)</li>
+                    <li>Tente la reconnexion automatique</li>
+                    <li>Reprend uniquement après confirmation (code 1102)</li>
+                </ul>
+            </div>
+
+            <div class="error-box">
+                <strong>Arrêt d'Urgence</strong>
+                <p>Déclenché si:</p>
+                <ul style="margin-left: 1.5rem; margin-top: 0.5rem;">
+                    <li>5 échecs de reconnexion consécutifs</li>
+                    <li>Erreur fatale (pas de permissions trading)</li>
+                    <li>Incohérence détectée (positions IB ≠ état interne)</li>
+                </ul>
+            </div>
+
+            <h3>9.4 Monitoring et Alertes</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">IBHealthMonitor</span>:
+    <span class="string">"""Surveillance de la santé de la connexion IB"""</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, broker: IBBroker):
+        self.broker = broker
+        self.last_heartbeat: Optional[datetime] = <span class="bool">None</span>
+        self.market_data_lag_ms: float = <span class="number">0</span>
+
+    <span class="key">async def</span> <span class="func">check_health</span>(self) -> HealthStatus:
+        <span class="string">"""Vérifie l'état de santé de la connexion"""</span>
+        checks = {}
+
+        <span class="comment"># 1. Connexion active</span>
+        checks[<span class="string">'connected'</span>] = self.broker.is_connected
+
+        <span class="comment"># 2. Temps de réponse</span>
+        start = time.time()
+        <span class="key">try</span>:
+            <span class="key">await</span> asyncio.wait_for(
+                self.broker.ib.reqCurrentTimeAsync(),
+                timeout=<span class="number">5.0</span>
+            )
+            checks[<span class="string">'latency_ms'</span>] = (time.time() - start) * <span class="number">1000</span>
+            checks[<span class="string">'responsive'</span>] = <span class="bool">True</span>
+        <span class="key">except</span> asyncio.TimeoutError:
+            checks[<span class="string">'responsive'</span>] = <span class="bool">False</span>
+
+        <span class="comment"># 3. Market data flowing</span>
+        checks[<span class="string">'market_data_active'</span>] = self._check_market_data_flow()
+
+        <span class="key">return</span> HealthStatus(
+            healthy=all([
+                checks.get(<span class="string">'connected'</span>),
+                checks.get(<span class="string">'responsive'</span>),
+                checks.get(<span class="string">'market_data_active'</span>)
+            ]),
+            checks=checks,
+            timestamp=datetime.utcnow()
+        )
+            </div>
+        </section>
+
+        <!-- Section 10: Configuration -->
+        <section id="config" class="section">
+            <h2>10. Configuration</h2>
+
+            <h3>10.1 Configuration YAML</h3>
+            <div class="code-block">
+<span class="comment"># config.yaml - Section Interactive Brokers</span>
+
+<span class="key">broker</span>:
+  <span class="key">type</span>: <span class="string">"interactive_brokers"</span>
+
+  <span class="key">connection</span>:
+    <span class="key">host</span>: <span class="string">"127.0.0.1"</span>
+    <span class="key">port</span>: <span class="number">7497</span>          <span class="comment"># 7497=Paper, 7496=Live, 4002=Gateway</span>
+    <span class="key">client_id</span>: <span class="number">1</span>
+    <span class="key">timeout</span>: <span class="number">30</span>
+    <span class="key">readonly</span>: <span class="bool">false</span>
+
+  <span class="key">paper_trading</span>:
+    <span class="key">enabled</span>: <span class="bool">true</span>        <span class="comment"># DÉFAUT selon CLAUDE.md</span>
+    <span class="key">initial_capital</span>: <span class="number">1000000</span>
+
+  <span class="key">market_data</span>:
+    <span class="key">delayed</span>: <span class="bool">false</span>       <span class="comment"># true pour données 15min delay (gratuit)</span>
+    <span class="key">snapshot</span>: <span class="bool">false</span>
+    <span class="key">generic_ticks</span>: <span class="string">""</span>   <span class="comment"># Ticks additionnels si besoin</span>
+
+  <span class="key">execution</span>:
+    <span class="key">default_exchange</span>: <span class="string">"SMART"</span>
+    <span class="key">default_currency</span>: <span class="string">"USD"</span>
+    <span class="key">tif</span>: <span class="string">"DAY"</span>           <span class="comment"># Time in Force</span>
+
+  <span class="key">resilience</span>:
+    <span class="key">max_reconnect_attempts</span>: <span class="number">5</span>
+    <span class="key">reconnect_backoff_base</span>: <span class="number">2</span>
+    <span class="key">reconnect_backoff_max</span>: <span class="number">60</span>
+    <span class="key">health_check_interval</span>: <span class="number">30</span>
+
+  <span class="key">rate_limiting</span>:          <span class="comment"># Anti-HFT (CLAUDE.md)</span>
+    <span class="key">max_orders_per_minute</span>: <span class="number">10</span>
+    <span class="key">min_order_interval_ms</span>: <span class="number">100</span>
+            </div>
+
+            <h3>10.2 Variables d'Environnement</h3>
+            <div class="code-block">
+<span class="comment"># .env (ne jamais commiter!)</span>
+
+<span class="comment"># Mode de trading (paper|live)</span>
+IB_TRADING_MODE=paper
+
+<span class="comment"># Connexion TWS/Gateway</span>
+IB_HOST=127.0.0.1
+IB_PORT=7497
+IB_CLIENT_ID=1
+
+<span class="comment"># Pour le live trading (ATTENTION!)</span>
+<span class="comment"># IB_PORT=7496</span>
+<span class="comment"># IB_ACCOUNT=DU123456</span>
+            </div>
+
+            <h3>10.3 Prérequis TWS/Gateway</h3>
+            <div class="info-box">
+                <strong>Configuration TWS Requise:</strong>
+                <ol style="margin-left: 1.5rem; margin-top: 0.5rem;">
+                    <li>File → Global Configuration → API → Settings</li>
+                    <li>Cocher "Enable ActiveX and Socket Clients"</li>
+                    <li>Port: 7497 (paper) ou 7496 (live)</li>
+                    <li>Cocher "Allow connections from localhost only"</li>
+                    <li>Décocher "Read-Only API" si exécution requise</li>
+                </ol>
+            </div>
+
+            <h3>10.4 Checklist de Démarrage</h3>
+            <div class="checklist" style="background: #f5f5f5; padding: 1.5rem; border-radius: 8px;">
+                <div style="display: flex; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid #ddd;">
+                    <span style="margin-right: 1rem;">☐</span>
+                    <span>TWS ou IB Gateway démarré et connecté</span>
+                </div>
+                <div style="display: flex; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid #ddd;">
+                    <span style="margin-right: 1rem;">☐</span>
+                    <span>API activée dans les paramètres TWS</span>
+                </div>
+                <div style="display: flex; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid #ddd;">
+                    <span style="margin-right: 1rem;">☐</span>
+                    <span>Port correct configuré (7497 paper / 7496 live)</span>
+                </div>
+                <div style="display: flex; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid #ddd;">
+                    <span style="margin-right: 1rem;">☐</span>
+                    <span>Abonnement market data actif (si données live)</span>
+                </div>
+                <div style="display: flex; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid #ddd;">
+                    <span style="margin-right: 1rem;">☐</span>
+                    <span>config.yaml vérifié</span>
+                </div>
+                <div style="display: flex; align-items: center; padding: 0.5rem 0;">
+                    <span style="margin-right: 1rem;">☐</span>
+                    <span>Mode paper trading confirmé (CLAUDE.md)</span>
+                </div>
+            </div>
+        </section>
+
+        <footer style="text-align: center; padding: 2rem; color: #666;">
+            <p>Documentation Intégration Interactive Brokers - AI Trading Firm</p>
+            <p>Conforme CLAUDE.md | Paper Trading par Défaut | ib_insync</p>
+            <p>Généré le 2024-01-15</p>
+        </footer>
+    </div>
+</body>
+</html>

@@ -1,0 +1,450 @@
+# AI Trading Firm Configuration
+# ================================
+
+firm:
+  name: "AI Trading Firm"
+  version: "1.0.0"
+  mode: "paper"  # paper | live (NEVER change to live without explicit authorization)
+
+# Interactive Brokers Configuration
+broker:
+  host: "127.0.0.1"
+  port: 4002  # 4002 for Gateway Paper, 4001 for Gateway Live, 7497 for TWS Paper
+  client_id: 2
+  timeout_seconds: 30
+  readonly: false
+  use_delayed_data: true  # Use free delayed data (no market data subscription needed)
+
+# Event Bus Configuration
+event_bus:
+  max_queue_size: 10000
+  signal_timeout_seconds: 5.0
+  sync_barrier_timeout_seconds: 10.0
+
+# Orchestrator Configuration
+orchestrator:
+  market_data_interval_seconds: 1.0
+  heartbeat_interval_seconds: 30.0
+  shutdown_timeout_seconds: 60.0
+
+# Risk Management (Capital Protection First)
+risk:
+  max_portfolio_var_pct: 2.0          # Maximum Value at Risk as % of portfolio
+  max_position_size_pct: 5.0          # Max single position as % of portfolio
+  max_sector_exposure_pct: 20.0       # Max exposure to single sector
+  max_daily_loss_pct: 3.0             # Stop trading if daily loss exceeds this
+  max_drawdown_pct: 10.0              # Stop trading if drawdown exceeds this
+  max_leverage: 2.0                   # Maximum leverage allowed
+  max_orders_per_minute: 10           # Rate limiting (anti-HFT)
+  min_order_interval_ms: 100          # Minimum time between orders (anti-HFT)
+
+# Contract Specifications
+contract_specs:
+  margin_buffer_pct: 10.0             # Additional margin buffer above exchange minimum
+
+# Futures Roll Management
+futures_roll:
+  enabled: true
+  auto_roll: true                     # Automatically generate roll signals
+  default_roll_days_before: 5         # Days before expiry to start roll
+
+# Correlation Management
+correlation:
+  lookback_days: 60                   # Rolling window for correlation
+  max_pairwise_correlation: 0.85      # Alert threshold for high correlation
+  min_history_days: 20                # Minimum data for calculation
+  regime_change_threshold: 0.15       # Sensitivity for regime detection
+
+# Enhanced VaR Settings
+var:
+  method: "all"                       # "parametric", "historical", "monte_carlo", or "all"
+  confidence_level: 0.95              # 95% confidence for VaR
+  horizon_days: 1                     # 1-day VaR
+  monte_carlo_simulations: 10000      # Number of MC simulations
+  ewma_decay_factor: 0.94             # EWMA decay for volatility
+
+# Stress Testing
+stress_testing:
+  enabled: true
+  max_scenario_loss_pct: 25.0         # Maximum acceptable scenario loss
+  margin_buffer_pct: 20.0             # Margin buffer requirement
+  run_on_startup: false               # Run stress tests at startup
+
+# Greeks Limits (Options Risk)
+greeks:
+  max_portfolio_delta: 500            # Maximum portfolio delta
+  max_portfolio_gamma: 100            # Maximum portfolio gamma
+  max_portfolio_vega: 50000           # Maximum portfolio vega
+  max_portfolio_theta: -10000         # Maximum (most negative) theta
+
+# Liquidity Risk
+liquidity:
+  max_position_pct_of_adv: 10.0       # Position must be < 10% of ADV
+  max_order_pct_of_adv: 5.0           # Order must be < 5% of ADV
+
+# Position Sizing
+position_sizing:
+  method: "kelly"                     # "kelly", "vol_target", "fixed_fractional", "equal"
+  use_half_kelly: true                # Use half-Kelly for safety
+  max_position_pct: 10.0              # Maximum position as % of portfolio
+  min_position_pct: 1.0               # Minimum position as % of portfolio
+  vol_target: 0.15                    # Target volatility (15% annual)
+  correlation_discount: true          # Reduce size for correlated positions
+
+# Cross-Strategy Risk Budget (#P3)
+risk_budget:
+  enabled: true
+  allocation_method: "risk_parity"    # "equal", "risk_parity", "performance_weighted", "fixed", "drawdown_adjusted"
+  total_risk_budget_pct: 2.0          # Total portfolio risk budget (% of NAV)
+  rebalance_drift_threshold: 0.20     # Rebalance if drift > 20% from target
+  rebalance_time_interval_hours: 24   # Check time-based rebalancing daily
+  strategy_max_drawdown: 0.10         # Max 10% drawdown per strategy before freeze
+  sharpe_freeze_threshold: -0.5       # Freeze strategy if Sharpe < -0.5
+  vol_scaling_enabled: true           # Scale down budget in high vol
+  high_vol_threshold: 0.30            # 30% vol is "high"
+  high_vol_reduction: 0.50            # Reduce budget by 50% in high vol
+  # Fixed allocations (used when method="fixed")
+  fixed_allocations:
+    MacroAgent: 0.15
+    StatArbAgent: 0.25
+    MomentumAgent: 0.25
+    MarketMakingAgent: 0.15
+    OptionsVolAgent: 0.20
+
+# Market Surveillance (MAR 2014/596/EU)
+surveillance:
+  wash_trading_detection: true
+  spoofing_detection: true
+  quote_stuffing_detection: true
+  layering_detection: true
+  wash_trading_window_seconds: 60
+  spoofing_cancel_threshold: 0.8      # 80% cancel rate triggers alert
+  quote_stuffing_rate_per_second: 10
+
+# Best Execution (RTS 27/28)
+best_execution:
+  benchmark: "vwap"                   # "arrival", "vwap", "twap"
+  slippage_alert_bps: 50              # Alert if slippage exceeds 50bps
+  report_retention_quarters: 8        # Keep 8 quarters of data
+
+# Transaction Reporting (ESMA RTS 22/23)
+# IMPORTANT: You MUST obtain a valid LEI (Legal Entity Identifier) from a
+# GLEIF-registered LOU before production. Get your LEI at: https://www.gleif.org/
+# The placeholder below will be rejected and transaction reporting will be disabled.
+transaction_reporting:
+  enabled: true
+  reporting_deadline_minutes: 15      # Report within 15 minutes
+  firm_lei: ""                        # REQUIRED: Enter your 20-character LEI here
+  firm_country: "FR"                  # France (AMF jurisdiction)
+  default_venue: "XPAR"               # Paris exchange MIC
+
+# Compliance (EU/AMF Compatible)
+compliance:
+  jurisdiction: "EU"
+  regulator: "AMF"
+  require_rationale: true             # All decisions must have rationale
+  audit_retention_days: 2555          # 7 years as per MiFID II
+  banned_instruments: []              # Instruments we cannot trade
+  allowed_asset_classes:
+    - "equity"
+    - "etf"
+    - "option"
+    - "future"
+    - "forex"
+    - "commodity"
+
+# Logging & Audit
+logging:
+  level: "INFO"
+  format: "%(asctime)s | %(name)s | %(levelname)s | %(message)s"
+  audit_file: "logs/audit.jsonl"
+  trade_file: "logs/trades.jsonl"
+  decision_file: "logs/decisions.jsonl"
+
+# Monitoring & Observability
+monitoring:
+  log_dir: "logs/agents"
+  metrics_history_size: 10000
+  metrics_retention_hours: 24
+  anomaly_zscore_threshold: 3.0
+  anomaly_min_samples: 30
+  alert_thresholds:
+    daily_pnl_pct:
+      warning: -2.0
+      critical: -3.0
+    drawdown_pct:
+      warning: 5.0
+      critical: 10.0
+    latency_ms:
+      warning: 500
+      critical: 1000
+    var_95_pct:
+      warning: 1.5
+      critical: 2.0
+
+# Sector Mapping for Risk Management
+sector_map:
+  # Equities
+  AAPL: "technology"
+  MSFT: "technology"
+  GOOGL: "technology"
+  AMZN: "consumer_discretionary"
+  META: "technology"
+  NVDA: "technology"
+  TSLA: "consumer_discretionary"
+  # ETFs
+  SPY: "index"
+  QQQ: "index"
+  IWM: "index"
+  # Futures - Index
+  ES: "index_futures"
+  NQ: "index_futures"
+  YM: "index_futures"
+  RTY: "index_futures"
+  # Futures - Energy
+  CL: "energy"
+  NG: "energy"
+  RB: "energy"
+  HO: "energy"
+  # Futures - Metals
+  GC: "precious_metals"
+  SI: "precious_metals"
+  HG: "base_metals"
+  PL: "precious_metals"
+  # Futures - Agriculture
+  ZC: "agriculture"
+  ZW: "agriculture"
+  ZS: "agriculture"
+  ZM: "agriculture"
+  ZL: "agriculture"
+  # Futures - Bonds
+  ZB: "bonds"
+  ZN: "bonds"
+  ZF: "bonds"
+  # Forex
+  EUR: "forex"
+  GBP: "forex"
+  JPY: "forex"
+
+# Universe of Instruments
+universe:
+  equities:
+    - symbol: "AAPL"
+      exchange: "SMART"
+      currency: "USD"
+    - symbol: "MSFT"
+      exchange: "SMART"
+      currency: "USD"
+    - symbol: "GOOGL"
+      exchange: "SMART"
+      currency: "USD"
+    - symbol: "AMZN"
+      exchange: "SMART"
+      currency: "USD"
+    - symbol: "META"
+      exchange: "SMART"
+      currency: "USD"
+    - symbol: "NVDA"
+      exchange: "SMART"
+      currency: "USD"
+    - symbol: "TSLA"
+      exchange: "SMART"
+      currency: "USD"
+
+  etfs:
+    - symbol: "SPY"
+      exchange: "SMART"
+      currency: "USD"
+    - symbol: "QQQ"
+      exchange: "SMART"
+      currency: "USD"
+    - symbol: "IWM"
+      exchange: "SMART"
+      currency: "USD"
+    - symbol: "GLD"        # Gold ETF
+      exchange: "SMART"
+      currency: "USD"
+    - symbol: "USO"        # Oil ETF
+      exchange: "SMART"
+      currency: "USD"
+
+  # Futures (continuous contracts)
+  futures:
+    # Index Futures
+    - symbol: "ES"         # E-mini S&P 500
+      exchange: "CME"
+      currency: "USD"
+    - symbol: "NQ"         # E-mini NASDAQ 100
+      exchange: "CME"
+      currency: "USD"
+    - symbol: "YM"         # E-mini Dow
+      exchange: "CBOT"
+      currency: "USD"
+    - symbol: "RTY"        # E-mini Russell 2000
+      exchange: "CME"
+      currency: "USD"
+
+    # Energy Futures
+    - symbol: "CL"         # Crude Oil WTI
+      exchange: "NYMEX"
+      currency: "USD"
+    - symbol: "NG"         # Natural Gas
+      exchange: "NYMEX"
+      currency: "USD"
+    - symbol: "RB"         # RBOB Gasoline
+      exchange: "NYMEX"
+      currency: "USD"
+    - symbol: "HO"         # Heating Oil
+      exchange: "NYMEX"
+      currency: "USD"
+
+    # Precious Metals
+    - symbol: "GC"         # Gold
+      exchange: "COMEX"
+      currency: "USD"
+    - symbol: "SI"         # Silver
+      exchange: "COMEX"
+      currency: "USD"
+    - symbol: "PL"         # Platinum
+      exchange: "NYMEX"
+      currency: "USD"
+    - symbol: "HG"         # Copper
+      exchange: "COMEX"
+      currency: "USD"
+
+    # Agriculture
+    - symbol: "ZC"         # Corn
+      exchange: "CBOT"
+      currency: "USD"
+    - symbol: "ZW"         # Wheat
+      exchange: "CBOT"
+      currency: "USD"
+    - symbol: "ZS"         # Soybeans
+      exchange: "CBOT"
+      currency: "USD"
+    - symbol: "ZM"         # Soybean Meal
+      exchange: "CBOT"
+      currency: "USD"
+    - symbol: "ZL"         # Soybean Oil
+      exchange: "CBOT"
+      currency: "USD"
+
+    # Bonds
+    - symbol: "ZB"         # 30-Year Treasury Bond
+      exchange: "CBOT"
+      currency: "USD"
+    - symbol: "ZN"         # 10-Year Treasury Note
+      exchange: "CBOT"
+      currency: "USD"
+    - symbol: "ZF"         # 5-Year Treasury Note
+      exchange: "CBOT"
+      currency: "USD"
+
+  # Forex (cash pairs)
+  forex:
+    - symbol: "EUR"        # EUR/USD
+      exchange: "IDEALPRO"
+      currency: "USD"
+    - symbol: "GBP"        # GBP/USD
+      exchange: "IDEALPRO"
+      currency: "USD"
+    - symbol: "JPY"        # USD/JPY (quoted as JPY)
+      exchange: "IDEALPRO"
+      currency: "JPY"
+    - symbol: "CHF"        # USD/CHF
+      exchange: "IDEALPRO"
+      currency: "CHF"
+    - symbol: "AUD"        # AUD/USD
+      exchange: "IDEALPRO"
+      currency: "USD"
+
+# Agent-Specific Configuration
+agents:
+  # ========== SIGNAL AGENTS ==========
+  macro:
+    enabled: true
+    indicators:
+      - "yield_curve"
+      - "vix"
+      - "dxy"
+    rebalance_frequency: "daily"
+
+  stat_arb:
+    enabled: true
+    lookback_days: 60
+    zscore_entry_threshold: 2.0
+    zscore_exit_threshold: 0.5
+    pairs:
+      - ["AAPL", "MSFT"]
+      - ["GOOGL", "META"]
+      - ["ES", "NQ"]       # Index futures pair
+      - ["GC", "SI"]       # Metals pair
+
+  momentum:
+    enabled: true
+    fast_period: 10
+    slow_period: 30
+    signal_period: 9
+    rsi_period: 14
+    rsi_overbought: 70
+    rsi_oversold: 30
+
+  market_making:
+    enabled: true
+    spread_bps: 10
+    max_inventory: 1000
+    quote_refresh_ms: 1000
+
+  options_vol:
+    enabled: true
+    iv_percentile_threshold: 80
+    min_dte: 7
+    max_dte: 45
+    delta_range: [0.20, 0.40]
+
+  # ========== DECISION & VALIDATION AGENTS ==========
+  cio:
+    signal_weight_macro: 0.15
+    signal_weight_stat_arb: 0.25
+    signal_weight_momentum: 0.25
+    signal_weight_market_making: 0.15
+    signal_weight_options_vol: 0.20
+    min_conviction_threshold: 0.6
+    max_concurrent_decisions: 5
+    # Dynamic weight settings
+    use_dynamic_weights: true
+    performance_weight_factor: 0.3
+    regime_weight_factor: 0.2
+    # Position sizing
+    use_kelly_sizing: true
+    kelly_fraction: 0.5               # Half-Kelly
+    base_position_size: 100
+    max_position_size: 1000
+
+  execution:
+    default_algo: "TWAP"
+    slice_interval_seconds: 60
+    max_slippage_bps: 50
+
+  risk_compliance:
+    check_interval_seconds: 1.0
+    emergency_liquidation: false
+
+  # Surveillance agent
+  surveillance:
+    enabled: true
+
+  # Transaction reporting agent
+  transaction_reporting:
+    enabled: true
+
+# Performance Attribution
+attribution:
+  rolling_window_days: 30
+  risk_free_rate: 0.05                # 5% annual
+
+# Seasonality Strategy
+seasonality:
+  enabled: true
+  min_win_rate: 0.55                  # Minimum historical win rate
+  min_patterns: 1                     # Minimum confirming patterns

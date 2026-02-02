@@ -1,0 +1,1609 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trading Firm - CIO Agent Logic</title>
+    <style>
+        :root {
+            --bg-primary: #1a1b26;
+            --bg-secondary: #24283b;
+            --bg-tertiary: #414868;
+            --accent-blue: #7aa2f7;
+            --accent-cyan: #7dcfff;
+            --accent-green: #9ece6a;
+            --accent-yellow: #e0af68;
+            --accent-orange: #ff9e64;
+            --accent-red: #f7768e;
+            --accent-magenta: #bb9af7;
+            --text-primary: #c0caf5;
+            --text-secondary: #a9b1d6;
+            --text-muted: #565f89;
+            --border: #3b4261;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.7;
+        }
+
+        .container {
+            max-width: 1300px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            padding: 3rem 0;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 2rem;
+            background: linear-gradient(180deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+            border-radius: 12px;
+        }
+
+        header h1 {
+            font-size: 2.2rem;
+            color: var(--accent-magenta);
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+        }
+
+        header .subtitle {
+            color: var(--text-muted);
+            font-size: 1rem;
+        }
+
+        .role-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, var(--accent-red), var(--accent-magenta));
+            color: white;
+            padding: 0.5rem 1.5rem;
+            border-radius: 25px;
+            font-weight: bold;
+            margin-top: 1rem;
+            font-size: 0.85rem;
+            letter-spacing: 1px;
+        }
+
+        section {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        section h2 {
+            color: var(--accent-cyan);
+            font-size: 1.3rem;
+            margin-bottom: 1.5rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        section h2 .num {
+            background: var(--accent-magenta);
+            color: var(--bg-primary);
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.9rem;
+        }
+
+        h3 {
+            color: var(--accent-yellow);
+            margin: 1.5rem 0 1rem;
+            font-size: 1.1rem;
+        }
+
+        h4 {
+            color: var(--accent-green);
+            margin: 1rem 0 0.5rem;
+            font-size: 0.95rem;
+        }
+
+        p {
+            color: var(--text-secondary);
+            margin-bottom: 1rem;
+        }
+
+        .algorithm-box {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--accent-magenta);
+            border-radius: 6px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+            overflow-x: auto;
+        }
+
+        .algorithm-box .title {
+            color: var(--accent-magenta);
+            font-weight: bold;
+            margin-bottom: 1rem;
+            font-size: 1rem;
+        }
+
+        .pseudo-code {
+            font-size: 0.85rem;
+            line-height: 1.8;
+        }
+
+        .pseudo-code .keyword {
+            color: var(--accent-magenta);
+            font-weight: bold;
+        }
+
+        .pseudo-code .function {
+            color: var(--accent-blue);
+        }
+
+        .pseudo-code .comment {
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        .pseudo-code .string {
+            color: var(--accent-green);
+        }
+
+        .pseudo-code .number {
+            color: var(--accent-orange);
+        }
+
+        .pseudo-code .type {
+            color: var(--accent-cyan);
+        }
+
+        .pseudo-code .operator {
+            color: var(--accent-red);
+        }
+
+        .pseudo-code .indent-1 { padding-left: 2rem; }
+        .pseudo-code .indent-2 { padding-left: 4rem; }
+        .pseudo-code .indent-3 { padding-left: 6rem; }
+        .pseudo-code .indent-4 { padding-left: 8rem; }
+
+        .formula-box {
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+            text-align: center;
+            font-size: 1.1rem;
+        }
+
+        .formula-box .formula {
+            color: var(--accent-cyan);
+            font-family: 'Times New Roman', serif;
+            font-size: 1.3rem;
+            margin: 0.5rem 0;
+        }
+
+        .formula-box .description {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            margin-top: 0.5rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+
+        th, td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border: 1px solid var(--border);
+        }
+
+        th {
+            background: var(--bg-tertiary);
+            color: var(--accent-cyan);
+            font-weight: 600;
+        }
+
+        tr:hover {
+            background: rgba(122, 162, 247, 0.05);
+        }
+
+        .weight-bar {
+            height: 8px;
+            background: var(--bg-primary);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 0.25rem;
+        }
+
+        .weight-bar .fill {
+            height: 100%;
+            border-radius: 4px;
+        }
+
+        .fill-macro { background: var(--accent-blue); width: 15%; }
+        .fill-statarb { background: var(--accent-green); width: 25%; }
+        .fill-momentum { background: var(--accent-yellow); width: 25%; }
+        .fill-mm { background: var(--accent-orange); width: 15%; }
+        .fill-options { background: var(--accent-magenta); width: 20%; }
+
+        .decision-flow {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            margin: 1.5rem 0;
+        }
+
+        .flow-step {
+            display: flex;
+            align-items: stretch;
+            gap: 1rem;
+        }
+
+        .flow-connector {
+            width: 40px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .flow-dot {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--accent-magenta);
+            flex-shrink: 0;
+        }
+
+        .flow-line {
+            width: 2px;
+            flex: 1;
+            background: var(--border);
+        }
+
+        .flow-content {
+            flex: 1;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+        }
+
+        .flow-content.check { border-left: 3px solid var(--accent-yellow); }
+        .flow-content.compute { border-left: 3px solid var(--accent-blue); }
+        .flow-content.decide { border-left: 3px solid var(--accent-green); }
+        .flow-content.reject { border-left: 3px solid var(--accent-red); }
+        .flow-content.output { border-left: 3px solid var(--accent-magenta); }
+
+        .flow-title {
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+        }
+
+        .flow-content.check .flow-title { color: var(--accent-yellow); }
+        .flow-content.compute .flow-title { color: var(--accent-blue); }
+        .flow-content.decide .flow-title { color: var(--accent-green); }
+        .flow-content.reject .flow-title { color: var(--accent-red); }
+        .flow-content.output .flow-title { color: var(--accent-magenta); }
+
+        .flow-desc {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .case-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+
+        .case-card {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.25rem;
+        }
+
+        .case-card.trade { border-top: 3px solid var(--accent-green); }
+        .case-card.no-trade { border-top: 3px solid var(--accent-red); }
+        .case-card.conflict { border-top: 3px solid var(--accent-yellow); }
+
+        .case-card h4 {
+            margin-top: 0;
+        }
+
+        .case-card ul {
+            list-style: none;
+            margin-top: 0.75rem;
+        }
+
+        .case-card li {
+            padding: 0.25rem 0;
+            padding-left: 1.5rem;
+            position: relative;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        .case-card li::before {
+            content: '→';
+            position: absolute;
+            left: 0;
+            color: var(--text-muted);
+        }
+
+        .json-output {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1.5rem;
+            overflow-x: auto;
+            font-size: 0.85rem;
+            line-height: 1.6;
+        }
+
+        .json-output .key { color: var(--accent-cyan); }
+        .json-output .string { color: var(--accent-green); }
+        .json-output .number { color: var(--accent-orange); }
+        .json-output .bool { color: var(--accent-magenta); }
+        .json-output .null { color: var(--text-muted); }
+
+        .signal-example {
+            background: var(--bg-primary);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 0.5rem 0;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .signal-agent {
+            font-weight: bold;
+            min-width: 120px;
+        }
+
+        .signal-agent.macro { color: var(--accent-blue); }
+        .signal-agent.statarb { color: var(--accent-green); }
+        .signal-agent.momentum { color: var(--accent-yellow); }
+        .signal-agent.mm { color: var(--accent-orange); }
+        .signal-agent.options { color: var(--accent-magenta); }
+
+        .signal-direction {
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+
+        .signal-direction.long { background: var(--accent-green); color: var(--bg-primary); }
+        .signal-direction.short { background: var(--accent-red); color: white; }
+        .signal-direction.flat { background: var(--bg-tertiary); color: var(--text-muted); }
+
+        .signal-strength {
+            font-family: monospace;
+            color: var(--text-secondary);
+        }
+
+        .signal-confidence {
+            font-family: monospace;
+            color: var(--accent-cyan);
+        }
+
+        .diagram {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1.5rem;
+            overflow-x: auto;
+            font-size: 0.75rem;
+            line-height: 1.3;
+            white-space: pre;
+            color: var(--accent-green);
+        }
+
+        .info-box {
+            background: rgba(122, 162, 247, 0.1);
+            border: 1px solid var(--accent-blue);
+            border-radius: 6px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+
+        .info-box.warning {
+            background: rgba(224, 175, 104, 0.1);
+            border-color: var(--accent-yellow);
+        }
+
+        .info-box.danger {
+            background: rgba(247, 118, 142, 0.1);
+            border-color: var(--accent-red);
+        }
+
+        .info-box.success {
+            background: rgba(158, 206, 106, 0.1);
+            border-color: var(--accent-green);
+        }
+
+        .info-box strong {
+            color: var(--accent-blue);
+        }
+
+        .info-box.warning strong { color: var(--accent-yellow); }
+        .info-box.danger strong { color: var(--accent-red); }
+        .info-box.success strong { color: var(--accent-green); }
+
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            border-top: 1px solid var(--border);
+            margin-top: 2rem;
+        }
+
+        footer a {
+            color: var(--accent-cyan);
+            text-decoration: none;
+        }
+
+        .tag {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 3px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            margin: 0.1rem;
+        }
+
+        .tag-blue { background: var(--accent-blue); color: var(--bg-primary); }
+        .tag-green { background: var(--accent-green); color: var(--bg-primary); }
+        .tag-yellow { background: var(--accent-yellow); color: var(--bg-primary); }
+        .tag-red { background: var(--accent-red); color: white; }
+        .tag-magenta { background: var(--accent-magenta); color: var(--bg-primary); }
+
+        @media (max-width: 768px) {
+            .container { padding: 1rem; }
+            header h1 { font-size: 1.6rem; letter-spacing: 1px; }
+            .diagram { font-size: 0.6rem; }
+            section { padding: 1rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>CIO Agent</h1>
+            <p class="subtitle">Chief Investment Officer - Logique Décisionnelle</p>
+            <div class="role-badge">🎯 UNIQUE AUTORITÉ DE DÉCISION</div>
+        </header>
+
+        <!-- Section 1: Role -->
+        <section>
+            <h2><span class="num">1</span> Rôle et Responsabilités</h2>
+
+            <p>Le CIO Agent est l'<strong>unique décideur</strong> du système, conformément à CLAUDE.md :</p>
+
+            <div class="info-box">
+                <strong>Constitution CLAUDE.md :</strong><br>
+                "Une et une seule autorité de décision : l'agent CIO"
+            </div>
+
+            <h3>Responsabilités</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Fait</th>
+                        <th>Ne fait PAS</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>✓ Agrège les signaux des 5 agents</td>
+                        <td>✗ Ne génère PAS de signaux</td>
+                    </tr>
+                    <tr>
+                        <td>✓ Applique la pondération stratégique</td>
+                        <td>✗ N'exécute PAS d'ordres</td>
+                    </tr>
+                    <tr>
+                        <td>✓ Gère les conflits entre signaux</td>
+                        <td>✗ Ne valide PAS le risque</td>
+                    </tr>
+                    <tr>
+                        <td>✓ Décide: TRADE ou NO-TRADE</td>
+                        <td>✗ Ne modifie PAS les stratégies</td>
+                    </tr>
+                    <tr>
+                        <td>✓ Produit DecisionEvent avec rationale</td>
+                        <td>✗ N'accède PAS directement au broker</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Section 2: Input Signals -->
+        <section>
+            <h2><span class="num">2</span> Signaux en Entrée</h2>
+
+            <p>Le CIO reçoit les signaux de la barrière de synchronisation après le fan-in :</p>
+
+            <h3>Structure d'un SignalEvent</h3>
+            <div class="json-output">
+{
+    <span class="key">"event_id"</span>: <span class="string">"sig_abc123"</span>,
+    <span class="key">"source_agent"</span>: <span class="string">"MacroAgent"</span>,
+    <span class="key">"timestamp"</span>: <span class="string">"2024-01-15T14:30:00Z"</span>,
+    <span class="key">"strategy_name"</span>: <span class="string">"macro_vix_regime"</span>,
+    <span class="key">"symbol"</span>: <span class="string">"SPY"</span>,
+    <span class="key">"direction"</span>: <span class="string">"LONG"</span>,           <span class="comment">// LONG | SHORT | FLAT</span>
+    <span class="key">"strength"</span>: <span class="number">0.75</span>,              <span class="comment">// [-1.0, +1.0]</span>
+    <span class="key">"confidence"</span>: <span class="number">0.82</span>,            <span class="comment">// [0.0, 1.0]</span>
+    <span class="key">"horizon"</span>: <span class="string">"medium"</span>,           <span class="comment">// short | medium | long</span>
+    <span class="key">"target_price"</span>: <span class="number">485.50</span>,
+    <span class="key">"stop_loss"</span>: <span class="number">470.00</span>,
+    <span class="key">"rationale"</span>: <span class="string">"VIX &lt; 15, yield curve positive, risk-on regime"</span>,
+    <span class="key">"data_sources"</span>: [<span class="string">"VIX"</span>, <span class="string">"TLT"</span>, <span class="string">"IB_market_data"</span>]
+}
+            </div>
+
+            <h3>Exemple de Signaux Reçus</h3>
+            <div class="signal-example">
+                <span class="signal-agent macro">MacroAgent</span>
+                <span class="signal-direction long">LONG</span>
+                <span class="signal-strength">strength: +0.75</span>
+                <span class="signal-confidence">conf: 82%</span>
+            </div>
+            <div class="signal-example">
+                <span class="signal-agent statarb">StatArbAgent</span>
+                <span class="signal-direction short">SHORT</span>
+                <span class="signal-strength">strength: -0.60</span>
+                <span class="signal-confidence">conf: 75%</span>
+            </div>
+            <div class="signal-example">
+                <span class="signal-agent momentum">MomentumAgent</span>
+                <span class="signal-direction long">LONG</span>
+                <span class="signal-strength">strength: +0.85</span>
+                <span class="signal-confidence">conf: 78%</span>
+            </div>
+            <div class="signal-example">
+                <span class="signal-agent mm">MarketMaking</span>
+                <span class="signal-direction flat">FLAT</span>
+                <span class="signal-strength">strength: 0.00</span>
+                <span class="signal-confidence">conf: 65%</span>
+            </div>
+            <div class="signal-example">
+                <span class="signal-agent options">OptionsVol</span>
+                <span class="signal-direction short">SHORT</span>
+                <span class="signal-strength">strength: -0.40</span>
+                <span class="signal-confidence">conf: 70%</span>
+            </div>
+        </section>
+
+        <!-- Section 3: Weighting -->
+        <section>
+            <h2><span class="num">3</span> Système de Pondération</h2>
+
+            <h3>3.1 Poids Stratégiques par Agent</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Agent</th>
+                        <th>Poids Base</th>
+                        <th>Horizon</th>
+                        <th>Justification</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="tag tag-blue">MacroAgent</span></td>
+                        <td>
+                            15%
+                            <div class="weight-bar"><div class="fill fill-macro"></div></div>
+                        </td>
+                        <td>Long terme</td>
+                        <td>Contexte général, bruit court terme</td>
+                    </tr>
+                    <tr>
+                        <td><span class="tag tag-green">StatArbAgent</span></td>
+                        <td>
+                            25%
+                            <div class="weight-bar"><div class="fill fill-statarb"></div></div>
+                        </td>
+                        <td>Moyen terme</td>
+                        <td>Mean reversion statistique prouvée</td>
+                    </tr>
+                    <tr>
+                        <td><span class="tag tag-yellow">MomentumAgent</span></td>
+                        <td>
+                            25%
+                            <div class="weight-bar"><div class="fill fill-momentum"></div></div>
+                        </td>
+                        <td>Court/Moyen</td>
+                        <td>Signaux techniques fiables</td>
+                    </tr>
+                    <tr>
+                        <td><span class="tag tag-magenta">MarketMaking</span></td>
+                        <td>
+                            15%
+                            <div class="weight-bar"><div class="fill fill-mm"></div></div>
+                        </td>
+                        <td>Court terme</td>
+                        <td>Microstructure, liquidité</td>
+                    </tr>
+                    <tr>
+                        <td><span class="tag tag-magenta">OptionsVol</span></td>
+                        <td>
+                            20%
+                            <div class="weight-bar"><div class="fill fill-options"></div></div>
+                        </td>
+                        <td>Moyen terme</td>
+                        <td>Information sur volatilité implicite</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>3.2 Ajustement Dynamique des Poids</h3>
+
+            <div class="formula-box">
+                <div class="formula">W<sub>final</sub>(agent) = W<sub>base</sub> × C<sub>confidence</sub> × C<sub>regime</sub> × C<sub>horizon</sub></div>
+                <div class="description">Le poids final intègre la confiance du signal et le contexte de marché</div>
+            </div>
+
+            <div class="algorithm-box">
+                <div class="title">ALGORITHME: Calcul des Poids Ajustés</div>
+                <div class="pseudo-code">
+<span class="keyword">function</span> <span class="function">calculate_adjusted_weights</span>(signals, market_regime):
+
+    <span class="comment">// Poids de base configurés</span>
+    base_weights = {
+        <span class="string">"MacroAgent"</span>:     <span class="number">0.15</span>,
+        <span class="string">"StatArbAgent"</span>:   <span class="number">0.25</span>,
+        <span class="string">"MomentumAgent"</span>:  <span class="number">0.25</span>,
+        <span class="string">"MarketMaking"</span>:   <span class="number">0.15</span>,
+        <span class="string">"OptionsVol"</span>:     <span class="number">0.20</span>
+    }
+
+    adjusted_weights = {}
+
+    <span class="keyword">for</span> agent_name, signal <span class="keyword">in</span> signals:
+
+        w = base_weights[agent_name]
+
+        <span class="comment">// Ajustement par confiance du signal</span>
+        <span class="comment">// Confiance haute = poids augmenté</span>
+        confidence_factor = <span class="number">0.5</span> + (signal.confidence × <span class="number">0.5</span>)
+        w = w × confidence_factor
+
+        <span class="comment">// Ajustement par régime de marché</span>
+        <span class="keyword">if</span> market_regime == <span class="string">"high_volatility"</span>:
+            <span class="keyword">if</span> agent_name == <span class="string">"MacroAgent"</span>:
+                w = w × <span class="number">1.3</span>    <span class="comment">// Macro plus important en crise</span>
+            <span class="keyword">if</span> agent_name == <span class="string">"MomentumAgent"</span>:
+                w = w × <span class="number">0.7</span>    <span class="comment">// Momentum moins fiable</span>
+
+        <span class="keyword">if</span> market_regime == <span class="string">"low_volatility"</span>:
+            <span class="keyword">if</span> agent_name == <span class="string">"StatArbAgent"</span>:
+                w = w × <span class="number">1.2</span>    <span class="comment">// Mean reversion fonctionne mieux</span>
+            <span class="keyword">if</span> agent_name == <span class="string">"MarketMaking"</span>:
+                w = w × <span class="number">1.2</span>    <span class="comment">// Spreads plus stables</span>
+
+        <span class="comment">// Ajustement par horizon</span>
+        <span class="keyword">if</span> signal.horizon == <span class="string">"short"</span> <span class="keyword">and</span> agent_name <span class="keyword">in</span> [<span class="string">"MacroAgent"</span>]:
+            w = w × <span class="number">0.8</span>    <span class="comment">// Macro moins pertinent court terme</span>
+
+        adjusted_weights[agent_name] = w
+
+    <span class="comment">// Normaliser pour que la somme = 1.0</span>
+    total = <span class="function">sum</span>(adjusted_weights.values())
+    <span class="keyword">for</span> agent <span class="keyword">in</span> adjusted_weights:
+        adjusted_weights[agent] = adjusted_weights[agent] / total
+
+    <span class="keyword">return</span> adjusted_weights
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 4: Aggregation -->
+        <section>
+            <h2><span class="num">4</span> Algorithme d'Agrégation</h2>
+
+            <h3>4.1 Calcul du Signal Agrégé</h3>
+
+            <div class="formula-box">
+                <div class="formula">S<sub>agg</sub> = Σ (W<sub>i</sub> × strength<sub>i</sub> × sign(direction<sub>i</sub>))</div>
+                <div class="description">Signal agrégé pondéré avec direction (-1 SHORT, 0 FLAT, +1 LONG)</div>
+            </div>
+
+            <div class="formula-box">
+                <div class="formula">C<sub>agg</sub> = Σ (W<sub>i</sub> × confidence<sub>i</sub>)</div>
+                <div class="description">Confiance agrégée pondérée</div>
+            </div>
+
+            <div class="algorithm-box">
+                <div class="title">ALGORITHME: Agrégation des Signaux</div>
+                <div class="pseudo-code">
+<span class="keyword">function</span> <span class="function">aggregate_signals</span>(signals: <span class="type">Dict[str, SignalEvent]</span>) -> <span class="type">AggregatedSignal</span>:
+
+    <span class="comment">// Calculer les poids ajustés</span>
+    weights = <span class="function">calculate_adjusted_weights</span>(signals, current_regime)
+
+    <span class="comment">// Initialiser accumulateurs</span>
+    weighted_strength = <span class="number">0.0</span>
+    weighted_confidence = <span class="number">0.0</span>
+    long_votes = <span class="number">0.0</span>
+    short_votes = <span class="number">0.0</span>
+    flat_votes = <span class="number">0.0</span>
+
+    contributing_signals = []
+    data_sources = <span class="function">Set</span>()
+    rationales = []
+
+    <span class="keyword">for</span> agent_name, signal <span class="keyword">in</span> signals.items():
+
+        w = weights[agent_name]
+
+        <span class="comment">// Direction numérique</span>
+        direction_value = {
+            <span class="string">"LONG"</span>:  +<span class="number">1.0</span>,
+            <span class="string">"SHORT"</span>: -<span class="number">1.0</span>,
+            <span class="string">"FLAT"</span>:   <span class="number">0.0</span>
+        }[signal.direction]
+
+        <span class="comment">// Accumuler force pondérée</span>
+        weighted_strength += w × signal.strength × direction_value
+
+        <span class="comment">// Accumuler confiance pondérée</span>
+        weighted_confidence += w × signal.confidence
+
+        <span class="comment">// Compter les votes par direction</span>
+        <span class="keyword">if</span> signal.direction == <span class="string">"LONG"</span>:
+            long_votes += w
+        <span class="keyword">elif</span> signal.direction == <span class="string">"SHORT"</span>:
+            short_votes += w
+        <span class="keyword">else</span>:
+            flat_votes += w
+
+        <span class="comment">// Collecter métadonnées</span>
+        contributing_signals.<span class="function">append</span>(signal.event_id)
+        data_sources.<span class="function">update</span>(signal.data_sources)
+        rationales.<span class="function">append</span>(f<span class="string">"{agent_name}: {signal.rationale}"</span>)
+
+    <span class="comment">// Déterminer direction consensus</span>
+    consensus_direction = <span class="function">determine_consensus</span>(long_votes, short_votes, flat_votes)
+
+    <span class="keyword">return</span> <span class="type">AggregatedSignal</span>(
+        weighted_strength = weighted_strength,
+        weighted_confidence = weighted_confidence,
+        consensus_direction = consensus_direction,
+        long_votes = long_votes,
+        short_votes = short_votes,
+        flat_votes = flat_votes,
+        contributing_signals = contributing_signals,
+        data_sources = data_sources,
+        rationales = rationales
+    )
+                </div>
+            </div>
+
+            <h3>4.2 Détermination du Consensus</h3>
+
+            <div class="algorithm-box">
+                <div class="title">ALGORITHME: Consensus Directionnel</div>
+                <div class="pseudo-code">
+<span class="keyword">function</span> <span class="function">determine_consensus</span>(long_votes, short_votes, flat_votes) -> <span class="type">Direction</span>:
+
+    total_votes = long_votes + short_votes + flat_votes
+
+    <span class="comment">// Seuil de majorité: 40% minimum pour une direction</span>
+    MAJORITY_THRESHOLD = <span class="number">0.40</span>
+
+    <span class="comment">// Seuil de conflit: écart minimum entre LONG et SHORT</span>
+    CONFLICT_THRESHOLD = <span class="number">0.15</span>
+
+    long_pct = long_votes / total_votes
+    short_pct = short_votes / total_votes
+
+    <span class="comment">// Cas 1: Majorité claire LONG</span>
+    <span class="keyword">if</span> long_pct >= MAJORITY_THRESHOLD <span class="keyword">and</span> long_pct > short_pct + CONFLICT_THRESHOLD:
+        <span class="keyword">return</span> <span class="string">"LONG"</span>
+
+    <span class="comment">// Cas 2: Majorité claire SHORT</span>
+    <span class="keyword">if</span> short_pct >= MAJORITY_THRESHOLD <span class="keyword">and</span> short_pct > long_pct + CONFLICT_THRESHOLD:
+        <span class="keyword">return</span> <span class="string">"SHORT"</span>
+
+    <span class="comment">// Cas 3: Conflit ou pas de majorité → FLAT</span>
+    <span class="keyword">return</span> <span class="string">"FLAT"</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 5: Conflict Resolution -->
+        <section>
+            <h2><span class="num">5</span> Gestion des Signaux Contradictoires</h2>
+
+            <p>Quand les agents émettent des signaux opposés, le CIO applique une logique de résolution :</p>
+
+            <div class="case-grid">
+                <div class="case-card trade">
+                    <h4>✓ Consensus Clair</h4>
+                    <p>Majorité > 55% dans une direction</p>
+                    <ul>
+                        <li>3+ agents LONG, 1-2 SHORT</li>
+                        <li>Écart votes > 15%</li>
+                        <li>Confiance agrégée > 60%</li>
+                    </ul>
+                    <p style="margin-top: 0.5rem;"><strong>→ TRADE</strong></p>
+                </div>
+
+                <div class="case-card conflict">
+                    <h4>⚠ Conflit Modéré</h4>
+                    <p>Signaux divisés mais un côté domine</p>
+                    <ul>
+                        <li>2 LONG vs 2 SHORT + 1 FLAT</li>
+                        <li>Écart votes < 15%</li>
+                        <li>Réduire taille position de 50%</li>
+                    </ul>
+                    <p style="margin-top: 0.5rem;"><strong>→ TRADE RÉDUIT</strong></p>
+                </div>
+
+                <div class="case-card no-trade">
+                    <h4>✗ Conflit Fort</h4>
+                    <p>Signaux parfaitement opposés</p>
+                    <ul>
+                        <li>~50% LONG vs ~50% SHORT</li>
+                        <li>Agents haute confiance en désaccord</li>
+                        <li>Incertitude trop élevée</li>
+                    </ul>
+                    <p style="margin-top: 0.5rem;"><strong>→ NO TRADE</strong></p>
+                </div>
+            </div>
+
+            <div class="algorithm-box">
+                <div class="title">ALGORITHME: Résolution de Conflits</div>
+                <div class="pseudo-code">
+<span class="keyword">function</span> <span class="function">resolve_conflicts</span>(agg: <span class="type">AggregatedSignal</span>) -> <span class="type">ConflictResolution</span>:
+
+    <span class="comment">// Calculer le niveau de conflit</span>
+    total_directional = agg.long_votes + agg.short_votes
+
+    <span class="keyword">if</span> total_directional == <span class="number">0</span>:
+        <span class="keyword">return</span> <span class="type">ConflictResolution</span>(action=<span class="string">"NO_TRADE"</span>, reason=<span class="string">"All agents FLAT"</span>)
+
+    <span class="comment">// Ratio de conflit: 0 = unanime, 1 = 50/50</span>
+    minority_pct = <span class="function">min</span>(agg.long_votes, agg.short_votes) / total_directional
+    conflict_ratio = minority_pct × <span class="number">2.0</span>  <span class="comment">// Normaliser à [0, 1]</span>
+
+    <span class="comment">// Seuils de conflit</span>
+    LOW_CONFLICT = <span class="number">0.30</span>      <span class="comment">// < 30% = consensus clair</span>
+    HIGH_CONFLICT = <span class="number">0.70</span>     <span class="comment">// > 70% = conflit fort</span>
+
+    <span class="keyword">if</span> conflict_ratio < LOW_CONFLICT:
+        <span class="comment">// Consensus clair</span>
+        <span class="keyword">return</span> <span class="type">ConflictResolution</span>(
+            action = <span class="string">"TRADE"</span>,
+            size_factor = <span class="number">1.0</span>,
+            reason = f<span class="string">"Clear consensus ({(1-conflict_ratio)*100:.0f}%)"</span>
+        )
+
+    <span class="keyword">elif</span> conflict_ratio < HIGH_CONFLICT:
+        <span class="comment">// Conflit modéré - réduire la taille</span>
+        size_reduction = (<span class="number">1.0</span> - conflict_ratio) × <span class="number">0.5</span> + <span class="number">0.5</span>  <span class="comment">// [0.5, 0.85]</span>
+        <span class="keyword">return</span> <span class="type">ConflictResolution</span>(
+            action = <span class="string">"TRADE_REDUCED"</span>,
+            size_factor = size_reduction,
+            reason = f<span class="string">"Moderate conflict, size reduced to {size_reduction*100:.0f}%"</span>
+        )
+
+    <span class="keyword">else</span>:
+        <span class="comment">// Conflit fort - ne pas trader</span>
+        <span class="keyword">return</span> <span class="type">ConflictResolution</span>(
+            action = <span class="string">"NO_TRADE"</span>,
+            size_factor = <span class="number">0.0</span>,
+            reason = f<span class="string">"High conflict ({conflict_ratio*100:.0f}%), signals contradictory"</span>
+        )
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 6: No-Trade Cases -->
+        <section>
+            <h2><span class="num">6</span> Cas de Non-Décision (No Trade)</h2>
+
+            <p>Le CIO décide de ne PAS trader dans les cas suivants :</p>
+
+            <div class="algorithm-box">
+                <div class="title">ALGORITHME: Vérification No-Trade</div>
+                <div class="pseudo-code">
+<span class="keyword">function</span> <span class="function">check_no_trade_conditions</span>(agg: <span class="type">AggregatedSignal</span>) -> <span class="type">Optional[NoTradeReason]</span>:
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CONDITION 1: Pas assez de signaux</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    MIN_SIGNALS = <span class="number">2</span>
+    <span class="keyword">if</span> <span class="function">len</span>(agg.contributing_signals) < MIN_SIGNALS:
+        <span class="keyword">return</span> <span class="type">NoTradeReason</span>(
+            code = <span class="string">"INSUFFICIENT_SIGNALS"</span>,
+            message = f<span class="string">"Only {len(signals)} signals, minimum {MIN_SIGNALS} required"</span>
+        )
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CONDITION 2: Direction FLAT</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">if</span> agg.consensus_direction == <span class="string">"FLAT"</span>:
+        <span class="keyword">return</span> <span class="type">NoTradeReason</span>(
+            code = <span class="string">"FLAT_CONSENSUS"</span>,
+            message = <span class="string">"Consensus direction is FLAT, no action needed"</span>
+        )
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CONDITION 3: Confiance trop basse</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    MIN_CONFIDENCE = <span class="number">0.50</span>
+    <span class="keyword">if</span> agg.weighted_confidence < MIN_CONFIDENCE:
+        <span class="keyword">return</span> <span class="type">NoTradeReason</span>(
+            code = <span class="string">"LOW_CONFIDENCE"</span>,
+            message = f<span class="string">"Confidence {agg.weighted_confidence:.2f} below threshold {MIN_CONFIDENCE}"</span>
+        )
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CONDITION 4: Force du signal trop faible</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    MIN_STRENGTH = <span class="number">0.20</span>
+    <span class="keyword">if</span> <span class="function">abs</span>(agg.weighted_strength) < MIN_STRENGTH:
+        <span class="keyword">return</span> <span class="type">NoTradeReason</span>(
+            code = <span class="string">"WEAK_SIGNAL"</span>,
+            message = f<span class="string">"Signal strength {agg.weighted_strength:.2f} too weak"</span>
+        )
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CONDITION 5: Conviction insuffisante</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    conviction = <span class="function">calculate_conviction</span>(agg)
+    MIN_CONVICTION = <span class="number">0.60</span>
+    <span class="keyword">if</span> conviction < MIN_CONVICTION:
+        <span class="keyword">return</span> <span class="type">NoTradeReason</span>(
+            code = <span class="string">"LOW_CONVICTION"</span>,
+            message = f<span class="string">"Conviction score {conviction:.2f} below threshold {MIN_CONVICTION}"</span>
+        )
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CONDITION 6: Conflit fort entre signaux</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    conflict = <span class="function">resolve_conflicts</span>(agg)
+    <span class="keyword">if</span> conflict.action == <span class="string">"NO_TRADE"</span>:
+        <span class="keyword">return</span> <span class="type">NoTradeReason</span>(
+            code = <span class="string">"HIGH_CONFLICT"</span>,
+            message = conflict.reason
+        )
+
+    <span class="comment">// Toutes les conditions passent → peut trader</span>
+    <span class="keyword">return</span> <span class="keyword">None</span>
+                </div>
+            </div>
+
+            <h3>Récapitulatif des Seuils No-Trade</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Condition</th>
+                        <th>Seuil</th>
+                        <th>Code</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Nombre minimum de signaux</td>
+                        <td>≥ 2 agents</td>
+                        <td><code>INSUFFICIENT_SIGNALS</code></td>
+                    </tr>
+                    <tr>
+                        <td>Direction consensus</td>
+                        <td>≠ FLAT</td>
+                        <td><code>FLAT_CONSENSUS</code></td>
+                    </tr>
+                    <tr>
+                        <td>Confiance agrégée minimum</td>
+                        <td>≥ 50%</td>
+                        <td><code>LOW_CONFIDENCE</code></td>
+                    </tr>
+                    <tr>
+                        <td>Force du signal minimum</td>
+                        <td>|strength| ≥ 0.20</td>
+                        <td><code>WEAK_SIGNAL</code></td>
+                    </tr>
+                    <tr>
+                        <td>Score de conviction minimum</td>
+                        <td>≥ 60%</td>
+                        <td><code>LOW_CONVICTION</code></td>
+                    </tr>
+                    <tr>
+                        <td>Ratio de conflit maximum</td>
+                        <td>< 70%</td>
+                        <td><code>HIGH_CONFLICT</code></td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Section 7: Conviction Score -->
+        <section>
+            <h2><span class="num">7</span> Calcul du Score de Conviction</h2>
+
+            <p>Le score de conviction combine plusieurs facteurs pour évaluer la qualité de la décision :</p>
+
+            <div class="formula-box">
+                <div class="formula">Conviction = α×C<sub>agg</sub> + β×|S<sub>agg</sub>| + γ×(1-Conflict) + δ×Agreement</div>
+                <div class="description">où α=0.30, β=0.25, γ=0.25, δ=0.20</div>
+            </div>
+
+            <div class="algorithm-box">
+                <div class="title">ALGORITHME: Score de Conviction</div>
+                <div class="pseudo-code">
+<span class="keyword">function</span> <span class="function">calculate_conviction</span>(agg: <span class="type">AggregatedSignal</span>) -> <span class="type">float</span>:
+
+    <span class="comment">// Composante 1: Confiance agrégée (30%)</span>
+    confidence_component = agg.weighted_confidence × <span class="number">0.30</span>
+
+    <span class="comment">// Composante 2: Force du signal (25%)</span>
+    strength_component = <span class="function">abs</span>(agg.weighted_strength) × <span class="number">0.25</span>
+
+    <span class="comment">// Composante 3: Absence de conflit (25%)</span>
+    total_directional = agg.long_votes + agg.short_votes
+    <span class="keyword">if</span> total_directional > <span class="number">0</span>:
+        minority_pct = <span class="function">min</span>(agg.long_votes, agg.short_votes) / total_directional
+        conflict_ratio = minority_pct × <span class="number">2.0</span>
+    <span class="keyword">else</span>:
+        conflict_ratio = <span class="number">0.0</span>
+    consensus_component = (<span class="number">1.0</span> - conflict_ratio) × <span class="number">0.25</span>
+
+    <span class="comment">// Composante 4: Accord entre agents (20%)</span>
+    <span class="comment">// Plus d'agents dans la même direction = plus de conviction</span>
+    <span class="keyword">if</span> agg.consensus_direction == <span class="string">"LONG"</span>:
+        agreement = agg.long_votes
+    <span class="keyword">elif</span> agg.consensus_direction == <span class="string">"SHORT"</span>:
+        agreement = agg.short_votes
+    <span class="keyword">else</span>:
+        agreement = agg.flat_votes
+    agreement_component = agreement × <span class="number">0.20</span>
+
+    <span class="comment">// Score final</span>
+    conviction = (
+        confidence_component +
+        strength_component +
+        consensus_component +
+        agreement_component
+    )
+
+    <span class="comment">// Clamp à [0, 1]</span>
+    <span class="keyword">return</span> <span class="function">max</span>(<span class="number">0.0</span>, <span class="function">min</span>(<span class="number">1.0</span>, conviction))
+                </div>
+            </div>
+
+            <h3>Exemple de Calcul</h3>
+            <div class="info-box">
+                <strong>Données d'entrée :</strong><br>
+                • weighted_confidence = 0.75<br>
+                • weighted_strength = 0.62<br>
+                • long_votes = 0.65, short_votes = 0.20, flat_votes = 0.15<br>
+                • consensus_direction = LONG<br><br>
+
+                <strong>Calcul :</strong><br>
+                • confidence_component = 0.75 × 0.30 = 0.225<br>
+                • strength_component = 0.62 × 0.25 = 0.155<br>
+                • conflict_ratio = (0.20 / 0.85) × 2 = 0.47<br>
+                • consensus_component = (1 - 0.47) × 0.25 = 0.133<br>
+                • agreement_component = 0.65 × 0.20 = 0.130<br><br>
+
+                <strong>Conviction = 0.225 + 0.155 + 0.133 + 0.130 = 0.643 (64.3%)</strong>
+            </div>
+        </section>
+
+        <!-- Section 8: Position Sizing -->
+        <section>
+            <h2><span class="num">8</span> Calcul de la Taille de Position</h2>
+
+            <div class="algorithm-box">
+                <div class="title">ALGORITHME: Position Sizing</div>
+                <div class="pseudo-code">
+<span class="keyword">function</span> <span class="function">calculate_position_size</span>(
+    agg: <span class="type">AggregatedSignal</span>,
+    conviction: <span class="type">float</span>,
+    conflict: <span class="type">ConflictResolution</span>,
+    portfolio_value: <span class="type">float</span>,
+    current_price: <span class="type">float</span>
+) -> <span class="type">int</span>:
+
+    <span class="comment">// Base: pourcentage du portfolio par trade</span>
+    BASE_POSITION_PCT = <span class="number">0.02</span>  <span class="comment">// 2% du portfolio</span>
+
+    <span class="comment">// Valeur de base</span>
+    base_value = portfolio_value × BASE_POSITION_PCT
+
+    <span class="comment">// Ajustement par conviction</span>
+    <span class="comment">// Conviction haute = position plus grande</span>
+    conviction_factor = <span class="number">0.5</span> + (conviction × <span class="number">0.5</span>)  <span class="comment">// [0.5, 1.0]</span>
+
+    <span class="comment">// Ajustement par force du signal</span>
+    strength_factor = <span class="number">0.5</span> + (<span class="function">abs</span>(agg.weighted_strength) × <span class="number">0.5</span>)  <span class="comment">// [0.5, 1.0]</span>
+
+    <span class="comment">// Ajustement par conflit</span>
+    conflict_factor = conflict.size_factor  <span class="comment">// [0.5, 1.0]</span>
+
+    <span class="comment">// Valeur finale de la position</span>
+    position_value = base_value × conviction_factor × strength_factor × conflict_factor
+
+    <span class="comment">// Convertir en nombre d'actions</span>
+    quantity = <span class="function">floor</span>(position_value / current_price)
+
+    <span class="comment">// Arrondir au lot de 10</span>
+    quantity = (quantity // <span class="number">10</span>) × <span class="number">10</span>
+
+    <span class="comment">// Minimum 10 actions</span>
+    <span class="keyword">if</span> quantity < <span class="number">10</span>:
+        <span class="keyword">return</span> <span class="number">0</span>  <span class="comment">// Trop petit, ne pas trader</span>
+
+    <span class="keyword">return</span> quantity
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 9: Decision Pipeline -->
+        <section>
+            <h2><span class="num">9</span> Pipeline Décisionnel Complet</h2>
+
+            <div class="decision-flow">
+                <div class="flow-step">
+                    <div class="flow-connector">
+                        <div class="flow-dot"></div>
+                        <div class="flow-line"></div>
+                    </div>
+                    <div class="flow-content check">
+                        <div class="flow-title">1. Réception des Signaux</div>
+                        <div class="flow-desc">
+                            Récupère <code>Dict[agent_name → SignalEvent]</code> depuis la barrière de synchronisation.
+                            Vérifie qu'au moins 2 signaux sont présents.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <div class="flow-connector">
+                        <div class="flow-dot"></div>
+                        <div class="flow-line"></div>
+                    </div>
+                    <div class="flow-content compute">
+                        <div class="flow-title">2. Calcul des Poids Ajustés</div>
+                        <div class="flow-desc">
+                            Ajuste les poids de base selon: confiance du signal, régime de marché, horizon temporel.
+                            Normalise pour que Σ weights = 1.0
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <div class="flow-connector">
+                        <div class="flow-dot"></div>
+                        <div class="flow-line"></div>
+                    </div>
+                    <div class="flow-content compute">
+                        <div class="flow-title">3. Agrégation des Signaux</div>
+                        <div class="flow-desc">
+                            Calcule: weighted_strength, weighted_confidence, long_votes, short_votes.
+                            Détermine consensus_direction.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <div class="flow-connector">
+                        <div class="flow-dot"></div>
+                        <div class="flow-line"></div>
+                    </div>
+                    <div class="flow-content check">
+                        <div class="flow-title">4. Résolution des Conflits</div>
+                        <div class="flow-desc">
+                            Évalue le ratio de conflit. Décide: TRADE / TRADE_REDUCED / NO_TRADE.
+                            Calcule size_factor si conflit modéré.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <div class="flow-connector">
+                        <div class="flow-dot"></div>
+                        <div class="flow-line"></div>
+                    </div>
+                    <div class="flow-content check">
+                        <div class="flow-title">5. Vérification No-Trade</div>
+                        <div class="flow-desc">
+                            Vérifie toutes les conditions de non-décision.
+                            Si une condition échoue → retourne None, pas de DecisionEvent.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <div class="flow-connector">
+                        <div class="flow-dot"></div>
+                        <div class="flow-line"></div>
+                    </div>
+                    <div class="flow-content compute">
+                        <div class="flow-title">6. Calcul du Score de Conviction</div>
+                        <div class="flow-desc">
+                            Combine: confiance (30%), force (25%), consensus (25%), accord (20%).
+                            Conviction < 60% → NO_TRADE.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <div class="flow-connector">
+                        <div class="flow-dot"></div>
+                        <div class="flow-line"></div>
+                    </div>
+                    <div class="flow-content compute">
+                        <div class="flow-title">7. Calcul de la Taille</div>
+                        <div class="flow-desc">
+                            Position = base × conviction × strength × conflict_factor.
+                            Arrondi au lot de 10, minimum 10 actions.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <div class="flow-connector">
+                        <div class="flow-dot"></div>
+                        <div class="flow-line"></div>
+                    </div>
+                    <div class="flow-content decide">
+                        <div class="flow-title">8. Construction de la Décision</div>
+                        <div class="flow-desc">
+                            Crée DecisionEvent avec: symbol, action, quantity, rationale, contributing_signals, data_sources.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <div class="flow-connector">
+                        <div class="flow-dot"></div>
+                        <div class="flow-line"></div>
+                    </div>
+                    <div class="flow-content output">
+                        <div class="flow-title">9. Logging Obligatoire (EU/AMF)</div>
+                        <div class="flow-desc">
+                            Log complet: timestamp, decision_id, rationale, data_sources, conviction_score.
+                            <strong>OBLIGATOIRE pour conformité.</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <div class="flow-connector">
+                        <div class="flow-dot"></div>
+                    </div>
+                    <div class="flow-content output">
+                        <div class="flow-title">10. Publication DecisionEvent</div>
+                        <div class="flow-desc">
+                            Publie sur EventBus → sera reçu par RiskComplianceAgent pour validation.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 10: Master Algorithm -->
+        <section>
+            <h2><span class="num">10</span> Algorithme Principal</h2>
+
+            <div class="algorithm-box">
+                <div class="title">ALGORITHME MAÎTRE: CIO.make_decision()</div>
+                <div class="pseudo-code">
+<span class="keyword">function</span> <span class="function">make_decision</span>(signals: <span class="type">Dict[str, SignalEvent]</span>) -> <span class="type">Optional[DecisionEvent]</span>:
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// ÉTAPE 1: Validation des entrées</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">if</span> <span class="function">len</span>(signals) < <span class="number">2</span>:
+        <span class="function">log_no_trade</span>(<span class="string">"INSUFFICIENT_SIGNALS"</span>)
+        <span class="keyword">return</span> <span class="keyword">None</span>
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// ÉTAPE 2: Déterminer le régime de marché</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    market_regime = <span class="function">detect_market_regime</span>(signals)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// ÉTAPE 3: Calculer les poids ajustés</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    weights = <span class="function">calculate_adjusted_weights</span>(signals, market_regime)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// ÉTAPE 4: Agréger les signaux</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    agg = <span class="function">aggregate_signals</span>(signals, weights)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// ÉTAPE 5: Résoudre les conflits</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    conflict = <span class="function">resolve_conflicts</span>(agg)
+
+    <span class="keyword">if</span> conflict.action == <span class="string">"NO_TRADE"</span>:
+        <span class="function">log_no_trade</span>(conflict.reason)
+        <span class="keyword">return</span> <span class="keyword">None</span>
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// ÉTAPE 6: Vérifier conditions No-Trade</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    no_trade = <span class="function">check_no_trade_conditions</span>(agg)
+
+    <span class="keyword">if</span> no_trade <span class="keyword">is not</span> <span class="keyword">None</span>:
+        <span class="function">log_no_trade</span>(no_trade.message)
+        <span class="keyword">return</span> <span class="keyword">None</span>
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// ÉTAPE 7: Calculer le score de conviction</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    conviction = <span class="function">calculate_conviction</span>(agg)
+
+    <span class="keyword">if</span> conviction < MIN_CONVICTION_THRESHOLD:
+        <span class="function">log_no_trade</span>(f<span class="string">"Conviction {conviction:.2f} below threshold"</span>)
+        <span class="keyword">return</span> <span class="keyword">None</span>
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// ÉTAPE 8: Calculer la taille de position</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    portfolio = <span class="keyword">await</span> <span class="function">get_portfolio_value</span>()
+    price = <span class="keyword">await</span> <span class="function">get_current_price</span>(symbol)
+
+    quantity = <span class="function">calculate_position_size</span>(agg, conviction, conflict, portfolio, price)
+
+    <span class="keyword">if</span> quantity == <span class="number">0</span>:
+        <span class="function">log_no_trade</span>(<span class="string">"Position size too small"</span>)
+        <span class="keyword">return</span> <span class="keyword">None</span>
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// ÉTAPE 9: Construire le rationale</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    rationale = <span class="function">build_rationale</span>(agg, conviction, conflict)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// ÉTAPE 10: Créer l'événement de décision</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    decision = <span class="type">DecisionEvent</span>(
+        source_agent = <span class="string">"CIOAgent"</span>,
+        symbol = <span class="function">determine_symbol</span>(signals),
+        action = <span class="string">"BUY"</span> <span class="keyword">if</span> agg.consensus_direction == <span class="string">"LONG"</span> <span class="keyword">else</span> <span class="string">"SELL"</span>,
+        quantity = quantity,
+        order_type = <span class="string">"LIMIT"</span>,
+        rationale = rationale,
+        contributing_signals = agg.contributing_signals,
+        data_sources = <span class="function">tuple</span>(agg.data_sources),
+        conviction_score = conviction
+    )
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// ÉTAPE 11: LOG OBLIGATOIRE (EU/AMF Compliance)</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    audit_logger.<span class="function">log_decision</span>(
+        agent_name = <span class="string">"CIOAgent"</span>,
+        decision_id = decision.event_id,
+        symbol = decision.symbol,
+        action = decision.action,
+        quantity = decision.quantity,
+        rationale = decision.rationale,
+        data_sources = <span class="function">list</span>(decision.data_sources),
+        contributing_signals = <span class="function">list</span>(decision.contributing_signals),
+        conviction_score = decision.conviction_score
+    )
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// ÉTAPE 12: Publier la décision</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">await</span> event_bus.<span class="function">publish</span>(decision)
+
+    <span class="function">log_info</span>(f<span class="string">"CIO DECISION: {decision.action} {quantity} {symbol} (conviction={conviction:.2f})"</span>)
+
+    <span class="keyword">return</span> decision
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 11: Decision Output Format -->
+        <section>
+            <h2><span class="num">11</span> Format de la Décision Finale</h2>
+
+            <h3>Structure DecisionEvent</h3>
+            <div class="json-output">
+{
+    <span class="comment">// Métadonnées de l'événement</span>
+    <span class="key">"event_id"</span>: <span class="string">"dec_7f8a9b2c"</span>,
+    <span class="key">"event_type"</span>: <span class="string">"DECISION"</span>,
+    <span class="key">"timestamp"</span>: <span class="string">"2024-01-15T14:30:05.123Z"</span>,
+    <span class="key">"source_agent"</span>: <span class="string">"CIOAgent"</span>,
+
+    <span class="comment">// Décision de trading</span>
+    <span class="key">"symbol"</span>: <span class="string">"SPY"</span>,
+    <span class="key">"action"</span>: <span class="string">"BUY"</span>,                    <span class="comment">// BUY | SELL</span>
+    <span class="key">"quantity"</span>: <span class="number">150</span>,
+    <span class="key">"order_type"</span>: <span class="string">"LIMIT"</span>,              <span class="comment">// LIMIT | MARKET | STOP</span>
+    <span class="key">"limit_price"</span>: <span class="number">478.50</span>,
+    <span class="key">"stop_price"</span>: <span class="null">null</span>,
+
+    <span class="comment">// Métriques de conviction</span>
+    <span class="key">"conviction_score"</span>: <span class="number">0.72</span>,
+    <span class="key">"weighted_strength"</span>: <span class="number">0.58</span>,
+    <span class="key">"weighted_confidence"</span>: <span class="number">0.76</span>,
+
+    <span class="comment">// Traçabilité (OBLIGATOIRE EU/AMF)</span>
+    <span class="key">"rationale"</span>: <span class="string">"CIO Decision for SPY: Direction LONG, Conviction 72%, Strength 0.58. Contributing: MacroAgent (15%): VIX regime risk-on | MomentumAgent (25%): MA crossover bullish | StatArbAgent (25%): Mean reversion signal"</span>,
+
+    <span class="key">"contributing_signals"</span>: [
+        <span class="string">"sig_macro_abc123"</span>,
+        <span class="string">"sig_momentum_def456"</span>,
+        <span class="string">"sig_statarb_ghi789"</span>,
+        <span class="string">"sig_mm_jkl012"</span>,
+        <span class="string">"sig_options_mno345"</span>
+    ],
+
+    <span class="key">"data_sources"</span>: [
+        <span class="string">"VIX"</span>,
+        <span class="string">"SPY"</span>,
+        <span class="string">"TLT"</span>,
+        <span class="string">"IB_market_data"</span>,
+        <span class="string">"options_chain"</span>
+    ],
+
+    <span class="comment">// Détail de l'agrégation</span>
+    <span class="key">"aggregation_details"</span>: {
+        <span class="key">"long_votes"</span>: <span class="number">0.65</span>,
+        <span class="key">"short_votes"</span>: <span class="number">0.20</span>,
+        <span class="key">"flat_votes"</span>: <span class="number">0.15</span>,
+        <span class="key">"conflict_ratio"</span>: <span class="number">0.31</span>,
+        <span class="key">"consensus_direction"</span>: <span class="string">"LONG"</span>
+    }
+}
+            </div>
+
+            <div class="info-box success">
+                <strong>✓ Conformité EU/AMF</strong><br>
+                Chaque décision contient obligatoirement:
+                <ul style="margin-top: 0.5rem; margin-left: 1.5rem;">
+                    <li>Horodatage précis (timestamp)</li>
+                    <li>Sources de données (data_sources)</li>
+                    <li>Justification (rationale)</li>
+                    <li>Agent responsable (source_agent)</li>
+                    <li>Signaux contributeurs (contributing_signals)</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Section 12: Interaction with Risk -->
+        <section>
+            <h2><span class="num">12</span> Interaction avec Risk & Compliance</h2>
+
+            <div class="diagram">
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                        FLUX CIO → RISK → EXECUTION                                  │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│    ┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐   │
+│    │    CIO AGENT    │          │  RISK/COMPLIANCE │          │   EXECUTION     │   │
+│    │                 │          │      AGENT       │          │     AGENT       │   │
+│    └────────┬────────┘          └────────┬────────┘          └────────┬────────┘   │
+│             │                            │                            │             │
+│             │  DecisionEvent             │                            │             │
+│             │  ────────────────────────▶ │                            │             │
+│             │                            │                            │             │
+│             │                            │ ┌────────────────────┐     │             │
+│             │                            │ │ VALIDATION CHECKS  │     │             │
+│             │                            │ │                    │     │             │
+│             │                            │ │ ✓ Position limit   │     │             │
+│             │                            │ │ ✓ Daily loss       │     │             │
+│             │                            │ │ ✓ Drawdown         │     │             │
+│             │                            │ │ ✓ Leverage         │     │             │
+│             │                            │ │ ✓ Rate limit       │     │             │
+│             │                            │ │ ✓ Banned list      │     │             │
+│             │                            │ └────────────────────┘     │             │
+│             │                            │                            │             │
+│             │                            │                            │             │
+│             │                  ┌─────────┴─────────┐                  │             │
+│             │                  │                   │                  │             │
+│             │                  ▼                   ▼                  │             │
+│             │           [APPROVED]           [REJECTED]               │             │
+│             │                  │                   │                  │             │
+│             │                  │                   │                  │             │
+│             │                  │  ValidatedEvent   │  ValidatedEvent  │             │
+│             │                  │  (approved=true)  │  (approved=false)│             │
+│             │                  │  ───────────────▶ │                  │             │
+│             │                  │                   │                  │             │
+│             │                  │                   └──▶ [LOG & STOP]  │             │
+│             │                  │                                      │             │
+│             │                  │                   ┌──────────────────┤             │
+│             │                  │                   │                  │             │
+│             │                  │                   │  OrderEvent      │             │
+│             │                  │                   │  ───────────────▶│             │
+│             │                  │                   │                  │             │
+│             │                  │                   │                  ▼             │
+│             │                  │                   │         [INTERACTIVE BROKERS]  │
+│             │                  │                   │                                │
+│             │                  │                   │                                │
+└─────────────┴──────────────────┴───────────────────┴────────────────────────────────┘
+            </div>
+
+            <h3>Points Clés de l'Interaction</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Aspect</th>
+                        <th>CIO Agent</th>
+                        <th>Risk Agent</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Rôle</td>
+                        <td>Décide QUOI trader</td>
+                        <td>Valide SI on peut trader</td>
+                    </tr>
+                    <tr>
+                        <td>Output</td>
+                        <td>DecisionEvent</td>
+                        <td>ValidatedDecisionEvent</td>
+                    </tr>
+                    <tr>
+                        <td>Peut bloquer?</td>
+                        <td>Non (décide toujours)</td>
+                        <td>OUI (peut rejeter)</td>
+                    </tr>
+                    <tr>
+                        <td>Modifie quantité?</td>
+                        <td>Non (après publication)</td>
+                        <td>OUI (adjusted_quantity)</td>
+                    </tr>
+                    <tr>
+                        <td>Accès broker?</td>
+                        <td>NON (lecture portfolio only)</td>
+                        <td>NON (lecture only)</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="info-box warning">
+                <strong>Important:</strong> Le CIO ne peut PAS contourner le Risk Agent.
+                Toute DecisionEvent DOIT passer par la validation avant exécution.
+                C'est une séparation des responsabilités obligatoire (CLAUDE.md).
+            </div>
+        </section>
+
+        <footer>
+            <p>AI Trading Firm - CIO Agent Documentation</p>
+            <p>
+                <a href="architecture.html">Architecture</a> |
+                <a href="concurrency.html">Concurrence</a> |
+                <a href="../claude.md">CLAUDE.md</a>
+            </p>
+            <p style="margin-top: 0.5rem; font-size: 0.8rem;">
+                Unique Décideur | Pondération Multi-facteurs | Conformité EU/AMF
+            </p>
+        </footer>
+    </div>
+</body>
+</html>

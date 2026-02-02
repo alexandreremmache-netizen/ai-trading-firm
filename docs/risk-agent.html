@@ -1,0 +1,2090 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trading Firm - Risk Manager Agent</title>
+    <style>
+        :root {
+            --bg-dark: #0f0f0f;
+            --bg-card: #1a1a1a;
+            --bg-elevated: #252525;
+            --accent-red: #ff4757;
+            --accent-orange: #ffa502;
+            --accent-yellow: #fffa65;
+            --accent-green: #2ed573;
+            --accent-blue: #3742fa;
+            --accent-cyan: #70a1ff;
+            --accent-purple: #a55eea;
+            --text-white: #ffffff;
+            --text-gray: #b0b0b0;
+            --text-muted: #666666;
+            --border: #333333;
+            --danger-bg: rgba(255, 71, 87, 0.1);
+            --warning-bg: rgba(255, 165, 2, 0.1);
+            --success-bg: rgba(46, 213, 115, 0.1);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-white);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            padding: 3rem 2rem;
+            background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-dark) 100%);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            margin-bottom: 2rem;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            color: var(--accent-red);
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 1rem;
+        }
+
+        header h1::before {
+            content: '🛡️';
+            font-size: 2rem;
+        }
+
+        header .subtitle {
+            color: var(--text-gray);
+            font-size: 1.1rem;
+        }
+
+        .role-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, var(--accent-red), var(--accent-orange));
+            color: white;
+            padding: 0.5rem 1.5rem;
+            border-radius: 25px;
+            font-weight: bold;
+            margin-top: 1rem;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .alert-banner {
+            background: var(--danger-bg);
+            border: 1px solid var(--accent-red);
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
+            margin: 1.5rem 0;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .alert-banner .icon {
+            font-size: 1.5rem;
+        }
+
+        .alert-banner .text {
+            color: var(--accent-red);
+            font-weight: 500;
+        }
+
+        section {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2rem;
+            margin-bottom: 1.5rem;
+        }
+
+        section h2 {
+            color: var(--accent-red);
+            font-size: 1.4rem;
+            margin-bottom: 1.5rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 2px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        section h2 .num {
+            background: var(--accent-red);
+            color: white;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.9rem;
+            font-weight: bold;
+        }
+
+        h3 {
+            color: var(--accent-orange);
+            margin: 1.5rem 0 1rem;
+            font-size: 1.15rem;
+        }
+
+        h4 {
+            color: var(--accent-cyan);
+            margin: 1rem 0 0.5rem;
+            font-size: 1rem;
+        }
+
+        p {
+            color: var(--text-gray);
+            margin-bottom: 1rem;
+        }
+
+        .rules-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 1.5rem;
+            margin: 1.5rem 0;
+        }
+
+        .rule-card {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.5rem;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .rule-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(255, 71, 87, 0.15);
+        }
+
+        .rule-card.critical {
+            border-left: 4px solid var(--accent-red);
+        }
+
+        .rule-card.warning {
+            border-left: 4px solid var(--accent-orange);
+        }
+
+        .rule-card.info {
+            border-left: 4px solid var(--accent-cyan);
+        }
+
+        .rule-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1rem;
+        }
+
+        .rule-id {
+            background: var(--bg-dark);
+            color: var(--accent-red);
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.85rem;
+            font-weight: bold;
+        }
+
+        .rule-severity {
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .severity-critical {
+            background: var(--accent-red);
+            color: white;
+        }
+
+        .severity-high {
+            background: var(--accent-orange);
+            color: var(--bg-dark);
+        }
+
+        .severity-medium {
+            background: var(--accent-yellow);
+            color: var(--bg-dark);
+        }
+
+        .rule-title {
+            color: var(--text-white);
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .rule-description {
+            color: var(--text-gray);
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
+        }
+
+        .rule-params {
+            background: var(--bg-dark);
+            border-radius: 6px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .param-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.35rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .param-row:last-child {
+            border-bottom: none;
+        }
+
+        .param-name {
+            color: var(--text-gray);
+            font-size: 0.85rem;
+        }
+
+        .param-value {
+            color: var(--accent-cyan);
+            font-family: monospace;
+            font-weight: bold;
+        }
+
+        .rule-action {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--accent-red);
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        .rule-action.block { color: var(--accent-red); }
+        .rule-action.reduce { color: var(--accent-orange); }
+        .rule-action.warn { color: var(--accent-yellow); }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+
+        th, td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border: 1px solid var(--border);
+        }
+
+        th {
+            background: var(--bg-elevated);
+            color: var(--accent-cyan);
+            font-weight: 600;
+        }
+
+        tr:hover {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 0.2rem 0.6rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+
+        .status-block { background: var(--accent-red); color: white; }
+        .status-reduce { background: var(--accent-orange); color: var(--bg-dark); }
+        .status-warn { background: var(--accent-yellow); color: var(--bg-dark); }
+        .status-pass { background: var(--accent-green); color: var(--bg-dark); }
+        .status-halt { background: #000; color: var(--accent-red); border: 1px solid var(--accent-red); }
+
+        .scenario-box {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin: 1rem 0;
+            overflow: hidden;
+        }
+
+        .scenario-header {
+            background: var(--bg-dark);
+            padding: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .scenario-title {
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .scenario-result {
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 0.85rem;
+        }
+
+        .result-blocked {
+            background: var(--accent-red);
+            color: white;
+        }
+
+        .result-reduced {
+            background: var(--accent-orange);
+            color: var(--bg-dark);
+        }
+
+        .result-approved {
+            background: var(--accent-green);
+            color: var(--bg-dark);
+        }
+
+        .result-halt {
+            background: #000;
+            color: var(--accent-red);
+            border: 1px solid var(--accent-red);
+        }
+
+        .scenario-body {
+            padding: 1rem;
+        }
+
+        .scenario-context {
+            background: var(--bg-dark);
+            border-radius: 6px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            font-size: 0.9rem;
+        }
+
+        .scenario-context .label {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            margin-bottom: 0.5rem;
+        }
+
+        .check-list {
+            list-style: none;
+        }
+
+        .check-list li {
+            padding: 0.5rem 0;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .check-list li:last-child {
+            border-bottom: none;
+        }
+
+        .check-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8rem;
+            flex-shrink: 0;
+        }
+
+        .check-icon.pass {
+            background: var(--accent-green);
+            color: var(--bg-dark);
+        }
+
+        .check-icon.fail {
+            background: var(--accent-red);
+            color: white;
+        }
+
+        .check-icon.warn {
+            background: var(--accent-orange);
+            color: var(--bg-dark);
+        }
+
+        .check-text {
+            flex: 1;
+            font-size: 0.9rem;
+        }
+
+        .check-value {
+            font-family: monospace;
+            color: var(--accent-cyan);
+        }
+
+        .algorithm-box {
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--accent-red);
+            border-radius: 6px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+            overflow-x: auto;
+        }
+
+        .algorithm-box .title {
+            color: var(--accent-red);
+            font-weight: bold;
+            margin-bottom: 1rem;
+            font-size: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .pseudo-code {
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.85rem;
+            line-height: 1.8;
+            color: var(--text-gray);
+        }
+
+        .pseudo-code .keyword { color: var(--accent-red); font-weight: bold; }
+        .pseudo-code .function { color: var(--accent-cyan); }
+        .pseudo-code .comment { color: var(--text-muted); font-style: italic; }
+        .pseudo-code .string { color: var(--accent-green); }
+        .pseudo-code .number { color: var(--accent-orange); }
+        .pseudo-code .type { color: var(--accent-purple); }
+
+        .pseudo-code .indent-1 { padding-left: 2rem; }
+        .pseudo-code .indent-2 { padding-left: 4rem; }
+        .pseudo-code .indent-3 { padding-left: 6rem; }
+
+        .killswitch-box {
+            background: linear-gradient(135deg, rgba(255, 71, 87, 0.2), rgba(255, 71, 87, 0.05));
+            border: 2px solid var(--accent-red);
+            border-radius: 12px;
+            padding: 2rem;
+            margin: 1.5rem 0;
+            text-align: center;
+        }
+
+        .killswitch-icon {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+        }
+
+        .killswitch-title {
+            color: var(--accent-red);
+            font-size: 1.5rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+        }
+
+        .killswitch-desc {
+            color: var(--text-gray);
+            margin-bottom: 1.5rem;
+        }
+
+        .killswitch-triggers {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+
+        .trigger-item {
+            background: var(--bg-dark);
+            border: 1px solid var(--accent-red);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+
+        .trigger-item .threshold {
+            color: var(--accent-red);
+            font-size: 1.5rem;
+            font-weight: bold;
+            font-family: monospace;
+        }
+
+        .trigger-item .label {
+            color: var(--text-gray);
+            font-size: 0.85rem;
+            margin-top: 0.25rem;
+        }
+
+        .diagram {
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1.5rem;
+            overflow-x: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            line-height: 1.3;
+            white-space: pre;
+            color: var(--accent-green);
+        }
+
+        .interaction-flow {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            margin: 1.5rem 0;
+        }
+
+        .flow-row {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .flow-agent {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+            min-width: 150px;
+            text-align: center;
+        }
+
+        .flow-agent.cio { border-color: var(--accent-purple); }
+        .flow-agent.risk { border-color: var(--accent-red); }
+        .flow-agent.exec { border-color: var(--accent-cyan); }
+
+        .flow-agent .name {
+            font-weight: bold;
+            margin-bottom: 0.25rem;
+        }
+
+        .flow-agent.cio .name { color: var(--accent-purple); }
+        .flow-agent.risk .name { color: var(--accent-red); }
+        .flow-agent.exec .name { color: var(--accent-cyan); }
+
+        .flow-arrow {
+            color: var(--text-muted);
+            font-size: 1.5rem;
+        }
+
+        .flow-event {
+            background: var(--bg-dark);
+            border-radius: 6px;
+            padding: 0.75rem 1rem;
+            font-size: 0.85rem;
+        }
+
+        .flow-event .type {
+            color: var(--accent-orange);
+            font-weight: bold;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+
+        .metric-card {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 1.8rem;
+            font-weight: bold;
+            font-family: monospace;
+        }
+
+        .metric-value.green { color: var(--accent-green); }
+        .metric-value.yellow { color: var(--accent-yellow); }
+        .metric-value.orange { color: var(--accent-orange); }
+        .metric-value.red { color: var(--accent-red); }
+
+        .metric-label {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            margin-top: 0.25rem;
+        }
+
+        .info-box {
+            border-radius: 8px;
+            padding: 1rem 1.25rem;
+            margin: 1rem 0;
+        }
+
+        .info-box.danger {
+            background: var(--danger-bg);
+            border: 1px solid var(--accent-red);
+        }
+
+        .info-box.warning {
+            background: var(--warning-bg);
+            border: 1px solid var(--accent-orange);
+        }
+
+        .info-box.success {
+            background: var(--success-bg);
+            border: 1px solid var(--accent-green);
+        }
+
+        .info-box strong {
+            display: block;
+            margin-bottom: 0.5rem;
+        }
+
+        .info-box.danger strong { color: var(--accent-red); }
+        .info-box.warning strong { color: var(--accent-orange); }
+        .info-box.success strong { color: var(--accent-green); }
+
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            border-top: 1px solid var(--border);
+            margin-top: 2rem;
+        }
+
+        footer a {
+            color: var(--accent-cyan);
+            text-decoration: none;
+        }
+
+        .json-block {
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+            font-family: monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+        }
+
+        .json-block .key { color: var(--accent-cyan); }
+        .json-block .string { color: var(--accent-green); }
+        .json-block .number { color: var(--accent-orange); }
+        .json-block .bool { color: var(--accent-purple); }
+
+        @media (max-width: 768px) {
+            .container { padding: 1rem; }
+            header h1 { font-size: 1.8rem; }
+            .rules-grid { grid-template-columns: 1fr; }
+            .diagram { font-size: 0.6rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Risk Manager Agent</h1>
+            <p class="subtitle">Validation & Protection du Capital</p>
+            <div class="role-badge">🚨 Gardien du Portefeuille</div>
+        </header>
+
+        <div class="alert-banner">
+            <span class="icon">⚠️</span>
+            <span class="text">CAPITAL PROTECTION FIRST - Aucune décision n'est exécutée sans validation du Risk Agent</span>
+        </div>
+
+        <!-- Section 1: Role -->
+        <section>
+            <h2><span class="num">1</span> Rôle et Responsabilités</h2>
+
+            <p>Le Risk Manager Agent est le <strong>gardien du portefeuille</strong>. Il valide CHAQUE décision du CIO avant exécution.</p>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Responsabilité</th>
+                        <th>Description</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Validation pré-trade</td>
+                        <td>Vérifie chaque DecisionEvent</td>
+                        <td>APPROVE / REJECT / REDUCE</td>
+                    </tr>
+                    <tr>
+                        <td>Monitoring continu</td>
+                        <td>Surveille les métriques de risque en temps réel</td>
+                        <td>ALERT / HALT</td>
+                    </tr>
+                    <tr>
+                        <td>Kill-switch</td>
+                        <td>Arrêt d'urgence si seuils critiques dépassés</td>
+                        <td>EMERGENCY HALT</td>
+                    </tr>
+                    <tr>
+                        <td>Conformité</td>
+                        <td>Respect des règles EU/AMF</td>
+                        <td>LOG / BLOCK</td>
+                    </tr>
+                    <tr>
+                        <td>Rate limiting</td>
+                        <td>Anti-HFT, contrôle du rythme</td>
+                        <td>THROTTLE / BLOCK</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="info-box danger">
+                <strong>⛔ RÈGLE ABSOLUE</strong>
+                Le Risk Agent peut BLOQUER n'importe quelle décision du CIO.
+                Le CIO ne peut PAS contourner le Risk Agent.
+                C'est une séparation des responsabilités imposée par CLAUDE.md.
+            </div>
+        </section>
+
+        <!-- Section 2: Position Limits -->
+        <section>
+            <h2><span class="num">2</span> Limites par Position</h2>
+
+            <div class="rules-grid">
+                <div class="rule-card critical">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-POS-001</span>
+                        <span class="rule-severity severity-critical">CRITICAL</span>
+                    </div>
+                    <div class="rule-title">Taille Maximum par Position</div>
+                    <div class="rule-description">
+                        Aucune position individuelle ne peut dépasser un pourcentage du portefeuille.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Seuil maximum</span>
+                            <span class="param-value">5% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Seuil d'alerte</span>
+                            <span class="param-value">4% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">NAV exemple</span>
+                            <span class="param-value">$1,000,000</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Max par position</span>
+                            <span class="param-value">$50,000</span>
+                        </div>
+                    </div>
+                    <div class="rule-action block">
+                        ⛔ Action: BLOCK si dépassement
+                    </div>
+                </div>
+
+                <div class="rule-card critical">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-POS-002</span>
+                        <span class="rule-severity severity-critical">CRITICAL</span>
+                    </div>
+                    <div class="rule-title">Concentration Sectorielle</div>
+                    <div class="rule-description">
+                        L'exposition à un secteur unique ne peut dépasser un seuil défini.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Seuil maximum</span>
+                            <span class="param-value">20% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Seuil d'alerte</span>
+                            <span class="param-value">15% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Secteurs trackés</span>
+                            <span class="param-value">11 (GICS)</span>
+                        </div>
+                    </div>
+                    <div class="rule-action block">
+                        ⛔ Action: BLOCK nouveaux trades du secteur
+                    </div>
+                </div>
+
+                <div class="rule-card warning">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-POS-003</span>
+                        <span class="rule-severity severity-high">HIGH</span>
+                    </div>
+                    <div class="rule-title">Concentration Géographique</div>
+                    <div class="rule-description">
+                        Limite d'exposition par région géographique.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">USA max</span>
+                            <span class="param-value">70% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Europe max</span>
+                            <span class="param-value">40% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Emerging max</span>
+                            <span class="param-value">15% du NAV</span>
+                        </div>
+                    </div>
+                    <div class="rule-action reduce">
+                        ⚠️ Action: REDUCE si proche du seuil
+                    </div>
+                </div>
+
+                <div class="rule-card warning">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-POS-004</span>
+                        <span class="rule-severity severity-high">HIGH</span>
+                    </div>
+                    <div class="rule-title">Position Corrélée</div>
+                    <div class="rule-description">
+                        Limite les positions fortement corrélées (>0.8).
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Corrélation seuil</span>
+                            <span class="param-value">> 0.80</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Max combiné</span>
+                            <span class="param-value">8% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Lookback</span>
+                            <span class="param-value">60 jours</span>
+                        </div>
+                    </div>
+                    <div class="rule-action reduce">
+                        ⚠️ Action: REDUCE nouvelle position
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 3: Global Limits -->
+        <section>
+            <h2><span class="num">3</span> Limites Globales</h2>
+
+            <div class="rules-grid">
+                <div class="rule-card critical">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-GLB-001</span>
+                        <span class="rule-severity severity-critical">CRITICAL</span>
+                    </div>
+                    <div class="rule-title">Exposition Totale (Gross)</div>
+                    <div class="rule-description">
+                        Somme des valeurs absolues de toutes les positions.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Maximum Gross</span>
+                            <span class="param-value">200% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Calcul</span>
+                            <span class="param-value">|Long| + |Short|</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Exemple NAV $1M</span>
+                            <span class="param-value">Max $2,000,000</span>
+                        </div>
+                    </div>
+                    <div class="rule-action block">
+                        ⛔ Action: BLOCK tout nouveau trade
+                    </div>
+                </div>
+
+                <div class="rule-card critical">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-GLB-002</span>
+                        <span class="rule-severity severity-critical">CRITICAL</span>
+                    </div>
+                    <div class="rule-title">Leverage Maximum</div>
+                    <div class="rule-description">
+                        Effet de levier maximum autorisé.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Leverage max</span>
+                            <span class="param-value">2.0x</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Calcul</span>
+                            <span class="param-value">Gross / NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Seuil d'alerte</span>
+                            <span class="param-value">1.5x</span>
+                        </div>
+                    </div>
+                    <div class="rule-action block">
+                        ⛔ Action: BLOCK et déleveraging
+                    </div>
+                </div>
+
+                <div class="rule-card critical">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-GLB-003</span>
+                        <span class="rule-severity severity-critical">CRITICAL</span>
+                    </div>
+                    <div class="rule-title">Value at Risk (VaR 95%)</div>
+                    <div class="rule-description">
+                        Perte maximale attendue à 95% de confiance sur 1 jour.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">VaR max</span>
+                            <span class="param-value">2% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Méthode</span>
+                            <span class="param-value">Historique 252j</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Exemple NAV $1M</span>
+                            <span class="param-value">Max $20,000</span>
+                        </div>
+                    </div>
+                    <div class="rule-action block">
+                        ⛔ Action: BLOCK si VaR post-trade > seuil
+                    </div>
+                </div>
+
+                <div class="rule-card warning">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-GLB-004</span>
+                        <span class="rule-severity severity-high">HIGH</span>
+                    </div>
+                    <div class="rule-title">Exposition Nette</div>
+                    <div class="rule-description">
+                        Différence entre positions longues et courtes.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Net exposure range</span>
+                            <span class="param-value">-50% à +100%</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Calcul</span>
+                            <span class="param-value">Long - Short</span>
+                        </div>
+                    </div>
+                    <div class="rule-action reduce">
+                        ⚠️ Action: ALERT si hors range
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 4: Drawdown -->
+        <section>
+            <h2><span class="num">4</span> Limites de Drawdown</h2>
+
+            <div class="rules-grid">
+                <div class="rule-card critical">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-DD-001</span>
+                        <span class="rule-severity severity-critical">CRITICAL</span>
+                    </div>
+                    <div class="rule-title">Daily Loss Limit</div>
+                    <div class="rule-description">
+                        Perte maximale autorisée sur une journée de trading.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Seuil HALT</span>
+                            <span class="param-value">-3% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Seuil REDUCE</span>
+                            <span class="param-value">-2% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Seuil ALERT</span>
+                            <span class="param-value">-1% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Reset</span>
+                            <span class="param-value">00:00 UTC</span>
+                        </div>
+                    </div>
+                    <div class="rule-action block">
+                        ⛔ Action: HALT TRADING pour la journée
+                    </div>
+                </div>
+
+                <div class="rule-card critical">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-DD-002</span>
+                        <span class="rule-severity severity-critical">CRITICAL</span>
+                    </div>
+                    <div class="rule-title">Maximum Drawdown</div>
+                    <div class="rule-description">
+                        Perte depuis le plus haut historique (High Water Mark).
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Seuil HALT</span>
+                            <span class="param-value">-10% du HWM</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Seuil REDUCE 50%</span>
+                            <span class="param-value">-7% du HWM</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Seuil ALERT</span>
+                            <span class="param-value">-5% du HWM</span>
+                        </div>
+                    </div>
+                    <div class="rule-action block">
+                        ⛔ Action: HALT + intervention humaine requise
+                    </div>
+                </div>
+
+                <div class="rule-card warning">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-DD-003</span>
+                        <span class="rule-severity severity-high">HIGH</span>
+                    </div>
+                    <div class="rule-title">Weekly Loss Limit</div>
+                    <div class="rule-description">
+                        Perte maximale autorisée sur une semaine.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Seuil REDUCE</span>
+                            <span class="param-value">-5% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Seuil ALERT</span>
+                            <span class="param-value">-3% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Reset</span>
+                            <span class="param-value">Lundi 00:00 UTC</span>
+                        </div>
+                    </div>
+                    <div class="rule-action reduce">
+                        ⚠️ Action: REDUCE taille positions 50%
+                    </div>
+                </div>
+
+                <div class="rule-card warning">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-DD-004</span>
+                        <span class="rule-severity severity-high">HIGH</span>
+                    </div>
+                    <div class="rule-title">Monthly Loss Limit</div>
+                    <div class="rule-description">
+                        Perte maximale autorisée sur un mois.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Seuil HALT</span>
+                            <span class="param-value">-8% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Seuil REDUCE</span>
+                            <span class="param-value">-5% du NAV</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Reset</span>
+                            <span class="param-value">1er du mois</span>
+                        </div>
+                    </div>
+                    <div class="rule-action block">
+                        ⛔ Action: HALT + review stratégie
+                    </div>
+                </div>
+            </div>
+
+            <h3>Visualisation des Seuils de Drawdown</h3>
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-value green">0%</div>
+                    <div class="metric-label">Zone Verte<br>Trading Normal</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value yellow">-1% à -2%</div>
+                    <div class="metric-label">Zone Jaune<br>Alertes Actives</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value orange">-2% à -3%</div>
+                    <div class="metric-label">Zone Orange<br>Taille Réduite</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value red">> -3%</div>
+                    <div class="metric-label">Zone Rouge<br>HALT TRADING</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 5: Macro Stress -->
+        <section>
+            <h2><span class="num">5</span> Stress Tests Macro</h2>
+
+            <p>Le Risk Agent surveille les indicateurs macro pour détecter les conditions de stress :</p>
+
+            <div class="rules-grid">
+                <div class="rule-card critical">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-MACRO-001</span>
+                        <span class="rule-severity severity-critical">CRITICAL</span>
+                    </div>
+                    <div class="rule-title">VIX Spike</div>
+                    <div class="rule-description">
+                        Indicateur de panique sur les marchés.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">VIX > 30</span>
+                            <span class="param-value">REDUCE 50%</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">VIX > 40</span>
+                            <span class="param-value">HALT new trades</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">VIX > 50</span>
+                            <span class="param-value">EMERGENCY HALT</span>
+                        </div>
+                    </div>
+                    <div class="rule-action block">
+                        ⛔ Mode défensif automatique
+                    </div>
+                </div>
+
+                <div class="rule-card critical">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-MACRO-002</span>
+                        <span class="rule-severity severity-critical">CRITICAL</span>
+                    </div>
+                    <div class="rule-title">Circuit Breaker Marché</div>
+                    <div class="rule-description">
+                        Si le marché déclenche un circuit breaker.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">SPX -7%</span>
+                            <span class="param-value">HALT immédiat</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">SPX -13%</span>
+                            <span class="param-value">HALT + liquidation</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">SPX -20%</span>
+                            <span class="param-value">Clôture marché</span>
+                        </div>
+                    </div>
+                    <div class="rule-action block">
+                        ⛔ HALT automatique
+                    </div>
+                </div>
+
+                <div class="rule-card warning">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-MACRO-003</span>
+                        <span class="rule-severity severity-high">HIGH</span>
+                    </div>
+                    <div class="rule-title">Spread de Crédit</div>
+                    <div class="rule-description">
+                        Spread HY - IG indiquant stress crédit.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Spread > 500 bps</span>
+                            <span class="param-value">ALERT</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Spread > 700 bps</span>
+                            <span class="param-value">REDUCE 30%</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Spread > 1000 bps</span>
+                            <span class="param-value">Risk-off mode</span>
+                        </div>
+                    </div>
+                    <div class="rule-action reduce">
+                        ⚠️ Réduction exposition crédit
+                    </div>
+                </div>
+
+                <div class="rule-card warning">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-MACRO-004</span>
+                        <span class="rule-severity severity-high">HIGH</span>
+                    </div>
+                    <div class="rule-title">Liquidité Marché</div>
+                    <div class="rule-description">
+                        Bid-Ask spreads anormalement larges.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Spread > 3x normal</span>
+                            <span class="param-value">ALERT</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Spread > 5x normal</span>
+                            <span class="param-value">REDUCE taille</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Spread > 10x normal</span>
+                            <span class="param-value">HALT symbol</span>
+                        </div>
+                    </div>
+                    <div class="rule-action reduce">
+                        ⚠️ Réduire taille ordres
+                    </div>
+                </div>
+            </div>
+
+            <h3>Matrice de Stress Macro</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Indicateur</th>
+                        <th>Normal</th>
+                        <th>Élevé</th>
+                        <th>Stress</th>
+                        <th>Crise</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>VIX</td>
+                        <td><span class="status-badge status-pass">< 20</span></td>
+                        <td><span class="status-badge status-warn">20-30</span></td>
+                        <td><span class="status-badge status-reduce">30-40</span></td>
+                        <td><span class="status-badge status-halt">> 40</span></td>
+                    </tr>
+                    <tr>
+                        <td>SPX Daily</td>
+                        <td><span class="status-badge status-pass">> -2%</span></td>
+                        <td><span class="status-badge status-warn">-2% à -4%</span></td>
+                        <td><span class="status-badge status-reduce">-4% à -7%</span></td>
+                        <td><span class="status-badge status-halt">< -7%</span></td>
+                    </tr>
+                    <tr>
+                        <td>Credit Spread</td>
+                        <td><span class="status-badge status-pass">< 400 bps</span></td>
+                        <td><span class="status-badge status-warn">400-600</span></td>
+                        <td><span class="status-badge status-reduce">600-800</span></td>
+                        <td><span class="status-badge status-halt">> 800</span></td>
+                    </tr>
+                    <tr>
+                        <td>Bid-Ask Ratio</td>
+                        <td><span class="status-badge status-pass">< 2x</span></td>
+                        <td><span class="status-badge status-warn">2-4x</span></td>
+                        <td><span class="status-badge status-reduce">4-8x</span></td>
+                        <td><span class="status-badge status-halt">> 8x</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Section 6: Rate Limiting -->
+        <section>
+            <h2><span class="num">6</span> Rate Limiting (Anti-HFT)</h2>
+
+            <div class="info-box warning">
+                <strong>⚠️ CLAUDE.md - Explicitement Hors Périmètre:</strong>
+                "Trading Haute Fréquence (HFT)" - Le système impose des limites strictes pour éviter tout comportement HFT.
+            </div>
+
+            <div class="rules-grid">
+                <div class="rule-card critical">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-RATE-001</span>
+                        <span class="rule-severity severity-critical">CRITICAL</span>
+                    </div>
+                    <div class="rule-title">Ordres par Minute</div>
+                    <div class="rule-description">
+                        Limite le nombre d'ordres envoyés par minute.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Maximum</span>
+                            <span class="param-value">10 ordres/min</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Seuil alerte</span>
+                            <span class="param-value">7 ordres/min</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Cooldown si dépassé</span>
+                            <span class="param-value">60 secondes</span>
+                        </div>
+                    </div>
+                    <div class="rule-action block">
+                        ⛔ Action: BLOCK + cooldown
+                    </div>
+                </div>
+
+                <div class="rule-card critical">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-RATE-002</span>
+                        <span class="rule-severity severity-critical">CRITICAL</span>
+                    </div>
+                    <div class="rule-title">Intervalle Minimum</div>
+                    <div class="rule-description">
+                        Temps minimum entre deux ordres consécutifs.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Intervalle min</span>
+                            <span class="param-value">100 ms</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Intervalle recommandé</span>
+                            <span class="param-value">500 ms</span>
+                        </div>
+                    </div>
+                    <div class="rule-action block">
+                        ⛔ Action: DELAY ordre
+                    </div>
+                </div>
+
+                <div class="rule-card warning">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-RATE-003</span>
+                        <span class="rule-severity severity-high">HIGH</span>
+                    </div>
+                    <div class="rule-title">Ordres par Heure</div>
+                    <div class="rule-description">
+                        Limite horaire pour éviter l'over-trading.
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Maximum</span>
+                            <span class="param-value">100 ordres/heure</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">Reset</span>
+                            <span class="param-value">Chaque heure</span>
+                        </div>
+                    </div>
+                    <div class="rule-action reduce">
+                        ⚠️ Action: Throttle progressif
+                    </div>
+                </div>
+
+                <div class="rule-card warning">
+                    <div class="rule-header">
+                        <span class="rule-id">RULE-RATE-004</span>
+                        <span class="rule-severity severity-medium">MEDIUM</span>
+                    </div>
+                    <div class="rule-title">Quote Refresh (MM)</div>
+                    <div class="rule-description">
+                        Intervalle minimum pour rafraîchir les quotes (Market Making).
+                    </div>
+                    <div class="rule-params">
+                        <div class="param-row">
+                            <span class="param-name">Minimum</span>
+                            <span class="param-value">1000 ms</span>
+                        </div>
+                        <div class="param-row">
+                            <span class="param-name">IB compatible</span>
+                            <span class="param-value">>= 100 ms</span>
+                        </div>
+                    </div>
+                    <div class="rule-action warn">
+                        ℹ️ Action: Throttle quotes
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 7: Kill Switch -->
+        <section>
+            <h2><span class="num">7</span> Kill-Switch Automatique</h2>
+
+            <div class="killswitch-box">
+                <div class="killswitch-icon">🚨</div>
+                <div class="killswitch-title">EMERGENCY HALT SYSTEM</div>
+                <div class="killswitch-desc">
+                    Arrêt automatique et immédiat de TOUT le trading si l'un des seuils critiques est atteint.
+                    Aucune intervention humaine requise pour DÉCLENCHER - mais REQUISE pour REPRENDRE.
+                </div>
+
+                <div class="killswitch-triggers">
+                    <div class="trigger-item">
+                        <div class="threshold">-3%</div>
+                        <div class="label">Daily Loss</div>
+                    </div>
+                    <div class="trigger-item">
+                        <div class="threshold">-10%</div>
+                        <div class="label">Max Drawdown</div>
+                    </div>
+                    <div class="trigger-item">
+                        <div class="threshold">VIX > 50</div>
+                        <div class="label">Market Panic</div>
+                    </div>
+                    <div class="trigger-item">
+                        <div class="threshold">Broker Error</div>
+                        <div class="label">Connection Lost</div>
+                    </div>
+                    <div class="trigger-item">
+                        <div class="threshold">3+ Rejects</div>
+                        <div class="label">Consecutive Failures</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="algorithm-box">
+                <div class="title">🚨 ALGORITHME: Kill-Switch</div>
+                <div class="pseudo-code">
+<span class="keyword">function</span> <span class="function">check_kill_switch</span>() -> <span class="type">bool</span>:
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// TRIGGER 1: Daily Loss Limit</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">if</span> portfolio.daily_pnl_pct <= <span class="number">-0.03</span>:  <span class="comment">// -3%</span>
+        <span class="function">trigger_emergency_halt</span>(<span class="string">"DAILY_LOSS_LIMIT"</span>)
+        <span class="keyword">return</span> <span class="keyword">True</span>
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// TRIGGER 2: Maximum Drawdown</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    drawdown = (portfolio.high_water_mark - portfolio.nav) / portfolio.high_water_mark
+    <span class="keyword">if</span> drawdown >= <span class="number">0.10</span>:  <span class="comment">// -10%</span>
+        <span class="function">trigger_emergency_halt</span>(<span class="string">"MAX_DRAWDOWN"</span>)
+        <span class="keyword">return</span> <span class="keyword">True</span>
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// TRIGGER 3: Market Panic (VIX)</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">if</span> market_data.vix > <span class="number">50</span>:
+        <span class="function">trigger_emergency_halt</span>(<span class="string">"MARKET_PANIC_VIX"</span>)
+        <span class="keyword">return</span> <span class="keyword">True</span>
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// TRIGGER 4: Broker Connection Lost</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">if not</span> broker.<span class="function">is_connected</span>():
+        <span class="function">trigger_emergency_halt</span>(<span class="string">"BROKER_DISCONNECTED"</span>)
+        <span class="keyword">return</span> <span class="keyword">True</span>
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// TRIGGER 5: Consecutive Order Failures</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">if</span> execution.consecutive_failures >= <span class="number">3</span>:
+        <span class="function">trigger_emergency_halt</span>(<span class="string">"CONSECUTIVE_FAILURES"</span>)
+        <span class="keyword">return</span> <span class="keyword">True</span>
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// TRIGGER 6: Circuit Breaker Marché</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">if</span> market_data.spx_daily_change <= <span class="number">-0.07</span>:  <span class="comment">// -7%</span>
+        <span class="function">trigger_emergency_halt</span>(<span class="string">"MARKET_CIRCUIT_BREAKER"</span>)
+        <span class="keyword">return</span> <span class="keyword">True</span>
+
+    <span class="keyword">return</span> <span class="keyword">False</span>
+
+
+<span class="keyword">function</span> <span class="function">trigger_emergency_halt</span>(reason: <span class="type">str</span>):
+
+    <span class="comment">// 1. Stopper IMMÉDIATEMENT tout trading</span>
+    trading_enabled = <span class="keyword">False</span>
+
+    <span class="comment">// 2. Annuler tous les ordres en cours</span>
+    <span class="keyword">for</span> order <span class="keyword">in</span> pending_orders:
+        broker.<span class="function">cancel_order</span>(order.id)
+
+    <span class="comment">// 3. Logger l'événement (CRITIQUE)</span>
+    audit_logger.<span class="function">log_emergency_halt</span>(
+        reason = reason,
+        portfolio_state = portfolio.<span class="function">snapshot</span>(),
+        timestamp = <span class="function">now</span>()
+    )
+
+    <span class="comment">// 4. Publier RiskAlertEvent</span>
+    event_bus.<span class="function">publish</span>(<span class="type">RiskAlertEvent</span>(
+        severity = <span class="string">"EMERGENCY"</span>,
+        alert_type = <span class="string">"KILL_SWITCH"</span>,
+        message = f<span class="string">"EMERGENCY HALT: {reason}"</span>,
+        halt_trading = <span class="keyword">True</span>
+    ))
+
+    <span class="comment">// 5. Notification externe (si configuré)</span>
+    alerting.<span class="function">send_emergency_alert</span>(reason)
+
+    <span class="function">log_critical</span>(f<span class="string">"🚨 EMERGENCY HALT TRIGGERED: {reason}"</span>)
+                </div>
+            </div>
+
+            <div class="info-box danger">
+                <strong>⛔ REPRISE DU TRADING</strong>
+                Après un kill-switch, le trading NE PEUT PAS reprendre automatiquement.
+                Une intervention humaine est OBLIGATOIRE via <code>risk_agent.resume_trading()</code>
+                après analyse de la situation.
+            </div>
+        </section>
+
+        <!-- Section 8: Validation Algorithm -->
+        <section>
+            <h2><span class="num">8</span> Algorithme de Validation</h2>
+
+            <div class="algorithm-box">
+                <div class="title">ALGORITHME: validate_decision()</div>
+                <div class="pseudo-code">
+<span class="keyword">async function</span> <span class="function">validate_decision</span>(decision: <span class="type">DecisionEvent</span>) -> <span class="type">ValidatedDecisionEvent</span>:
+
+    checks_passed = []
+    adjusted_quantity = decision.quantity
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CHECK 0: Kill-switch actif?</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">if</span> trading_halted:
+        <span class="keyword">return</span> <span class="function">reject</span>(<span class="string">"TRADING_HALTED"</span>, <span class="string">"Trading is halted: {halt_reason}"</span>)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CHECK 1: Instrument banni?</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">if</span> decision.symbol <span class="keyword">in</span> banned_instruments:
+        <span class="keyword">return</span> <span class="function">reject</span>(<span class="string">"BANNED_INSTRUMENT"</span>, f<span class="string">"{symbol} is banned"</span>)
+    checks_passed.<span class="function">append</span>(<span class="string">"banned_check"</span>)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CHECK 2: Position size limit (5% max)</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    position_value = decision.quantity × current_price
+    max_position = portfolio.nav × <span class="number">0.05</span>
+
+    <span class="keyword">if</span> position_value > max_position:
+        <span class="comment">// Option 1: Reject</span>
+        <span class="comment">// return reject("POSITION_TOO_LARGE", ...)</span>
+
+        <span class="comment">// Option 2: Reduce (préféré)</span>
+        adjusted_quantity = <span class="function">floor</span>(max_position / current_price / <span class="number">10</span>) × <span class="number">10</span>
+        <span class="keyword">if</span> adjusted_quantity < <span class="number">10</span>:
+            <span class="keyword">return</span> <span class="function">reject</span>(<span class="string">"POSITION_TOO_SMALL"</span>, <span class="string">"Adjusted size too small"</span>)
+    checks_passed.<span class="function">append</span>(<span class="string">"position_limit"</span>)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CHECK 3: Sector concentration (20% max)</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    sector = <span class="function">get_sector</span>(decision.symbol)
+    current_sector_exposure = portfolio.<span class="function">get_sector_exposure</span>(sector)
+    new_sector_exposure = current_sector_exposure + position_value
+
+    <span class="keyword">if</span> new_sector_exposure > portfolio.nav × <span class="number">0.20</span>:
+        <span class="keyword">return</span> <span class="function">reject</span>(<span class="string">"SECTOR_LIMIT"</span>, f<span class="string">"Sector {sector} at {exposure:.1%}"</span>)
+    checks_passed.<span class="function">append</span>(<span class="string">"sector_limit"</span>)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CHECK 4: Daily loss limit</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">if</span> portfolio.daily_pnl_pct < <span class="number">-0.02</span>:  <span class="comment">// -2%</span>
+        <span class="comment">// Mode dégradé: réduire taille de 50%</span>
+        adjusted_quantity = adjusted_quantity // <span class="number">2</span>
+    <span class="keyword">if</span> portfolio.daily_pnl_pct < <span class="number">-0.03</span>:  <span class="comment">// -3%</span>
+        <span class="keyword">return</span> <span class="function">reject</span>(<span class="string">"DAILY_LOSS_LIMIT"</span>, <span class="string">"Daily loss exceeds 3%"</span>)
+    checks_passed.<span class="function">append</span>(<span class="string">"daily_loss"</span>)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CHECK 5: Drawdown limit</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">if</span> portfolio.drawdown_pct > <span class="number">0.07</span>:  <span class="comment">// -7%</span>
+        adjusted_quantity = adjusted_quantity // <span class="number">2</span>
+    <span class="keyword">if</span> portfolio.drawdown_pct > <span class="number">0.10</span>:  <span class="comment">// -10%</span>
+        <span class="keyword">return</span> <span class="function">reject</span>(<span class="string">"MAX_DRAWDOWN"</span>, <span class="string">"Drawdown exceeds 10%"</span>)
+    checks_passed.<span class="function">append</span>(<span class="string">"drawdown"</span>)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CHECK 6: Leverage limit (2x max)</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    new_gross = portfolio.gross_exposure + position_value
+    new_leverage = new_gross / portfolio.nav
+
+    <span class="keyword">if</span> new_leverage > <span class="number">2.0</span>:
+        <span class="keyword">return</span> <span class="function">reject</span>(<span class="string">"LEVERAGE_LIMIT"</span>, f<span class="string">"Leverage {new_leverage:.2f}x > 2.0x"</span>)
+    checks_passed.<span class="function">append</span>(<span class="string">"leverage"</span>)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CHECK 7: Rate limit (10 orders/min)</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">if</span> orders_this_minute >= <span class="number">10</span>:
+        <span class="keyword">return</span> <span class="function">reject</span>(<span class="string">"RATE_LIMIT"</span>, <span class="string">"Max 10 orders/minute reached"</span>)
+    checks_passed.<span class="function">append</span>(<span class="string">"rate_limit"</span>)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CHECK 8: Order interval (100ms min)</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    time_since_last = <span class="function">now</span>() - last_order_time
+    <span class="keyword">if</span> time_since_last < <span class="number">100</span>ms:
+        <span class="keyword">return</span> <span class="function">reject</span>(<span class="string">"ORDER_INTERVAL"</span>, <span class="string">"Min 100ms between orders"</span>)
+    checks_passed.<span class="function">append</span>(<span class="string">"order_interval"</span>)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CHECK 9: VaR check</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    new_var = <span class="function">calculate_var_post_trade</span>(decision)
+    <span class="keyword">if</span> new_var > portfolio.nav × <span class="number">0.02</span>:
+        <span class="keyword">return</span> <span class="function">reject</span>(<span class="string">"VAR_LIMIT"</span>, f<span class="string">"VaR {new_var:.2%} > 2%"</span>)
+    checks_passed.<span class="function">append</span>(<span class="string">"var_check"</span>)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// CHECK 10: Macro stress check</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="keyword">if</span> market_data.vix > <span class="number">40</span>:
+        <span class="keyword">return</span> <span class="function">reject</span>(<span class="string">"MACRO_STRESS"</span>, f<span class="string">"VIX {vix} > 40, no new trades"</span>)
+    <span class="keyword">if</span> market_data.vix > <span class="number">30</span>:
+        adjusted_quantity = adjusted_quantity // <span class="number">2</span>
+    checks_passed.<span class="function">append</span>(<span class="string">"macro_stress"</span>)
+
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment">// ALL CHECKS PASSED - APPROVED</span>
+    <span class="comment">// ═══════════════════════════════════════════════════════════════</span>
+
+    <span class="comment">// Calculer les métriques de risque</span>
+    risk_metrics = {
+        <span class="string">"var_pct"</span>: new_var / portfolio.nav,
+        <span class="string">"leverage"</span>: new_leverage,
+        <span class="string">"drawdown_pct"</span>: portfolio.drawdown_pct,
+        <span class="string">"daily_pnl_pct"</span>: portfolio.daily_pnl_pct,
+    }
+
+    <span class="keyword">return</span> <span class="type">ValidatedDecisionEvent</span>(
+        source_agent = <span class="string">"RiskComplianceAgent"</span>,
+        original_decision_id = decision.event_id,
+        approved = <span class="keyword">True</span>,
+        adjusted_quantity = adjusted_quantity <span class="keyword">if</span> adjusted_quantity != decision.quantity <span class="keyword">else</span> <span class="keyword">None</span>,
+        rejection_reason = <span class="keyword">None</span>,
+        risk_metrics = risk_metrics,
+        compliance_checks = <span class="function">tuple</span>(checks_passed)
+    )
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 9: Concrete Scenarios -->
+        <section>
+            <h2><span class="num">9</span> Cas Concrets de Blocage</h2>
+
+            <h3>Scénario 1: Position trop grande</h3>
+            <div class="scenario-box">
+                <div class="scenario-header">
+                    <span class="scenario-title">📊 CIO veut acheter 500 AAPL @ $180</span>
+                    <span class="scenario-result result-reduced">REDUCED</span>
+                </div>
+                <div class="scenario-body">
+                    <div class="scenario-context">
+                        <div class="label">Contexte</div>
+                        Portfolio NAV: $1,000,000 | Position demandée: $90,000 (9% du NAV)
+                    </div>
+                    <ul class="check-list">
+                        <li>
+                            <span class="check-icon pass">✓</span>
+                            <span class="check-text">Instrument non banni</span>
+                            <span class="check-value">AAPL OK</span>
+                        </li>
+                        <li>
+                            <span class="check-icon fail">✗</span>
+                            <span class="check-text">Position size limit (5% max)</span>
+                            <span class="check-value">9% > 5%</span>
+                        </li>
+                    </ul>
+                    <div class="info-box warning" style="margin-top: 1rem;">
+                        <strong>Action:</strong> Quantité réduite de 500 → 270 actions ($48,600 = 4.86% du NAV)
+                    </div>
+                </div>
+            </div>
+
+            <h3>Scénario 2: Daily loss limit atteint</h3>
+            <div class="scenario-box">
+                <div class="scenario-header">
+                    <span class="scenario-title">📉 CIO veut shorter SPY après une journée difficile</span>
+                    <span class="scenario-result result-blocked">BLOCKED</span>
+                </div>
+                <div class="scenario-body">
+                    <div class="scenario-context">
+                        <div class="label">Contexte</div>
+                        Daily P&L: -$32,000 (-3.2% du NAV) | Position demandée: Short 200 SPY
+                    </div>
+                    <ul class="check-list">
+                        <li>
+                            <span class="check-icon pass">✓</span>
+                            <span class="check-text">Instrument non banni</span>
+                            <span class="check-value">SPY OK</span>
+                        </li>
+                        <li>
+                            <span class="check-icon pass">✓</span>
+                            <span class="check-text">Position size limit</span>
+                            <span class="check-value">4.5% < 5%</span>
+                        </li>
+                        <li>
+                            <span class="check-icon fail">✗</span>
+                            <span class="check-text">Daily loss limit (-3% max)</span>
+                            <span class="check-value">-3.2% > -3%</span>
+                        </li>
+                    </ul>
+                    <div class="info-box danger" style="margin-top: 1rem;">
+                        <strong>Action:</strong> REJECT - "Daily loss limit exceeded (-3.2% > -3%)"
+                        <br>Trading HALTED pour le reste de la journée.
+                    </div>
+                </div>
+            </div>
+
+            <h3>Scénario 3: Rate limit dépassé</h3>
+            <div class="scenario-box">
+                <div class="scenario-header">
+                    <span class="scenario-title">⚡ CIO envoie 11ème ordre en 1 minute</span>
+                    <span class="scenario-result result-blocked">BLOCKED</span>
+                </div>
+                <div class="scenario-body">
+                    <div class="scenario-context">
+                        <div class="label">Contexte</div>
+                        Ordres cette minute: 10 | Temps depuis dernier ordre: 2.3s
+                    </div>
+                    <ul class="check-list">
+                        <li>
+                            <span class="check-icon pass">✓</span>
+                            <span class="check-text">Tous les checks de risque</span>
+                            <span class="check-value">OK</span>
+                        </li>
+                        <li>
+                            <span class="check-icon fail">✗</span>
+                            <span class="check-text">Rate limit (10/min max)</span>
+                            <span class="check-value">10/10 atteint</span>
+                        </li>
+                    </ul>
+                    <div class="info-box danger" style="margin-top: 1rem;">
+                        <strong>Action:</strong> REJECT - "Rate limit exceeded (10 orders/min)"
+                        <br>Cooldown: 60 secondes avant prochain ordre.
+                    </div>
+                </div>
+            </div>
+
+            <h3>Scénario 4: VIX Spike - Market Stress</h3>
+            <div class="scenario-box">
+                <div class="scenario-header">
+                    <span class="scenario-title">📈 VIX monte à 45 - CIO veut trader</span>
+                    <span class="scenario-result result-halt">HALT</span>
+                </div>
+                <div class="scenario-body">
+                    <div class="scenario-context">
+                        <div class="label">Contexte</div>
+                        VIX: 45 | SPX: -4.2% today | Décision: Buy 100 QQQ
+                    </div>
+                    <ul class="check-list">
+                        <li>
+                            <span class="check-icon pass">✓</span>
+                            <span class="check-text">Position size, leverage, sector</span>
+                            <span class="check-value">OK</span>
+                        </li>
+                        <li>
+                            <span class="check-icon fail">✗</span>
+                            <span class="check-text">Macro stress check (VIX < 40)</span>
+                            <span class="check-value">VIX 45 > 40</span>
+                        </li>
+                    </ul>
+                    <div class="info-box danger" style="margin-top: 1rem;">
+                        <strong>Action:</strong> REJECT - "VIX 45 > 40, no new trades allowed"
+                        <br>Mode: DEFENSIVE - Seules les liquidations sont autorisées.
+                    </div>
+                </div>
+            </div>
+
+            <h3>Scénario 5: Validation réussie avec ajustements</h3>
+            <div class="scenario-box">
+                <div class="scenario-header">
+                    <span class="scenario-title">✅ Trade validé avec réduction (VIX élevé)</span>
+                    <span class="scenario-result result-approved">APPROVED</span>
+                </div>
+                <div class="scenario-body">
+                    <div class="scenario-context">
+                        <div class="label">Contexte</div>
+                        VIX: 32 | Daily P&L: -0.8% | Décision: Buy 200 MSFT @ $380
+                    </div>
+                    <ul class="check-list">
+                        <li>
+                            <span class="check-icon pass">✓</span>
+                            <span class="check-text">Instrument check</span>
+                            <span class="check-value">MSFT OK</span>
+                        </li>
+                        <li>
+                            <span class="check-icon pass">✓</span>
+                            <span class="check-text">Position size (7.6% demandé)</span>
+                            <span class="check-value">Réduit à 4.9%</span>
+                        </li>
+                        <li>
+                            <span class="check-icon pass">✓</span>
+                            <span class="check-text">Sector limit (Tech: 18%)</span>
+                            <span class="check-value">< 20%</span>
+                        </li>
+                        <li>
+                            <span class="check-icon pass">✓</span>
+                            <span class="check-text">Daily loss</span>
+                            <span class="check-value">-0.8% OK</span>
+                        </li>
+                        <li>
+                            <span class="check-icon warn">⚠</span>
+                            <span class="check-text">Macro stress (VIX 32)</span>
+                            <span class="check-value">Réduit 50%</span>
+                        </li>
+                    </ul>
+                    <div class="info-box success" style="margin-top: 1rem;">
+                        <strong>Action:</strong> APPROVED avec adjusted_quantity
+                        <br>Original: 200 → Ajusté: 65 actions (après 2 réductions)
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 10: Interaction Diagram -->
+        <section>
+            <h2><span class="num">10</span> Interaction avec CIO et Execution</h2>
+
+            <div class="diagram">
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                        FLUX: CIO → RISK → EXECUTION                                     │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                         │
+│   ┌─────────────┐                ┌─────────────┐                ┌─────────────┐        │
+│   │  CIO AGENT  │                │ RISK AGENT  │                │  EXECUTION  │        │
+│   │             │                │             │                │    AGENT    │        │
+│   └──────┬──────┘                └──────┬──────┘                └──────┬──────┘        │
+│          │                              │                              │               │
+│          │                              │                              │               │
+│          │  DecisionEvent               │                              │               │
+│          │  {                           │                              │               │
+│          │    symbol: "AAPL",           │                              │               │
+│          │    action: "BUY",            │                              │               │
+│          │    quantity: 500,            │                              │               │
+│          │    conviction: 0.72          │                              │               │
+│          │  }                           │                              │               │
+│          │ ────────────────────────────▶│                              │               │
+│          │                              │                              │               │
+│          │                              │  ┌─────────────────────┐     │               │
+│          │                              │  │   VALIDATION        │     │               │
+│          │                              │  │                     │     │               │
+│          │                              │  │ ✓ banned_check      │     │               │
+│          │                              │  │ ⚠ position_limit    │     │               │
+│          │                              │  │   (REDUCE 500→270)  │     │               │
+│          │                              │  │ ✓ sector_limit      │     │               │
+│          │                              │  │ ✓ daily_loss        │     │               │
+│          │                              │  │ ✓ drawdown          │     │               │
+│          │                              │  │ ✓ leverage          │     │               │
+│          │                              │  │ ✓ rate_limit        │     │               │
+│          │                              │  │ ✓ var_check         │     │               │
+│          │                              │  └─────────────────────┘     │               │
+│          │                              │                              │               │
+│          │                              │                              │               │
+│          │                    ┌─────────┴─────────┐                    │               │
+│          │                    │                   │                    │               │
+│          │                    ▼                   ▼                    │               │
+│          │             [APPROVED]           [REJECTED]                 │               │
+│          │                    │                   │                    │               │
+│          │                    │                   │                    │               │
+│          │                    │                   └──▶ Log & Stop      │               │
+│          │                    │                                        │               │
+│          │                    │  ValidatedDecisionEvent                │               │
+│          │                    │  {                                     │               │
+│          │                    │    approved: true,                     │               │
+│          │                    │    adjusted_quantity: 270,             │               │
+│          │                    │    risk_metrics: {...}                 │               │
+│          │                    │  }                                     │               │
+│          │                    │ ──────────────────────────────────────▶│               │
+│          │                    │                                        │               │
+│          │                    │                                        │  OrderEvent   │
+│          │                    │                                        │  {            │
+│          │                    │                                        │    qty: 270   │
+│          │                    │                                        │  }            │
+│          │                    │                                        │ ─────────────▶│
+│          │                    │                                        │         [IB]  │
+│          │                    │                                        │               │
+│          ▼                    ▼                                        ▼               │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+            </div>
+
+            <h3>Format ValidatedDecisionEvent</h3>
+            <div class="json-block">
+{
+    <span class="key">"event_id"</span>: <span class="string">"val_abc123"</span>,
+    <span class="key">"event_type"</span>: <span class="string">"VALIDATED_DECISION"</span>,
+    <span class="key">"timestamp"</span>: <span class="string">"2024-01-15T14:30:06.456Z"</span>,
+    <span class="key">"source_agent"</span>: <span class="string">"RiskComplianceAgent"</span>,
+
+    <span class="key">"original_decision_id"</span>: <span class="string">"dec_7f8a9b2c"</span>,
+    <span class="key">"approved"</span>: <span class="bool">true</span>,
+    <span class="key">"adjusted_quantity"</span>: <span class="number">270</span>,           <span class="comment">// null si pas d'ajustement</span>
+    <span class="key">"rejection_reason"</span>: <span class="string">null</span>,          <span class="comment">// string si rejeté</span>
+
+    <span class="key">"risk_metrics"</span>: {
+        <span class="key">"var_pct"</span>: <span class="number">0.018</span>,
+        <span class="key">"leverage"</span>: <span class="number">1.45</span>,
+        <span class="key">"drawdown_pct"</span>: <span class="number">0.032</span>,
+        <span class="key">"daily_pnl_pct"</span>: <span class="number">-0.008</span>,
+        <span class="key">"sector_exposure"</span>: {
+            <span class="key">"Technology"</span>: <span class="number">0.18</span>
+        }
+    },
+
+    <span class="key">"compliance_checks"</span>: [
+        <span class="string">"banned_check"</span>,
+        <span class="string">"position_limit"</span>,
+        <span class="string">"sector_limit"</span>,
+        <span class="string">"daily_loss"</span>,
+        <span class="string">"drawdown"</span>,
+        <span class="string">"leverage"</span>,
+        <span class="string">"rate_limit"</span>,
+        <span class="string">"order_interval"</span>,
+        <span class="string">"var_check"</span>,
+        <span class="string">"macro_stress"</span>
+    ]
+}
+            </div>
+        </section>
+
+        <!-- Section 11: Summary Table -->
+        <section>
+            <h2><span class="num">11</span> Récapitulatif des Règles</h2>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Catégorie</th>
+                        <th>Règle</th>
+                        <th>Seuil</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td rowspan="4">Position</td>
+                        <td>Max position size</td>
+                        <td>5% NAV</td>
+                        <td><span class="status-badge status-reduce">REDUCE</span></td>
+                    </tr>
+                    <tr>
+                        <td>Max sector exposure</td>
+                        <td>20% NAV</td>
+                        <td><span class="status-badge status-block">BLOCK</span></td>
+                    </tr>
+                    <tr>
+                        <td>Max correlated positions</td>
+                        <td>8% NAV (ρ>0.8)</td>
+                        <td><span class="status-badge status-reduce">REDUCE</span></td>
+                    </tr>
+                    <tr>
+                        <td>Banned instruments</td>
+                        <td>Liste noire</td>
+                        <td><span class="status-badge status-block">BLOCK</span></td>
+                    </tr>
+                    <tr>
+                        <td rowspan="4">Global</td>
+                        <td>Max gross exposure</td>
+                        <td>200% NAV</td>
+                        <td><span class="status-badge status-block">BLOCK</span></td>
+                    </tr>
+                    <tr>
+                        <td>Max leverage</td>
+                        <td>2.0x</td>
+                        <td><span class="status-badge status-block">BLOCK</span></td>
+                    </tr>
+                    <tr>
+                        <td>Max VaR (95%)</td>
+                        <td>2% NAV</td>
+                        <td><span class="status-badge status-block">BLOCK</span></td>
+                    </tr>
+                    <tr>
+                        <td>Net exposure range</td>
+                        <td>-50% to +100%</td>
+                        <td><span class="status-badge status-warn">ALERT</span></td>
+                    </tr>
+                    <tr>
+                        <td rowspan="4">Drawdown</td>
+                        <td>Daily loss limit</td>
+                        <td>-3%</td>
+                        <td><span class="status-badge status-halt">HALT</span></td>
+                    </tr>
+                    <tr>
+                        <td>Weekly loss limit</td>
+                        <td>-5%</td>
+                        <td><span class="status-badge status-reduce">REDUCE 50%</span></td>
+                    </tr>
+                    <tr>
+                        <td>Monthly loss limit</td>
+                        <td>-8%</td>
+                        <td><span class="status-badge status-halt">HALT</span></td>
+                    </tr>
+                    <tr>
+                        <td>Max drawdown (HWM)</td>
+                        <td>-10%</td>
+                        <td><span class="status-badge status-halt">HALT</span></td>
+                    </tr>
+                    <tr>
+                        <td rowspan="3">Macro Stress</td>
+                        <td>VIX level</td>
+                        <td>>40: HALT, >30: -50%</td>
+                        <td><span class="status-badge status-halt">HALT</span></td>
+                    </tr>
+                    <tr>
+                        <td>Circuit breaker</td>
+                        <td>SPX -7%</td>
+                        <td><span class="status-badge status-halt">HALT</span></td>
+                    </tr>
+                    <tr>
+                        <td>Credit spread</td>
+                        <td>>800 bps</td>
+                        <td><span class="status-badge status-reduce">REDUCE</span></td>
+                    </tr>
+                    <tr>
+                        <td rowspan="3">Rate Limit</td>
+                        <td>Orders per minute</td>
+                        <td>10 max</td>
+                        <td><span class="status-badge status-block">BLOCK</span></td>
+                    </tr>
+                    <tr>
+                        <td>Order interval</td>
+                        <td>100ms min</td>
+                        <td><span class="status-badge status-block">DELAY</span></td>
+                    </tr>
+                    <tr>
+                        <td>Orders per hour</td>
+                        <td>100 max</td>
+                        <td><span class="status-badge status-warn">THROTTLE</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <footer>
+            <p>AI Trading Firm - Risk Manager Agent Documentation</p>
+            <p>
+                <a href="architecture.html">Architecture</a> |
+                <a href="concurrency.html">Concurrence</a> |
+                <a href="cio-agent.html">CIO Agent</a> |
+                <a href="../claude.md">CLAUDE.md</a>
+            </p>
+            <p style="margin-top: 0.5rem; font-size: 0.8rem;">
+                🛡️ Capital Protection First | Kill-Switch Automatique | Conformité EU/AMF
+            </p>
+        </footer>
+    </div>
+</body>
+</html>

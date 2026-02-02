@@ -1,0 +1,1789 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Backtest & Paper Trading - AI Trading Firm</title>
+    <style>
+        :root {
+            --primary: #00695c;
+            --secondary: #00897b;
+            --accent: #26a69a;
+            --paper: #ff9800;
+            --live: #f44336;
+            --backtest: #3f51b5;
+            --success: #4caf50;
+            --warning: #ffc107;
+            --bg: #fafafa;
+            --card: #ffffff;
+            --text: #212121;
+            --border: #e0e0e0;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+        .header {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            padding: 3rem 2rem;
+            text-align: center;
+        }
+        .header h1 { font-size: 2.5rem; margin-bottom: 0.5rem; }
+        .header .subtitle { opacity: 0.9; font-size: 1.2rem; }
+        .mode-badges { margin-top: 1rem; }
+        .badge {
+            display: inline-block;
+            padding: 0.4rem 1rem;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin: 0.25rem;
+        }
+        .badge-backtest { background: var(--backtest); color: white; }
+        .badge-paper { background: var(--paper); color: white; }
+        .badge-live { background: var(--live); color: white; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 2rem; }
+        .nav {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .nav h3 { color: var(--primary); margin-bottom: 1rem; }
+        .nav-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 0.5rem;
+        }
+        .nav a {
+            color: var(--secondary);
+            text-decoration: none;
+            padding: 0.5rem;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+        .nav a:hover { background: #e0f2f1; }
+        .section {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .section h2 {
+            color: var(--primary);
+            border-bottom: 3px solid var(--accent);
+            padding-bottom: 0.5rem;
+            margin-bottom: 1.5rem;
+        }
+        .section h3 { color: var(--secondary); margin: 1.5rem 0 1rem; }
+        .section h4 { color: #455a64; margin: 1rem 0 0.5rem; }
+        .principle-box {
+            background: linear-gradient(135deg, #e0f2f1, #b2dfdb);
+            border-left: 4px solid var(--primary);
+            padding: 1.5rem;
+            border-radius: 0 8px 8px 0;
+            margin: 1rem 0;
+        }
+        .principle-box .title {
+            font-weight: 700;
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+        }
+        .code-block {
+            background: #263238;
+            color: #aed581;
+            padding: 1.5rem;
+            border-radius: 8px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+            margin: 1rem 0;
+        }
+        .code-block .comment { color: #78909c; }
+        .code-block .key { color: #81d4fa; }
+        .code-block .string { color: #c5e1a5; }
+        .code-block .number { color: #ffcc80; }
+        .code-block .bool { color: #f48fb1; }
+        .code-block .class { color: #ce93d8; }
+        .code-block .func { color: #80deea; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        th {
+            background: #e0f2f1;
+            color: var(--primary);
+            font-weight: 600;
+        }
+        tr:hover { background: #f5f5f5; }
+        .mode-card {
+            border: 2px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+        }
+        .mode-card.backtest { border-color: var(--backtest); }
+        .mode-card.paper { border-color: var(--paper); }
+        .mode-card.live { border-color: var(--live); }
+        .mode-card .mode-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        .mode-card .mode-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            margin-right: 1rem;
+        }
+        .mode-card.backtest .mode-icon { background: #e8eaf6; }
+        .mode-card.paper .mode-icon { background: #fff3e0; }
+        .mode-card.live .mode-icon { background: #ffebee; }
+        .flow-diagram {
+            background: #fafafa;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 2rem;
+            margin: 1rem 0;
+            overflow-x: auto;
+        }
+        .flow-node {
+            display: inline-block;
+            padding: 0.75rem 1.25rem;
+            border-radius: 8px;
+            margin: 0.25rem;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        .flow-backtest { background: #e8eaf6; border: 2px solid var(--backtest); }
+        .flow-paper { background: #fff3e0; border: 2px solid var(--paper); }
+        .flow-live { background: #ffebee; border: 2px solid var(--live); }
+        .flow-neutral { background: #f5f5f5; border: 2px solid #9e9e9e; }
+        .flow-arrow {
+            display: inline-block;
+            color: #666;
+            margin: 0 0.5rem;
+            font-size: 1.2rem;
+        }
+        .checklist {
+            background: #f5f5f5;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+        }
+        .check-item {
+            display: flex;
+            align-items: flex-start;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .check-item:last-child { border-bottom: none; }
+        .check-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 1rem;
+            flex-shrink: 0;
+            font-weight: bold;
+            font-size: 0.8rem;
+        }
+        .check-required { background: var(--live); color: white; }
+        .check-recommended { background: var(--paper); color: white; }
+        .check-optional { background: #9e9e9e; color: white; }
+        .warning-box {
+            background: #fff8e1;
+            border-left: 4px solid var(--warning);
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .danger-box {
+            background: #ffebee;
+            border-left: 4px solid var(--live);
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .success-box {
+            background: #e8f5e9;
+            border-left: 4px solid var(--success);
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .info-box {
+            background: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+        .comparison-col {
+            background: #fafafa;
+            border-radius: 8px;
+            padding: 1rem;
+        }
+        .comparison-col h4 {
+            text-align: center;
+            padding: 0.5rem;
+            border-radius: 4px;
+            margin-bottom: 1rem;
+        }
+        .comparison-col.backtest h4 { background: var(--backtest); color: white; }
+        .comparison-col.paper h4 { background: var(--paper); color: white; }
+        .comparison-col.live h4 { background: var(--live); color: white; }
+        .metric-card {
+            background: white;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 0.5rem 0;
+            text-align: center;
+        }
+        .metric-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--primary);
+        }
+        .metric-label {
+            font-size: 0.85rem;
+            color: #666;
+        }
+        .timeline {
+            position: relative;
+            padding-left: 2.5rem;
+            margin: 1.5rem 0;
+        }
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 0.75rem;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: linear-gradient(to bottom, var(--backtest), var(--paper), var(--live));
+        }
+        .timeline-item {
+            position: relative;
+            padding: 1rem 0 1rem 1rem;
+            border-left: none;
+        }
+        .timeline-item::before {
+            content: attr(data-step);
+            position: absolute;
+            left: -2.5rem;
+            top: 1rem;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: var(--primary);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 0.75rem;
+        }
+        .gate-box {
+            background: linear-gradient(135deg, #fce4ec, #f8bbd9);
+            border: 2px solid var(--live);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+        }
+        .gate-box .gate-title {
+            font-weight: 700;
+            color: var(--live);
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+        }
+        @media (max-width: 768px) {
+            .header h1 { font-size: 1.8rem; }
+            .container { padding: 1rem; }
+            .section { padding: 1.5rem; }
+            .comparison-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Backtest & Paper Trading</h1>
+        <p class="subtitle">Rejouabilité • Validation • Transition Sécurisée</p>
+        <div class="mode-badges">
+            <span class="badge badge-backtest">Backtest</span>
+            <span class="badge badge-paper">Paper Trading</span>
+            <span class="badge badge-live">Live (Restreint)</span>
+        </div>
+    </div>
+
+    <div class="container">
+        <nav class="nav">
+            <h3>Navigation</h3>
+            <div class="nav-grid">
+                <a href="#overview">1. Vue d'Ensemble</a>
+                <a href="#modes">2. Modes d'Exécution</a>
+                <a href="#replay">3. Rejouabilité</a>
+                <a href="#determinism">4. Déterminisme</a>
+                <a href="#logs">5. Logs Exploitables</a>
+                <a href="#comparison">6. Décision vs Résultat</a>
+                <a href="#metrics">7. Métriques & KPIs</a>
+                <a href="#transition">8. Transition Paper → Live</a>
+                <a href="#validation">9. Validation Pré-Live</a>
+                <a href="#monitoring">10. Monitoring Continu</a>
+            </div>
+        </nav>
+
+        <!-- Section 1: Vue d'Ensemble -->
+        <section id="overview" class="section">
+            <h2>1. Vue d'Ensemble</h2>
+
+            <div class="principle-box">
+                <div class="title">Conformité CLAUDE.md</div>
+                <p><strong>Article 48:</strong> "Le paper trading est le mode par défaut"</p>
+                <p><strong>Article 21-26:</strong> "Comportement déterministe et reproductible"</p>
+                <p><strong>Article 55:</strong> "Le système doit être testable, observable et auditable"</p>
+            </div>
+
+            <h3>1.1 Philosophie du Système</h3>
+            <p>Le système est conçu selon le principe <strong>"Test First, Deploy Later"</strong>:</p>
+            <ul style="margin-left: 1.5rem; margin-top: 0.5rem;">
+                <li>Toute stratégie doit être validée en backtest avant paper trading</li>
+                <li>Paper trading obligatoire avant toute mise en production</li>
+                <li>Transition vers le live soumise à des gates de validation stricts</li>
+                <li>Même code source pour tous les modes (seul le connecteur change)</li>
+            </ul>
+
+            <h3>1.2 Progression des Modes</h3>
+            <div class="flow-diagram" style="text-align: center;">
+                <span class="flow-node flow-backtest">
+                    <strong>BACKTEST</strong><br>
+                    <small>Données historiques</small>
+                </span>
+                <span class="flow-arrow">→</span>
+                <span class="flow-node flow-paper">
+                    <strong>PAPER</strong><br>
+                    <small>Live data, ordres simulés</small>
+                </span>
+                <span class="flow-arrow">→</span>
+                <span class="flow-node" style="background: #fff3e0; border: 2px dashed var(--paper);">
+                    <strong>SHADOW</strong><br>
+                    <small>Live comparé à paper</small>
+                </span>
+                <span class="flow-arrow">→</span>
+                <span class="flow-node flow-live">
+                    <strong>LIVE</strong><br>
+                    <small>Capital réel</small>
+                </span>
+            </div>
+
+            <h3>1.3 Architecture Unifiée</h3>
+            <div class="code-block">
+<span class="comment"># Même code, différents connecteurs</span>
+
+<span class="key">class</span> <span class="class">TradingFirmOrchestrator</span>:
+    <span class="key">def</span> <span class="func">__init__</span>(self, mode: ExecutionMode, config: dict):
+        self.mode = mode
+
+        <span class="comment"># Sélection du connecteur selon le mode</span>
+        <span class="key">if</span> mode == ExecutionMode.BACKTEST:
+            self.broker = BacktestBroker(config)
+            self.data_feed = HistoricalDataFeed(config)
+        <span class="key">elif</span> mode == ExecutionMode.PAPER:
+            self.broker = IBBroker(config, port=<span class="number">7497</span>)  <span class="comment"># Paper port</span>
+            self.data_feed = IBLiveDataFeed(config)
+        <span class="key">elif</span> mode == ExecutionMode.LIVE:
+            self._validate_live_prerequisites()
+            self.broker = IBBroker(config, port=<span class="number">7496</span>)  <span class="comment"># Live port</span>
+            self.data_feed = IBLiveDataFeed(config)
+
+        <span class="comment"># Agents identiques quel que soit le mode</span>
+        self.agents = self._initialize_agents()
+            </div>
+        </section>
+
+        <!-- Section 2: Modes d'Exécution -->
+        <section id="modes" class="section">
+            <h2>2. Modes d'Exécution</h2>
+
+            <div class="mode-card backtest">
+                <div class="mode-header">
+                    <div class="mode-icon">📊</div>
+                    <div>
+                        <h3 style="margin: 0;">Mode Backtest</h3>
+                        <small>Validation historique</small>
+                    </div>
+                </div>
+                <table>
+                    <tr><td><strong>Source de données</strong></td><td>Fichiers historiques (Parquet/CSV)</td></tr>
+                    <tr><td><strong>Exécution</strong></td><td>Simulée (fill instantané ou modèle de slippage)</td></tr>
+                    <tr><td><strong>Vitesse</strong></td><td>Accélérée (1 an en quelques minutes)</td></tr>
+                    <tr><td><strong>Déterminisme</strong></td><td>100% reproductible avec même seed</td></tr>
+                    <tr><td><strong>Usage</strong></td><td>Développement, optimisation, validation initiale</td></tr>
+                </table>
+            </div>
+
+            <div class="mode-card paper">
+                <div class="mode-header">
+                    <div class="mode-icon">📝</div>
+                    <div>
+                        <h3 style="margin: 0;">Mode Paper Trading</h3>
+                        <small>Simulation temps réel (DÉFAUT)</small>
+                    </div>
+                </div>
+                <table>
+                    <tr><td><strong>Source de données</strong></td><td>IB Live Market Data</td></tr>
+                    <tr><td><strong>Exécution</strong></td><td>IB Paper Account (ordres simulés réalistes)</td></tr>
+                    <tr><td><strong>Vitesse</strong></td><td>Temps réel</td></tr>
+                    <tr><td><strong>Déterminisme</strong></td><td>Reproductible via replay des market data</td></tr>
+                    <tr><td><strong>Usage</strong></td><td>Validation finale, burn-in period, monitoring</td></tr>
+                </table>
+            </div>
+
+            <div class="mode-card live">
+                <div class="mode-header">
+                    <div class="mode-icon">🔴</div>
+                    <div>
+                        <h3 style="margin: 0;">Mode Live</h3>
+                        <small>Capital réel - RESTREINT</small>
+                    </div>
+                </div>
+                <table>
+                    <tr><td><strong>Source de données</strong></td><td>IB Live Market Data</td></tr>
+                    <tr><td><strong>Exécution</strong></td><td>IB Live Account (ordres réels)</td></tr>
+                    <tr><td><strong>Vitesse</strong></td><td>Temps réel</td></tr>
+                    <tr><td><strong>Déterminisme</strong></td><td>Sujet aux conditions de marché réelles</td></tr>
+                    <tr><td><strong>Usage</strong></td><td>Production après validation complète</td></tr>
+                </table>
+                <div class="danger-box" style="margin-top: 1rem;">
+                    <strong>⚠️ Accès restreint:</strong> Nécessite validation de tous les gates de transition
+                </div>
+            </div>
+
+            <h3>2.1 Comparaison des Modes</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Aspect</th>
+                        <th style="background: #e8eaf6;">Backtest</th>
+                        <th style="background: #fff3e0;">Paper</th>
+                        <th style="background: #ffebee;">Live</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Latence réseau</td>
+                        <td>Non</td>
+                        <td>Oui</td>
+                        <td>Oui</td>
+                    </tr>
+                    <tr>
+                        <td>Slippage réel</td>
+                        <td>Modélisé</td>
+                        <td>Simulé IB</td>
+                        <td>Réel</td>
+                    </tr>
+                    <tr>
+                        <td>Impact de marché</td>
+                        <td>Non</td>
+                        <td>Non</td>
+                        <td>Oui</td>
+                    </tr>
+                    <tr>
+                        <td>Fills partiels</td>
+                        <td>Configurable</td>
+                        <td>Oui</td>
+                        <td>Oui</td>
+                    </tr>
+                    <tr>
+                        <td>Rejets d'ordres</td>
+                        <td>Configurable</td>
+                        <td>Oui</td>
+                        <td>Oui</td>
+                    </tr>
+                    <tr>
+                        <td>Capital à risque</td>
+                        <td>$0</td>
+                        <td>$0</td>
+                        <td><strong>Réel</strong></td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Section 3: Rejouabilité -->
+        <section id="replay" class="section">
+            <h2>3. Rejouabilité Complète</h2>
+
+            <div class="principle-box">
+                <div class="title">Principe Fondamental</div>
+                <p>Toute session de trading (backtest ou paper) doit pouvoir être rejouée à l'identique
+                pour analyse, debugging, ou audit réglementaire.</p>
+            </div>
+
+            <h3>3.1 Composants de la Rejouabilité</h3>
+            <div class="code-block">
+<span class="comment"># Structure d'une session rejouable</span>
+
+<span class="class">@dataclass</span>
+<span class="key">class</span> <span class="class">ReplayableSession</span>:
+    <span class="string">"""Capture complète d'une session pour replay"""</span>
+
+    <span class="comment"># Identification</span>
+    session_id: str
+    start_time: datetime
+    end_time: datetime
+    mode: ExecutionMode
+
+    <span class="comment"># Configuration (FIGÉE)</span>
+    config_snapshot: dict           <span class="comment"># Config complète au démarrage</span>
+    code_version: str               <span class="comment"># Git commit hash</span>
+    random_seed: int                <span class="comment"># Seed pour reproductibilité</span>
+
+    <span class="comment"># Données d'entrée</span>
+    market_data_file: str           <span class="comment"># Chemin vers données de marché</span>
+    initial_portfolio: PortfolioState
+
+    <span class="comment"># Événements (pour replay)</span>
+    events_log: str                 <span class="comment"># Fichier JSONL de tous les événements</span>
+
+    <span class="comment"># Résultats</span>
+    final_portfolio: PortfolioState
+    trades_executed: List[Trade]
+    metrics: PerformanceMetrics
+            </div>
+
+            <h3>3.2 Capture des Market Data</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">MarketDataRecorder</span>:
+    <span class="string">"""Enregistre les market data pour replay ultérieur"""</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, output_dir: str):
+        self.output_dir = Path(output_dir)
+        self.current_file: Optional[TextIO] = <span class="bool">None</span>
+        self.tick_count = <span class="number">0</span>
+
+    <span class="key">async def</span> <span class="func">record_tick</span>(self, event: MarketDataEvent):
+        <span class="string">"""Enregistre chaque tick avec timestamp précis"""</span>
+        record = {
+            <span class="string">"ts"</span>: event.timestamp.isoformat(),
+            <span class="string">"ts_ns"</span>: time.time_ns(),  <span class="comment"># Nanosecond precision</span>
+            <span class="string">"symbol"</span>: event.symbol,
+            <span class="string">"last"</span>: event.price,
+            <span class="string">"bid"</span>: event.bid,
+            <span class="string">"ask"</span>: event.ask,
+            <span class="string">"volume"</span>: event.volume,
+            <span class="string">"seq"</span>: self.tick_count
+        }
+        self._write_record(record)
+        self.tick_count += <span class="number">1</span>
+
+    <span class="key">def</span> <span class="func">_write_record</span>(self, record: dict):
+        <span class="string">"""Écrit en format JSONL compressé"""</span>
+        self.current_file.write(json.dumps(record) + <span class="string">"\n"</span>)
+            </div>
+
+            <h3>3.3 Replay Engine</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">ReplayEngine</span>:
+    <span class="string">"""Moteur de replay pour analyse et debugging"""</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, session: ReplayableSession):
+        self.session = session
+        self.orchestrator = <span class="bool">None</span>
+
+    <span class="key">async def</span> <span class="func">replay</span>(self, speed: float = <span class="number">1.0</span>) -> ReplayResult:
+        <span class="string">"""
+        Rejoue une session complète.
+        speed: 1.0 = temps réel, 0 = aussi vite que possible
+        """</span>
+
+        <span class="comment"># 1. Restaurer la configuration exacte</span>
+        config = self.session.config_snapshot
+        random.seed(self.session.random_seed)
+        np.random.seed(self.session.random_seed)
+
+        <span class="comment"># 2. Créer l'orchestrateur en mode replay</span>
+        self.orchestrator = TradingFirmOrchestrator(
+            mode=ExecutionMode.REPLAY,
+            config=config
+        )
+
+        <span class="comment"># 3. Charger les market data enregistrées</span>
+        data_feed = ReplayDataFeed(self.session.market_data_file)
+
+        <span class="comment"># 4. Rejouer tick par tick</span>
+        replay_events = []
+        <span class="key">async for</span> tick <span class="key">in</span> data_feed.stream():
+            <span class="key">if</span> speed > <span class="number">0</span>:
+                <span class="key">await</span> self._wait_for_timing(tick, speed)
+
+            events = <span class="key">await</span> self.orchestrator.process_tick(tick)
+            replay_events.extend(events)
+
+        <span class="comment"># 5. Comparer avec l'original</span>
+        <span class="key">return</span> self._compare_results(replay_events)
+
+    <span class="key">def</span> <span class="func">_compare_results</span>(self, replay_events) -> ReplayResult:
+        <span class="string">"""Compare le replay avec la session originale"""</span>
+        original_events = self._load_original_events()
+
+        differences = []
+        <span class="key">for</span> orig, replay <span class="key">in</span> zip(original_events, replay_events):
+            <span class="key">if</span> <span class="key">not</span> self._events_match(orig, replay):
+                differences.append(EventDifference(orig, replay))
+
+        <span class="key">return</span> ReplayResult(
+            matches=len(differences) == <span class="number">0</span>,
+            differences=differences,
+            original_trades=len(self.session.trades_executed),
+            replay_trades=len([e <span class="key">for</span> e <span class="key">in</span> replay_events <span class="key">if</span> isinstance(e, FillEvent)])
+        )
+            </div>
+
+            <h3>3.4 Structure des Fichiers de Replay</h3>
+            <div class="code-block">
+<span class="comment"># Arborescence d'une session</span>
+
+sessions/
+└── 2024-01-15_143000_SES-abc123/
+    ├── manifest.json           <span class="comment"># Métadonnées de la session</span>
+    ├── config.yaml             <span class="comment"># Configuration figée</span>
+    ├── market_data/
+    │   ├── ticks.jsonl.gz      <span class="comment"># Tous les ticks reçus</span>
+    │   └── bars_1min.parquet   <span class="comment"># Barres agrégées</span>
+    ├── events/
+    │   ├── signals.jsonl       <span class="comment"># SignalEvents</span>
+    │   ├── decisions.jsonl     <span class="comment"># DecisionEvents</span>
+    │   ├── validations.jsonl   <span class="comment"># Risk + Compliance</span>
+    │   ├── orders.jsonl        <span class="comment"># OrderEvents</span>
+    │   └── fills.jsonl         <span class="comment"># FillEvents</span>
+    ├── portfolio/
+    │   ├── initial.json        <span class="comment"># État initial</span>
+    │   ├── snapshots.jsonl     <span class="comment"># Snapshots périodiques</span>
+    │   └── final.json          <span class="comment"># État final</span>
+    └── metrics/
+        ├── performance.json    <span class="comment"># Métriques de performance</span>
+        └── risk.json           <span class="comment"># Métriques de risque</span>
+            </div>
+        </section>
+
+        <!-- Section 4: Déterminisme -->
+        <section id="determinism" class="section">
+            <h2>4. Déterminisme</h2>
+
+            <div class="principle-box">
+                <div class="title">CLAUDE.md - Article 26</div>
+                <p>"Comportement déterministe et reproductible"</p>
+            </div>
+
+            <h3>4.1 Sources de Non-Déterminisme</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Source</th>
+                        <th>Problème</th>
+                        <th>Solution</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Random</strong></td>
+                        <td>Génération aléatoire</td>
+                        <td>Seed fixé et enregistré</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Timestamps</strong></td>
+                        <td>datetime.now() variable</td>
+                        <td>Horloge injectable/mockable</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Ordre d'exécution</strong></td>
+                        <td>asyncio non déterministe</td>
+                        <td>Barrières de synchronisation</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Floating point</strong></td>
+                        <td>Erreurs d'arrondi</td>
+                        <td>Decimal pour les prix, tolérance définie</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Dict ordering</strong></td>
+                        <td>Ordre d'itération</td>
+                        <td>Python 3.7+ (ordonné), tri explicite</td>
+                    </tr>
+                    <tr>
+                        <td><strong>External APIs</strong></td>
+                        <td>Réponses variables</td>
+                        <td>Mocking en replay, cache</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>4.2 Gestion du Random</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">DeterministicRandom</span>:
+    <span class="string">"""Wrapper pour random avec seed contrôlé"""</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, seed: Optional[int] = <span class="bool">None</span>):
+        self.initial_seed = seed <span class="key">or</span> int(time.time() * <span class="number">1000</span>)
+        self.rng = random.Random(self.initial_seed)
+        self.np_rng = np.random.RandomState(self.initial_seed)
+
+    <span class="key">def</span> <span class="func">random</span>(self) -> float:
+        <span class="key">return</span> self.rng.random()
+
+    <span class="key">def</span> <span class="func">choice</span>(self, seq):
+        <span class="key">return</span> self.rng.choice(seq)
+
+    <span class="key">def</span> <span class="func">normal</span>(self, mean: float, std: float) -> float:
+        <span class="key">return</span> self.np_rng.normal(mean, std)
+
+    <span class="key">def</span> <span class="func">get_state</span>(self) -> dict:
+        <span class="string">"""Capture l'état pour checkpoint"""</span>
+        <span class="key">return</span> {
+            <span class="string">"initial_seed"</span>: self.initial_seed,
+            <span class="string">"rng_state"</span>: self.rng.getstate(),
+            <span class="string">"np_state"</span>: self.np_rng.get_state()
+        }
+
+    <span class="key">def</span> <span class="func">restore_state</span>(self, state: dict):
+        <span class="string">"""Restaure depuis un checkpoint"""</span>
+        self.rng.setstate(state[<span class="string">"rng_state"</span>])
+        self.np_rng.set_state(state[<span class="string">"np_state"</span>])
+            </div>
+
+            <h3>4.3 Horloge Injectable</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">Clock</span>(Protocol):
+    <span class="string">"""Interface pour l'horloge système"""</span>
+    <span class="key">def</span> <span class="func">now</span>(self) -> datetime: ...
+    <span class="key">def</span> <span class="func">timestamp</span>(self) -> float: ...
+
+
+<span class="key">class</span> <span class="class">SystemClock</span>:
+    <span class="string">"""Horloge réelle pour paper/live"""</span>
+    <span class="key">def</span> <span class="func">now</span>(self) -> datetime:
+        <span class="key">return</span> datetime.utcnow()
+
+    <span class="key">def</span> <span class="func">timestamp</span>(self) -> float:
+        <span class="key">return</span> time.time()
+
+
+<span class="key">class</span> <span class="class">SimulatedClock</span>:
+    <span class="string">"""Horloge simulée pour backtest/replay"""</span>
+    <span class="key">def</span> <span class="func">__init__</span>(self, start_time: datetime):
+        self._current = start_time
+
+    <span class="key">def</span> <span class="func">now</span>(self) -> datetime:
+        <span class="key">return</span> self._current
+
+    <span class="key">def</span> <span class="func">advance</span>(self, delta: timedelta):
+        self._current += delta
+
+    <span class="key">def</span> <span class="func">set_time</span>(self, time: datetime):
+        self._current = time
+
+
+<span class="comment"># Usage dans les agents</span>
+<span class="key">class</span> <span class="class">BaseAgent</span>:
+    <span class="key">def</span> <span class="func">__init__</span>(self, clock: Clock):
+        self.clock = clock
+
+    <span class="key">def</span> <span class="func">_get_timestamp</span>(self) -> datetime:
+        <span class="key">return</span> self.clock.now()  <span class="comment"># Jamais datetime.now() direct</span>
+            </div>
+
+            <h3>4.4 Vérification du Déterminisme</h3>
+            <div class="code-block">
+<span class="key">async def</span> <span class="func">verify_determinism</span>(session_path: str, num_runs: int = <span class="number">3</span>) -> <span class="bool">bool</span>:
+    <span class="string">"""Vérifie qu'une session est parfaitement reproductible"""</span>
+
+    session = ReplayableSession.load(session_path)
+    results = []
+
+    <span class="key">for</span> run <span class="key">in</span> range(num_runs):
+        engine = ReplayEngine(session)
+        result = <span class="key">await</span> engine.replay(speed=<span class="number">0</span>)  <span class="comment"># Max speed</span>
+        results.append(result)
+
+    <span class="comment"># Comparer tous les runs</span>
+    reference = results[<span class="number">0</span>]
+    <span class="key">for</span> i, result <span class="key">in</span> enumerate(results[<span class="number">1</span>:], <span class="number">2</span>):
+        <span class="key">if</span> result.decisions != reference.decisions:
+            logger.error(f<span class="string">"Run {i} differs from reference!"</span>)
+            <span class="key">return</span> <span class="bool">False</span>
+        <span class="key">if</span> result.trades != reference.trades:
+            logger.error(f<span class="string">"Run {i} has different trades!"</span>)
+            <span class="key">return</span> <span class="bool">False</span>
+
+    logger.info(f<span class="string">"Determinism verified: {num_runs} runs identical"</span>)
+    <span class="key">return</span> <span class="bool">True</span>
+            </div>
+        </section>
+
+        <!-- Section 5: Logs Exploitables -->
+        <section id="logs" class="section">
+            <h2>5. Logs Exploitables</h2>
+
+            <h3>5.1 Niveaux de Logging</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Niveau</th>
+                        <th>Contenu</th>
+                        <th>Rétention</th>
+                        <th>Format</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>TICK</strong></td>
+                        <td>Chaque tick de marché</td>
+                        <td>30 jours</td>
+                        <td>JSONL compressé</td>
+                    </tr>
+                    <tr>
+                        <td><strong>EVENT</strong></td>
+                        <td>Tous les événements système</td>
+                        <td>7 ans</td>
+                        <td>JSONL</td>
+                    </tr>
+                    <tr>
+                        <td><strong>DECISION</strong></td>
+                        <td>Décisions CIO avec rationale</td>
+                        <td>7 ans</td>
+                        <td>JSONL</td>
+                    </tr>
+                    <tr>
+                        <td><strong>TRADE</strong></td>
+                        <td>Ordres et fills</td>
+                        <td>7 ans</td>
+                        <td>JSONL</td>
+                    </tr>
+                    <tr>
+                        <td><strong>AUDIT</strong></td>
+                        <td>Compliance, risk checks</td>
+                        <td>7 ans</td>
+                        <td>JSONL + PDF</td>
+                    </tr>
+                    <tr>
+                        <td><strong>DEBUG</strong></td>
+                        <td>Détails internes agents</td>
+                        <td>7 jours</td>
+                        <td>Text</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>5.2 Format de Log Unifié</h3>
+            <div class="code-block">
+<span class="comment">// Structure de base pour tous les logs</span>
+{
+    <span class="comment">// Identification</span>
+    <span class="key">"log_id"</span>: <span class="string">"LOG-20240115-143022-789-abc123"</span>,
+    <span class="key">"session_id"</span>: <span class="string">"SES-20240115-090000-xyz"</span>,
+    <span class="key">"timestamp"</span>: <span class="string">"2024-01-15T14:30:22.789Z"</span>,
+    <span class="key">"timestamp_ns"</span>: <span class="number">1705329022789123456</span>,
+
+    <span class="comment">// Contexte</span>
+    <span class="key">"mode"</span>: <span class="string">"PAPER"</span>,  <span class="comment">// BACKTEST | PAPER | LIVE</span>
+    <span class="key">"agent"</span>: <span class="string">"cio_agent"</span>,
+    <span class="key">"event_type"</span>: <span class="string">"DECISION"</span>,
+
+    <span class="comment">// Payload (variable selon event_type)</span>
+    <span class="key">"payload"</span>: {
+        <span class="key">"decision_id"</span>: <span class="string">"DEC-..."</span>,
+        <span class="key">"symbol"</span>: <span class="string">"AAPL"</span>,
+        <span class="key">"action"</span>: <span class="string">"BUY"</span>,
+        <span class="comment">// ...</span>
+    },
+
+    <span class="comment">// Traçabilité</span>
+    <span class="key">"correlation_id"</span>: <span class="string">"CORR-..."</span>,  <span class="comment">// Lie les événements liés</span>
+    <span class="key">"causation_id"</span>: <span class="string">"LOG-..."</span>,   <span class="comment">// Événement déclencheur</span>
+
+    <span class="comment">// Métadonnées</span>
+    <span class="key">"code_version"</span>: <span class="string">"abc123"</span>,
+    <span class="key">"hostname"</span>: <span class="string">"trading-server-01"</span>
+}
+            </div>
+
+            <h3>5.3 Analyseur de Logs</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">LogAnalyzer</span>:
+    <span class="string">"""Outil d'analyse des logs de session"""</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, session_path: str):
+        self.session_path = Path(session_path)
+        self.events = self._load_events()
+
+    <span class="key">def</span> <span class="func">trace_decision</span>(self, decision_id: str) -> DecisionTrace:
+        <span class="string">"""Reconstruit le chemin complet d'une décision"""</span>
+        decision = self._find_event(<span class="string">"DECISION"</span>, decision_id)
+
+        <span class="key">return</span> DecisionTrace(
+            <span class="comment"># Signaux contributeurs</span>
+            signals=self._find_signals(decision[<span class="string">"contributing_signals"</span>]),
+
+            <span class="comment"># Décision CIO</span>
+            decision=decision,
+
+            <span class="comment"># Validations</span>
+            risk_validation=self._find_event(<span class="string">"RISK_VALIDATION"</span>, decision_id),
+            compliance_validation=self._find_event(<span class="string">"COMPLIANCE_VALIDATION"</span>, decision_id),
+
+            <span class="comment"># Exécution</span>
+            order=self._find_event(<span class="string">"ORDER"</span>, decision_id),
+            fills=self._find_fills(decision_id),
+
+            <span class="comment"># Résultat</span>
+            pnl=self._calculate_pnl(decision_id)
+        )
+
+    <span class="key">def</span> <span class="func">generate_report</span>(self) -> SessionReport:
+        <span class="string">"""Génère un rapport complet de session"""</span>
+        <span class="key">return</span> SessionReport(
+            total_signals=self._count_events(<span class="string">"SIGNAL"</span>),
+            total_decisions=self._count_events(<span class="string">"DECISION"</span>),
+            decisions_executed=self._count_executed_decisions(),
+            decisions_rejected=self._count_rejected_decisions(),
+            rejection_reasons=self._group_rejections(),
+            trades=self._extract_trades(),
+            performance=self._calculate_performance()
+        )
+
+    <span class="key">def</span> <span class="func">export_to_dataframe</span>(self) -> pd.DataFrame:
+        <span class="string">"""Exporte pour analyse Pandas"""</span>
+        <span class="key">return</span> pd.DataFrame(self.events)
+            </div>
+
+            <h3>5.4 Requêtes d'Analyse Courantes</h3>
+            <div class="code-block">
+<span class="comment"># Exemples de requêtes sur les logs</span>
+
+<span class="comment"># 1. Tous les rejets d'une journée avec raisons</span>
+rejections = analyzer.query(
+    event_type=<span class="string">"REJECTION"</span>,
+    date=<span class="string">"2024-01-15"</span>
+).groupby(<span class="string">"rejection_code"</span>).count()
+
+<span class="comment"># 2. Latence moyenne de décision</span>
+latencies = analyzer.query(event_type=<span class="string">"DECISION"</span>)
+avg_latency = (latencies[<span class="string">"timestamp"</span>] - latencies[<span class="string">"trigger_timestamp"</span>]).mean()
+
+<span class="comment"># 3. Trades avec slippage > 0.1%</span>
+high_slippage = analyzer.query(
+    event_type=<span class="string">"FILL"</span>,
+    filter=<span class="key">lambda</span> e: abs(e[<span class="string">"slippage_pct"</span>]) > <span class="number">0.001</span>
+)
+
+<span class="comment"># 4. Corrélation signal → résultat</span>
+signal_outcomes = analyzer.correlate_signals_to_outcomes()
+winning_signals = signal_outcomes[signal_outcomes[<span class="string">"pnl"</span>] > <span class="number">0</span>]
+
+<span class="comment"># 5. Timeline d'une décision spécifique</span>
+timeline = analyzer.trace_decision(<span class="string">"DEC-20240115-143000-001"</span>)
+<span class="key">for</span> event <span class="key">in</span> timeline.events:
+    print(f<span class="string">"{event.timestamp}: {event.type} - {event.summary}"</span>)
+            </div>
+        </section>
+
+        <!-- Section 6: Comparaison Décision vs Résultat -->
+        <section id="comparison" class="section">
+            <h2>6. Comparaison Décision vs Résultat</h2>
+
+            <h3>6.1 Métriques de Qualité des Décisions</h3>
+            <div class="comparison-grid">
+                <div class="comparison-col">
+                    <h4>Signal Quality</h4>
+                    <div class="metric-card">
+                        <div class="metric-value">68%</div>
+                        <div class="metric-label">Accuracy</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value">1.42</div>
+                        <div class="metric-label">Information Ratio</div>
+                    </div>
+                </div>
+                <div class="comparison-col">
+                    <h4>Execution Quality</h4>
+                    <div class="metric-card">
+                        <div class="metric-value">-0.02%</div>
+                        <div class="metric-label">Avg Slippage</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value">98.5%</div>
+                        <div class="metric-label">Fill Rate</div>
+                    </div>
+                </div>
+                <div class="comparison-col">
+                    <h4>Risk Quality</h4>
+                    <div class="metric-card">
+                        <div class="metric-value">0</div>
+                        <div class="metric-label">Limit Breaches</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value">1.85%</div>
+                        <div class="metric-label">Max Drawdown</div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>6.2 Decision Outcome Tracker</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">DecisionOutcomeTracker</span>:
+    <span class="string">"""Compare les décisions avec leurs résultats"""</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, log_analyzer: LogAnalyzer):
+        self.analyzer = log_analyzer
+
+    <span class="key">def</span> <span class="func">analyze_decision</span>(self, decision_id: str) -> DecisionOutcome:
+        <span class="string">"""Analyse complète d'une décision vs son résultat"""</span>
+
+        decision = self.analyzer.get_decision(decision_id)
+        fills = self.analyzer.get_fills(decision_id)
+
+        <span class="comment"># Prix attendu vs prix obtenu</span>
+        expected_price = decision[<span class="string">"expected_price"</span>]
+        actual_price = sum(f[<span class="string">"price"</span>] * f[<span class="string">"qty"</span>] <span class="key">for</span> f <span class="key">in</span> fills) / sum(f[<span class="string">"qty"</span>] <span class="key">for</span> f <span class="key">in</span> fills)
+        slippage = (actual_price - expected_price) / expected_price
+
+        <span class="comment"># P&L réalisé</span>
+        entry_value = actual_price * decision[<span class="string">"quantity"</span>]
+        exit_fills = self.analyzer.get_exit_fills(decision_id)
+        <span class="key">if</span> exit_fills:
+            exit_value = sum(f[<span class="string">"price"</span>] * f[<span class="string">"qty"</span>] <span class="key">for</span> f <span class="key">in</span> exit_fills)
+            realized_pnl = exit_value - entry_value
+        <span class="key">else</span>:
+            realized_pnl = <span class="bool">None</span>  <span class="comment"># Position encore ouverte</span>
+
+        <span class="comment"># Conviction vs résultat</span>
+        conviction = decision[<span class="string">"conviction"</span>]
+        direction_correct = (
+            (decision[<span class="string">"action"</span>] == <span class="string">"BUY"</span> <span class="key">and</span> realized_pnl > <span class="number">0</span>) <span class="key">or</span>
+            (decision[<span class="string">"action"</span>] == <span class="string">"SELL"</span> <span class="key">and</span> realized_pnl < <span class="number">0</span>)
+        ) <span class="key">if</span> realized_pnl <span class="key">else</span> <span class="bool">None</span>
+
+        <span class="key">return</span> DecisionOutcome(
+            decision_id=decision_id,
+            symbol=decision[<span class="string">"symbol"</span>],
+            action=decision[<span class="string">"action"</span>],
+            conviction=conviction,
+            expected_price=expected_price,
+            actual_price=actual_price,
+            slippage_pct=slippage * <span class="number">100</span>,
+            realized_pnl=realized_pnl,
+            direction_correct=direction_correct,
+            holding_period=self._calculate_holding_period(decision_id)
+        )
+
+    <span class="key">def</span> <span class="func">generate_outcome_report</span>(self) -> OutcomeReport:
+        <span class="string">"""Rapport complet décisions vs résultats"""</span>
+        decisions = self.analyzer.get_all_decisions()
+        outcomes = [self.analyze_decision(d[<span class="string">"decision_id"</span>]) <span class="key">for</span> d <span class="key">in</span> decisions]
+
+        <span class="key">return</span> OutcomeReport(
+            total_decisions=len(outcomes),
+            accuracy=sum(<span class="number">1</span> <span class="key">for</span> o <span class="key">in</span> outcomes <span class="key">if</span> o.direction_correct) / len(outcomes),
+            avg_slippage=np.mean([o.slippage_pct <span class="key">for</span> o <span class="key">in</span> outcomes]),
+            total_pnl=sum(o.realized_pnl <span class="key">for</span> o <span class="key">in</span> outcomes <span class="key">if</span> o.realized_pnl),
+            conviction_correlation=self._correlate_conviction_to_pnl(outcomes),
+            by_agent=self._group_by_signal_agent(outcomes)
+        )
+            </div>
+
+            <h3>6.3 Tableau de Bord de Comparaison</h3>
+            <div class="code-block">
+<span class="comment">// Exemple de rapport JSON généré</span>
+{
+    <span class="key">"session_id"</span>: <span class="string">"SES-20240115-090000"</span>,
+    <span class="key">"period"</span>: <span class="string">"2024-01-15"</span>,
+    <span class="key">"mode"</span>: <span class="string">"PAPER"</span>,
+
+    <span class="key">"decision_quality"</span>: {
+        <span class="key">"total_decisions"</span>: <span class="number">47</span>,
+        <span class="key">"executed"</span>: <span class="number">42</span>,
+        <span class="key">"rejected_risk"</span>: <span class="number">3</span>,
+        <span class="key">"rejected_compliance"</span>: <span class="number">2</span>,
+
+        <span class="key">"accuracy"</span>: {
+            <span class="key">"overall"</span>: <span class="number">0.68</span>,
+            <span class="key">"by_conviction"</span>: {
+                <span class="key">"high_conviction"</span>: <span class="number">0.78</span>,   <span class="comment">// conv > 0.7</span>
+                <span class="key">"medium_conviction"</span>: <span class="number">0.62</span>, <span class="comment">// 0.5 < conv < 0.7</span>
+                <span class="key">"low_conviction"</span>: <span class="number">0.51</span>     <span class="comment">// conv < 0.5</span>
+            }
+        }
+    },
+
+    <span class="key">"execution_quality"</span>: {
+        <span class="key">"avg_slippage_bps"</span>: -<span class="number">2.1</span>,  <span class="comment">// Négatif = amélioration</span>
+        <span class="key">"fill_rate"</span>: <span class="number">0.985</span>,
+        <span class="key">"avg_fill_time_ms"</span>: <span class="number">180</span>,
+        <span class="key">"partial_fills"</span>: <span class="number">3</span>
+    },
+
+    <span class="key">"signal_quality"</span>: {
+        <span class="key">"by_agent"</span>: {
+            <span class="key">"momentum_agent"</span>: {<span class="key">"accuracy"</span>: <span class="number">0.72</span>, <span class="key">"contribution"</span>: <span class="number">0.35</span>},
+            <span class="key">"macro_agent"</span>: {<span class="key">"accuracy"</span>: <span class="number">0.65</span>, <span class="key">"contribution"</span>: <span class="number">0.28</span>},
+            <span class="key">"stat_arb_agent"</span>: {<span class="key">"accuracy"</span>: <span class="number">0.58</span>, <span class="key">"contribution"</span>: <span class="number">0.22</span>}
+        }
+    },
+
+    <span class="key">"pnl_attribution"</span>: {
+        <span class="key">"gross_pnl"</span>: <span class="number">12450.00</span>,
+        <span class="key">"commissions"</span>: -<span class="number">420.00</span>,
+        <span class="key">"slippage_cost"</span>: -<span class="number">180.00</span>,
+        <span class="key">"net_pnl"</span>: <span class="number">11850.00</span>
+    }
+}
+            </div>
+
+            <h3>6.4 Visualisation des Écarts</h3>
+            <div class="info-box">
+                <strong>Analyse des Écarts Décision/Résultat:</strong>
+                <ul style="margin-left: 1.5rem; margin-top: 0.5rem;">
+                    <li><strong>Slippage Analysis:</strong> Distribution des écarts prix attendu vs exécuté</li>
+                    <li><strong>Conviction Calibration:</strong> Les décisions à haute conviction performent-elles mieux?</li>
+                    <li><strong>Agent Attribution:</strong> Quel agent contribue le plus aux gains/pertes?</li>
+                    <li><strong>Timing Analysis:</strong> Les décisions sont-elles meilleures à certaines heures?</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Section 7: Métriques & KPIs -->
+        <section id="metrics" class="section">
+            <h2>7. Métriques & KPIs</h2>
+
+            <h3>7.1 Métriques de Performance</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Métrique</th>
+                        <th>Formule</th>
+                        <th>Cible</th>
+                        <th>Gate Live</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Sharpe Ratio</strong></td>
+                        <td>(Return - Rf) / StdDev</td>
+                        <td>> 1.5</td>
+                        <td>> 1.0</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Sortino Ratio</strong></td>
+                        <td>(Return - Rf) / Downside StdDev</td>
+                        <td>> 2.0</td>
+                        <td>> 1.5</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Max Drawdown</strong></td>
+                        <td>Peak to Trough</td>
+                        <td>< 5%</td>
+                        <td>< 10%</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Win Rate</strong></td>
+                        <td>Winning Trades / Total</td>
+                        <td>> 55%</td>
+                        <td>> 50%</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Profit Factor</strong></td>
+                        <td>Gross Profit / Gross Loss</td>
+                        <td>> 1.5</td>
+                        <td>> 1.2</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Calmar Ratio</strong></td>
+                        <td>CAGR / Max Drawdown</td>
+                        <td>> 2.0</td>
+                        <td>> 1.0</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>7.2 Métriques Opérationnelles</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Métrique</th>
+                        <th>Description</th>
+                        <th>Cible</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Decision Latency</strong></td>
+                        <td>Temps signal → décision</td>
+                        <td>< 100ms</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Execution Latency</strong></td>
+                        <td>Temps décision → fill</td>
+                        <td>< 500ms</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Fill Rate</strong></td>
+                        <td>Ordres filled / envoyés</td>
+                        <td>> 95%</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Rejection Rate</strong></td>
+                        <td>Décisions rejetées / total</td>
+                        <td>< 15%</td>
+                    </tr>
+                    <tr>
+                        <td><strong>System Uptime</strong></td>
+                        <td>Disponibilité système</td>
+                        <td>> 99.5%</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>7.3 Calculateur de Métriques</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">PerformanceCalculator</span>:
+    <span class="string">"""Calcul des métriques de performance"""</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, returns: pd.Series, risk_free_rate: float = <span class="number">0.02</span>):
+        self.returns = returns
+        self.rf = risk_free_rate / <span class="number">252</span>  <span class="comment"># Daily</span>
+
+    <span class="key">def</span> <span class="func">sharpe_ratio</span>(self) -> float:
+        excess_returns = self.returns - self.rf
+        <span class="key">return</span> np.sqrt(<span class="number">252</span>) * excess_returns.mean() / excess_returns.std()
+
+    <span class="key">def</span> <span class="func">sortino_ratio</span>(self) -> float:
+        excess_returns = self.returns - self.rf
+        downside = excess_returns[excess_returns < <span class="number">0</span>]
+        downside_std = np.sqrt((downside ** <span class="number">2</span>).mean())
+        <span class="key">return</span> np.sqrt(<span class="number">252</span>) * excess_returns.mean() / downside_std
+
+    <span class="key">def</span> <span class="func">max_drawdown</span>(self) -> float:
+        cumulative = (<span class="number">1</span> + self.returns).cumprod()
+        peak = cumulative.expanding().max()
+        drawdown = (cumulative - peak) / peak
+        <span class="key">return</span> drawdown.min()
+
+    <span class="key">def</span> <span class="func">calmar_ratio</span>(self) -> float:
+        cagr = (<span class="number">1</span> + self.returns).prod() ** (<span class="number">252</span> / len(self.returns)) - <span class="number">1</span>
+        <span class="key">return</span> cagr / abs(self.max_drawdown())
+
+    <span class="key">def</span> <span class="func">generate_report</span>(self) -> dict:
+        <span class="key">return</span> {
+            <span class="string">"sharpe_ratio"</span>: self.sharpe_ratio(),
+            <span class="string">"sortino_ratio"</span>: self.sortino_ratio(),
+            <span class="string">"max_drawdown"</span>: self.max_drawdown(),
+            <span class="string">"calmar_ratio"</span>: self.calmar_ratio(),
+            <span class="string">"total_return"</span>: (<span class="number">1</span> + self.returns).prod() - <span class="number">1</span>,
+            <span class="string">"volatility"</span>: self.returns.std() * np.sqrt(<span class="number">252</span>),
+            <span class="string">"win_rate"</span>: (self.returns > <span class="number">0</span>).mean()
+        }
+            </div>
+        </section>
+
+        <!-- Section 8: Transition Paper → Live -->
+        <section id="transition" class="section">
+            <h2>8. Transition Paper → Live</h2>
+
+            <div class="danger-box">
+                <strong>⚠️ ATTENTION:</strong> La transition vers le live implique du capital réel.
+                Tous les gates de validation doivent être franchis.
+            </div>
+
+            <h3>8.1 Gates de Transition</h3>
+            <div class="timeline">
+                <div class="timeline-item" data-step="1">
+                    <div class="title">Gate 1: Backtest Validation</div>
+                    <div class="desc">Sharpe > 1.0, Max DD < 15%, 3+ ans de données</div>
+                </div>
+                <div class="timeline-item" data-step="2">
+                    <div class="title">Gate 2: Paper Trading Minimum</div>
+                    <div class="desc">30 jours minimum en paper trading continu</div>
+                </div>
+                <div class="timeline-item" data-step="3">
+                    <div class="title">Gate 3: Performance Paper</div>
+                    <div class="desc">Sharpe > 1.0 en paper, résultats cohérents avec backtest</div>
+                </div>
+                <div class="timeline-item" data-step="4">
+                    <div class="title">Gate 4: Operational Readiness</div>
+                    <div class="desc">Monitoring, alertes, procédures d'urgence testées</div>
+                </div>
+                <div class="timeline-item" data-step="5">
+                    <div class="title">Gate 5: Risk Review</div>
+                    <div class="desc">Revue manuelle des limites de risque</div>
+                </div>
+                <div class="timeline-item" data-step="6">
+                    <div class="title">Gate 6: Compliance Sign-off</div>
+                    <div class="desc">Validation conformité réglementaire</div>
+                </div>
+                <div class="timeline-item" data-step="7">
+                    <div class="title">Gate 7: Management Approval</div>
+                    <div class="desc">Approbation finale direction</div>
+                </div>
+            </div>
+
+            <h3>8.2 Checklist de Transition</h3>
+            <div class="gate-box">
+                <div class="gate-title">🚨 Checklist Obligatoire Avant Live</div>
+                <div class="checklist">
+                    <div class="check-item">
+                        <div class="check-icon check-required">R</div>
+                        <div>Backtest validé sur 3+ ans avec Sharpe > 1.0</div>
+                    </div>
+                    <div class="check-item">
+                        <div class="check-icon check-required">R</div>
+                        <div>Paper trading 30+ jours avec performance positive</div>
+                    </div>
+                    <div class="check-item">
+                        <div class="check-icon check-required">R</div>
+                        <div>Écart paper vs backtest < 20%</div>
+                    </div>
+                    <div class="check-item">
+                        <div class="check-icon check-required">R</div>
+                        <div>Aucun bug critique détecté en paper</div>
+                    </div>
+                    <div class="check-item">
+                        <div class="check-icon check-required">R</div>
+                        <div>Kill-switch testé et fonctionnel</div>
+                    </div>
+                    <div class="check-item">
+                        <div class="check-icon check-required">R</div>
+                        <div>Alertes configurées et testées</div>
+                    </div>
+                    <div class="check-item">
+                        <div class="check-icon check-required">R</div>
+                        <div>Procédure de rollback documentée</div>
+                    </div>
+                    <div class="check-item">
+                        <div class="check-icon check-required">R</div>
+                        <div>Approbation écrite de la direction</div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>8.3 Transition Graduelle</h3>
+            <div class="code-block">
+<span class="comment"># Stratégie de transition progressive</span>
+
+<span class="key">class</span> <span class="class">GradualTransition</span>:
+    <span class="string">"""
+    Transition graduelle Paper → Live.
+    Augmente progressivement l'allocation sur plusieurs semaines.
+    """</span>
+
+    PHASES = [
+        {<span class="string">"week"</span>: <span class="number">1</span>, <span class="string">"allocation"</span>: <span class="number">0.10</span>, <span class="string">"max_position"</span>: <span class="number">0.01</span>},  <span class="comment"># 10% capital, 1% max/position</span>
+        {<span class="string">"week"</span>: <span class="number">2</span>, <span class="string">"allocation"</span>: <span class="number">0.25</span>, <span class="string">"max_position"</span>: <span class="number">0.02</span>},  <span class="comment"># 25% capital</span>
+        {<span class="string">"week"</span>: <span class="number">3</span>, <span class="string">"allocation"</span>: <span class="number">0.50</span>, <span class="string">"max_position"</span>: <span class="number">0.03</span>},  <span class="comment"># 50% capital</span>
+        {<span class="string">"week"</span>: <span class="number">4</span>, <span class="string">"allocation"</span>: <span class="number">0.75</span>, <span class="string">"max_position"</span>: <span class="number">0.04</span>},  <span class="comment"># 75% capital</span>
+        {<span class="string">"week"</span>: <span class="number">5</span>, <span class="string">"allocation"</span>: <span class="number">1.00</span>, <span class="string">"max_position"</span>: <span class="number">0.05</span>},  <span class="comment"># 100% capital</span>
+    ]
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, start_date: date):
+        self.start_date = start_date
+        self.current_phase = <span class="number">0</span>
+
+    <span class="key">def</span> <span class="func">get_current_limits</span>(self) -> dict:
+        weeks_elapsed = (date.today() - self.start_date).days // <span class="number">7</span>
+        phase_idx = min(weeks_elapsed, len(self.PHASES) - <span class="number">1</span>)
+        <span class="key">return</span> self.PHASES[phase_idx]
+
+    <span class="key">def</span> <span class="func">can_advance_phase</span>(self, metrics: dict) -> <span class="bool">bool</span>:
+        <span class="string">"""Vérifie si on peut passer à la phase suivante"""</span>
+        <span class="key">return</span> (
+            metrics[<span class="string">"sharpe"</span>] > <span class="number">0.5</span> <span class="key">and</span>
+            metrics[<span class="string">"max_drawdown"</span>] > -<span class="number">0.05</span> <span class="key">and</span>
+            metrics[<span class="string">"no_critical_errors"</span>]
+        )
+
+    <span class="key">def</span> <span class="func">should_rollback</span>(self, metrics: dict) -> <span class="bool">bool</span>:
+        <span class="string">"""Vérifie si on doit revenir en arrière"""</span>
+        <span class="key">return</span> (
+            metrics[<span class="string">"max_drawdown"</span>] < -<span class="number">0.10</span> <span class="key">or</span>
+            metrics[<span class="string">"critical_errors"</span>] > <span class="number">0</span>
+        )
+            </div>
+
+            <h3>8.4 Mode Shadow (Parallèle)</h3>
+            <div class="info-box">
+                <strong>Shadow Mode:</strong> Exécute le système en parallèle sans ordres réels,
+                compare les décisions paper vs ce qui aurait été exécuté en live.
+            </div>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">ShadowMode</span>:
+    <span class="string">"""
+    Mode shadow: compare paper vs live sans exécuter.
+    Détecte les écarts avant passage en production.
+    """</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, paper_system, live_config):
+        self.paper = paper_system
+        self.live_simulator = LiveSimulator(live_config)
+
+    <span class="key">async def</span> <span class="func">compare_decision</span>(self, event: MarketDataEvent):
+        <span class="comment"># Décision paper (réelle)</span>
+        paper_decision = <span class="key">await</span> self.paper.process(event)
+
+        <span class="comment"># Décision simulée live</span>
+        live_decision = <span class="key">await</span> self.live_simulator.process(event)
+
+        <span class="comment"># Comparer</span>
+        <span class="key">if</span> paper_decision != live_decision:
+            <span class="key">await</span> self._log_divergence(paper_decision, live_decision)
+
+        <span class="key">return</span> ShadowComparison(paper_decision, live_decision)
+            </div>
+        </section>
+
+        <!-- Section 9: Validation Pré-Live -->
+        <section id="validation" class="section">
+            <h2>9. Validation Pré-Live</h2>
+
+            <h3>9.1 Tests Automatisés</h3>
+            <div class="code-block">
+<span class="comment"># Suite de tests pré-live</span>
+
+<span class="key">class</span> <span class="class">PreLiveValidation</span>:
+    <span class="string">"""Validation complète avant passage en live"""</span>
+
+    <span class="key">async def</span> <span class="func">run_all_checks</span>(self) -> ValidationReport:
+        results = {}
+
+        <span class="comment"># 1. Vérification de la configuration</span>
+        results[<span class="string">"config"</span>] = <span class="key">await</span> self._validate_config()
+
+        <span class="comment"># 2. Vérification des connexions</span>
+        results[<span class="string">"connectivity"</span>] = <span class="key">await</span> self._test_connectivity()
+
+        <span class="comment"># 3. Vérification du kill-switch</span>
+        results[<span class="string">"kill_switch"</span>] = <span class="key">await</span> self._test_kill_switch()
+
+        <span class="comment"># 4. Vérification des limites de risque</span>
+        results[<span class="string">"risk_limits"</span>] = <span class="key">await</span> self._verify_risk_limits()
+
+        <span class="comment"># 5. Replay du dernier jour paper</span>
+        results[<span class="string">"replay_test"</span>] = <span class="key">await</span> self._replay_last_day()
+
+        <span class="comment"># 6. Vérification du déterminisme</span>
+        results[<span class="string">"determinism"</span>] = <span class="key">await</span> self._verify_determinism()
+
+        <span class="comment"># 7. Test des alertes</span>
+        results[<span class="string">"alerts"</span>] = <span class="key">await</span> self._test_alerts()
+
+        <span class="key">return</span> ValidationReport(
+            passed=all(r[<span class="string">"passed"</span>] <span class="key">for</span> r <span class="key">in</span> results.values()),
+            results=results
+        )
+
+    <span class="key">async def</span> <span class="func">_test_kill_switch</span>(self) -> dict:
+        <span class="string">"""Vérifie que le kill-switch fonctionne"""</span>
+        <span class="comment"># Simuler une condition de kill-switch</span>
+        <span class="key">await</span> self.risk_agent.simulate_drawdown_breach()
+
+        <span class="comment"># Vérifier que le système s'arrête</span>
+        <span class="key">if</span> self.orchestrator.is_halted:
+            <span class="key">await</span> self.orchestrator.reset()
+            <span class="key">return</span> {<span class="string">"passed"</span>: <span class="bool">True</span>, <span class="string">"message"</span>: <span class="string">"Kill-switch OK"</span>}
+        <span class="key">else</span>:
+            <span class="key">return</span> {<span class="string">"passed"</span>: <span class="bool">False</span>, <span class="string">"message"</span>: <span class="string">"Kill-switch FAILED!"</span>}
+            </div>
+
+            <h3>9.2 Comparaison Backtest vs Paper</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">BacktestPaperComparison</span>:
+    <span class="string">"""Compare les résultats backtest vs paper trading"""</span>
+
+    ACCEPTABLE_DEVIATION = <span class="number">0.20</span>  <span class="comment"># 20% max</span>
+
+    <span class="key">def</span> <span class="func">compare</span>(self, backtest: PerformanceMetrics, paper: PerformanceMetrics) -> ComparisonResult:
+        deviations = {}
+
+        <span class="comment"># Sharpe ratio</span>
+        sharpe_dev = abs(paper.sharpe - backtest.sharpe) / backtest.sharpe
+        deviations[<span class="string">"sharpe"</span>] = sharpe_dev
+
+        <span class="comment"># Return</span>
+        return_dev = abs(paper.total_return - backtest.total_return) / abs(backtest.total_return)
+        deviations[<span class="string">"return"</span>] = return_dev
+
+        <span class="comment"># Win rate</span>
+        winrate_dev = abs(paper.win_rate - backtest.win_rate) / backtest.win_rate
+        deviations[<span class="string">"win_rate"</span>] = winrate_dev
+
+        <span class="comment"># Max drawdown</span>
+        dd_dev = abs(paper.max_drawdown - backtest.max_drawdown) / abs(backtest.max_drawdown)
+        deviations[<span class="string">"max_drawdown"</span>] = dd_dev
+
+        <span class="comment"># Verdict</span>
+        max_deviation = max(deviations.values())
+        <span class="key">return</span> ComparisonResult(
+            passed=max_deviation <= self.ACCEPTABLE_DEVIATION,
+            deviations=deviations,
+            max_deviation=max_deviation,
+            recommendation=self._get_recommendation(deviations)
+        )
+
+    <span class="key">def</span> <span class="func">_get_recommendation</span>(self, deviations: dict) -> str:
+        <span class="key">if</span> max(deviations.values()) > <span class="number">0.50</span>:
+            <span class="key">return</span> <span class="string">"STOP: Écart trop important, investigation requise"</span>
+        <span class="key">elif</span> max(deviations.values()) > <span class="number">0.30</span>:
+            <span class="key">return</span> <span class="string">"CAUTION: Écart significatif, prolonger paper trading"</span>
+        <span class="key">elif</span> max(deviations.values()) > <span class="number">0.20</span>:
+            <span class="key">return</span> <span class="string">"OK: Écart acceptable, surveiller en live"</span>
+        <span class="key">else</span>:
+            <span class="key">return</span> <span class="string">"EXCELLENT: Résultats très cohérents"</span>
+            </div>
+
+            <h3>9.3 Rapport de Validation</h3>
+            <div class="code-block">
+<span class="comment">// Exemple de rapport de validation pré-live</span>
+{
+    <span class="key">"validation_date"</span>: <span class="string">"2024-01-15"</span>,
+    <span class="key">"system_version"</span>: <span class="string">"2.1.0"</span>,
+    <span class="key">"validated_by"</span>: <span class="string">"auto + manual review"</span>,
+
+    <span class="key">"backtest_results"</span>: {
+        <span class="key">"period"</span>: <span class="string">"2021-01-01 to 2023-12-31"</span>,
+        <span class="key">"sharpe"</span>: <span class="number">1.45</span>,
+        <span class="key">"max_drawdown"</span>: -<span class="number">0.082</span>,
+        <span class="key">"total_return"</span>: <span class="number">0.42</span>
+    },
+
+    <span class="key">"paper_results"</span>: {
+        <span class="key">"period"</span>: <span class="string">"2024-01-01 to 2024-01-15"</span>,
+        <span class="key">"sharpe"</span>: <span class="number">1.32</span>,
+        <span class="key">"max_drawdown"</span>: -<span class="number">0.025</span>,
+        <span class="key">"total_return"</span>: <span class="number">0.018</span>
+    },
+
+    <span class="key">"comparison"</span>: {
+        <span class="key">"sharpe_deviation"</span>: <span class="number">0.09</span>,
+        <span class="key">"verdict"</span>: <span class="string">"PASS"</span>
+    },
+
+    <span class="key">"automated_checks"</span>: {
+        <span class="key">"config_valid"</span>: <span class="bool">true</span>,
+        <span class="key">"connectivity_ok"</span>: <span class="bool">true</span>,
+        <span class="key">"kill_switch_tested"</span>: <span class="bool">true</span>,
+        <span class="key">"risk_limits_verified"</span>: <span class="bool">true</span>,
+        <span class="key">"replay_deterministic"</span>: <span class="bool">true</span>,
+        <span class="key">"alerts_functional"</span>: <span class="bool">true</span>
+    },
+
+    <span class="key">"manual_approvals"</span>: {
+        <span class="key">"risk_officer"</span>: {<span class="key">"approved"</span>: <span class="bool">true</span>, <span class="key">"date"</span>: <span class="string">"2024-01-14"</span>},
+        <span class="key">"compliance"</span>: {<span class="key">"approved"</span>: <span class="bool">true</span>, <span class="key">"date"</span>: <span class="string">"2024-01-14"</span>},
+        <span class="key">"management"</span>: {<span class="key">"approved"</span>: <span class="bool">true</span>, <span class="key">"date"</span>: <span class="string">"2024-01-15"</span>}
+    },
+
+    <span class="key">"final_verdict"</span>: <span class="string">"APPROVED FOR LIVE"</span>,
+    <span class="key">"live_start_date"</span>: <span class="string">"2024-01-16"</span>,
+    <span class="key">"initial_allocation"</span>: <span class="number">0.10</span>
+}
+            </div>
+        </section>
+
+        <!-- Section 10: Monitoring Continu -->
+        <section id="monitoring" class="section">
+            <h2>10. Monitoring Continu</h2>
+
+            <h3>10.1 Dashboard en Temps Réel</h3>
+            <div class="flow-diagram">
+                <table style="width: 100%; text-align: center;">
+                    <tr>
+                        <td style="padding: 1rem;">
+                            <div class="metric-card">
+                                <div class="metric-value" style="color: #4caf50;">+1.2%</div>
+                                <div class="metric-label">P&L Today</div>
+                            </div>
+                        </td>
+                        <td style="padding: 1rem;">
+                            <div class="metric-card">
+                                <div class="metric-value">47</div>
+                                <div class="metric-label">Trades Today</div>
+                            </div>
+                        </td>
+                        <td style="padding: 1rem;">
+                            <div class="metric-card">
+                                <div class="metric-value">68%</div>
+                                <div class="metric-label">Win Rate</div>
+                            </div>
+                        </td>
+                        <td style="padding: 1rem;">
+                            <div class="metric-card">
+                                <div class="metric-value" style="color: #f44336;">-0.8%</div>
+                                <div class="metric-label">Max DD Today</div>
+                            </div>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+
+            <h3>10.2 Alertes Automatiques</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Condition</th>
+                        <th>Seuil</th>
+                        <th>Action</th>
+                        <th>Notification</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Drawdown journalier</td>
+                        <td>> -2%</td>
+                        <td>Warning</td>
+                        <td>Slack</td>
+                    </tr>
+                    <tr>
+                        <td>Drawdown journalier</td>
+                        <td>> -3%</td>
+                        <td>Kill-switch</td>
+                        <td>Slack + SMS</td>
+                    </tr>
+                    <tr>
+                        <td>Perte consécutive</td>
+                        <td>5 trades</td>
+                        <td>Review</td>
+                        <td>Email</td>
+                    </tr>
+                    <tr>
+                        <td>Écart vs paper</td>
+                        <td>> 30%</td>
+                        <td>Investigation</td>
+                        <td>Email urgent</td>
+                    </tr>
+                    <tr>
+                        <td>Connexion IB perdue</td>
+                        <td>> 30s</td>
+                        <td>Reconnect + Alert</td>
+                        <td>Slack + SMS</td>
+                    </tr>
+                    <tr>
+                        <td>Latence décision</td>
+                        <td>> 500ms</td>
+                        <td>Warning</td>
+                        <td>Log</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>10.3 Comparaison Live vs Paper Continue</h3>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">LivePaperMonitor</span>:
+    <span class="string">"""
+    Compare en continu les performances live vs paper.
+    Détecte les dérives pour intervention rapide.
+    """</span>
+
+    <span class="key">def</span> <span class="func">__init__</span>(self, live_log: str, paper_log: str):
+        self.live_analyzer = LogAnalyzer(live_log)
+        self.paper_analyzer = LogAnalyzer(paper_log)
+
+    <span class="key">async def</span> <span class="func">check_drift</span>(self) -> DriftReport:
+        <span class="string">"""Vérifie la dérive live vs paper"""</span>
+
+        <span class="comment"># Métriques des 24 dernières heures</span>
+        live_metrics = self.live_analyzer.get_metrics(hours=<span class="number">24</span>)
+        paper_metrics = self.paper_analyzer.get_metrics(hours=<span class="number">24</span>)
+
+        drift = {
+            <span class="string">"sharpe_drift"</span>: live_metrics.sharpe - paper_metrics.sharpe,
+            <span class="string">"return_drift"</span>: live_metrics.total_return - paper_metrics.total_return,
+            <span class="string">"slippage_excess"</span>: live_metrics.avg_slippage - paper_metrics.avg_slippage,
+            <span class="string">"fill_rate_diff"</span>: live_metrics.fill_rate - paper_metrics.fill_rate
+        }
+
+        <span class="comment"># Alerter si dérive significative</span>
+        <span class="key">if</span> abs(drift[<span class="string">"return_drift"</span>]) > <span class="number">0.01</span>:  <span class="comment"># 1%</span>
+            <span class="key">await</span> self._send_alert(<span class="string">"DRIFT_WARNING"</span>, drift)
+
+        <span class="key">return</span> DriftReport(drift=drift, timestamp=datetime.utcnow())
+            </div>
+
+            <h3>10.4 Rollback Automatique</h3>
+            <div class="danger-box">
+                <strong>Conditions de Rollback Automatique vers Paper:</strong>
+                <ul style="margin-left: 1.5rem; margin-top: 0.5rem;">
+                    <li>Max drawdown dépassé (-10%)</li>
+                    <li>3 jours consécutifs de pertes > -1%</li>
+                    <li>Erreur système critique</li>
+                    <li>Dérive > 50% vs paper sur 5 jours</li>
+                </ul>
+            </div>
+            <div class="code-block">
+<span class="key">class</span> <span class="class">AutomaticRollback</span>:
+    <span class="string">"""Rollback automatique vers paper si conditions remplies"""</span>
+
+    <span class="key">async def</span> <span class="func">check_rollback_conditions</span>(self) -> <span class="bool">bool</span>:
+        metrics = <span class="key">await</span> self.get_live_metrics()
+
+        <span class="key">if</span> metrics.max_drawdown < -<span class="number">0.10</span>:
+            <span class="key">await</span> self._execute_rollback(<span class="string">"MAX_DRAWDOWN_EXCEEDED"</span>)
+            <span class="key">return</span> <span class="bool">True</span>
+
+        <span class="key">if</span> metrics.consecutive_loss_days >= <span class="number">3</span> <span class="key">and</span> metrics.recent_loss > <span class="number">0.03</span>:
+            <span class="key">await</span> self._execute_rollback(<span class="string">"CONSECUTIVE_LOSSES"</span>)
+            <span class="key">return</span> <span class="bool">True</span>
+
+        <span class="key">return</span> <span class="bool">False</span>
+
+    <span class="key">async def</span> <span class="func">_execute_rollback</span>(self, reason: str):
+        <span class="comment"># 1. Activer kill-switch</span>
+        <span class="key">await</span> self.orchestrator.activate_kill_switch()
+
+        <span class="comment"># 2. Fermer toutes les positions</span>
+        <span class="key">await</span> self.orchestrator.close_all_positions()
+
+        <span class="comment"># 3. Basculer en mode paper</span>
+        <span class="key">await</span> self.orchestrator.switch_mode(ExecutionMode.PAPER)
+
+        <span class="comment"># 4. Alerter</span>
+        <span class="key">await</span> self.alerter.send_critical(
+            f<span class="string">"ROLLBACK TO PAPER: {reason}"</span>
+        )
+
+        <span class="comment"># 5. Logger pour audit</span>
+        <span class="key">await</span> self.audit_logger.log_rollback(reason)
+            </div>
+        </section>
+
+        <footer style="text-align: center; padding: 2rem; color: #666;">
+            <p>Documentation Backtest & Paper Trading - AI Trading Firm</p>
+            <p>Conforme CLAUDE.md | Paper Trading par Défaut | Transition Sécurisée</p>
+            <p>Généré le 2024-01-15</p>
+        </footer>
+    </div>
+</body>
+</html>

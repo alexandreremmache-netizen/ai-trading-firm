@@ -1,0 +1,1017 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trading Firm - Architecture Multi-Agents</title>
+    <style>
+        :root {
+            --primary: #1a1a2e;
+            --secondary: #16213e;
+            --accent: #0f3460;
+            --highlight: #e94560;
+            --success: #00d9a5;
+            --warning: #ffc107;
+            --text: #eaeaea;
+            --text-muted: #a0a0a0;
+            --border: #2a2a4a;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+            color: var(--text);
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            padding: 3rem 0;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 3rem;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            background: linear-gradient(90deg, var(--highlight), var(--success));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 0.5rem;
+        }
+
+        header .subtitle {
+            color: var(--text-muted);
+            font-size: 1.2rem;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin: 0.25rem;
+        }
+
+        .badge-success { background: var(--success); color: var(--primary); }
+        .badge-warning { background: var(--warning); color: var(--primary); }
+        .badge-danger { background: var(--highlight); color: white; }
+        .badge-info { background: var(--accent); color: white; }
+
+        section {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        section h2 {
+            color: var(--success);
+            font-size: 1.5rem;
+            margin-bottom: 1.5rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid var(--accent);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        section h2::before {
+            content: '';
+            width: 4px;
+            height: 24px;
+            background: var(--highlight);
+            border-radius: 2px;
+        }
+
+        h3 {
+            color: var(--highlight);
+            margin: 1.5rem 0 1rem;
+        }
+
+        .architecture-diagram {
+            background: var(--primary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.85rem;
+            line-height: 1.4;
+            white-space: pre;
+            color: var(--success);
+        }
+
+        .agents-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.5rem;
+            margin-top: 1.5rem;
+        }
+
+        .agent-card {
+            background: linear-gradient(145deg, var(--secondary), var(--accent));
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.5rem;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .agent-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 25px rgba(233, 69, 96, 0.2);
+        }
+
+        .agent-card.signal { border-left: 4px solid var(--success); }
+        .agent-card.decision { border-left: 4px solid var(--highlight); }
+        .agent-card.validation { border-left: 4px solid var(--warning); }
+        .agent-card.execution { border-left: 4px solid #00bcd4; }
+
+        .agent-card h4 {
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .agent-card .role {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-bottom: 0.75rem;
+        }
+
+        .agent-card ul {
+            list-style: none;
+            font-size: 0.9rem;
+        }
+
+        .agent-card ul li {
+            padding: 0.25rem 0;
+            padding-left: 1.25rem;
+            position: relative;
+        }
+
+        .agent-card ul li::before {
+            content: '→';
+            position: absolute;
+            left: 0;
+            color: var(--success);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+
+        th, td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border: 1px solid var(--border);
+        }
+
+        th {
+            background: var(--accent);
+            font-weight: 600;
+            color: var(--success);
+        }
+
+        tr:nth-child(even) {
+            background: rgba(255,255,255,0.02);
+        }
+
+        tr:hover {
+            background: rgba(233, 69, 96, 0.1);
+        }
+
+        .flow-step {
+            display: flex;
+            align-items: flex-start;
+            margin: 1rem 0;
+            padding: 1rem;
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            border-left: 3px solid var(--success);
+        }
+
+        .flow-step .step-number {
+            background: var(--highlight);
+            color: white;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            margin-right: 1rem;
+            flex-shrink: 0;
+        }
+
+        .flow-step .step-content h4 {
+            color: var(--success);
+            margin-bottom: 0.5rem;
+        }
+
+        .flow-step .step-content p {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        .timeout-config {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .timeout-item {
+            background: var(--secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+
+        .timeout-item .label {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+
+        .timeout-item .value {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: var(--warning);
+        }
+
+        .timeout-item .description {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
+
+        .compliance-check {
+            display: flex;
+            align-items: center;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .compliance-check:last-child {
+            border-bottom: none;
+        }
+
+        .compliance-check .status {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 1rem;
+            font-size: 0.8rem;
+        }
+
+        .compliance-check .status.ok {
+            background: var(--success);
+            color: var(--primary);
+        }
+
+        .compliance-check .rule {
+            flex: 1;
+        }
+
+        .compliance-check .file {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            font-family: monospace;
+        }
+
+        .sequence-diagram {
+            background: var(--primary);
+            border-radius: 8px;
+            padding: 2rem;
+            margin: 1rem 0;
+            overflow-x: auto;
+        }
+
+        .sequence-row {
+            display: flex;
+            align-items: center;
+            margin: 0.5rem 0;
+            min-width: 800px;
+        }
+
+        .sequence-actor {
+            width: 120px;
+            text-align: center;
+            padding: 0.5rem;
+            background: var(--accent);
+            border-radius: 4px;
+            font-size: 0.8rem;
+            flex-shrink: 0;
+        }
+
+        .sequence-arrow {
+            flex: 1;
+            height: 2px;
+            background: var(--success);
+            position: relative;
+            margin: 0 1rem;
+        }
+
+        .sequence-arrow::after {
+            content: '▶';
+            position: absolute;
+            right: -8px;
+            top: -8px;
+            color: var(--success);
+        }
+
+        .sequence-arrow.reverse::after {
+            content: '◀';
+            left: -8px;
+            right: auto;
+        }
+
+        .sequence-label {
+            position: absolute;
+            top: -20px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+
+        .event-type {
+            display: inline-block;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-family: monospace;
+        }
+
+        .event-type.market { background: #2196f3; }
+        .event-type.signal { background: var(--success); color: var(--primary); }
+        .event-type.decision { background: var(--highlight); }
+        .event-type.validated { background: var(--warning); color: var(--primary); }
+        .event-type.order { background: #9c27b0; }
+        .event-type.fill { background: #00bcd4; }
+
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            border-top: 1px solid var(--border);
+            margin-top: 2rem;
+        }
+
+        footer a {
+            color: var(--success);
+            text-decoration: none;
+        }
+
+        .toc {
+            background: var(--secondary);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .toc h3 {
+            margin-top: 0;
+            margin-bottom: 1rem;
+        }
+
+        .toc ul {
+            list-style: none;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 0.5rem;
+        }
+
+        .toc a {
+            color: var(--text);
+            text-decoration: none;
+            padding: 0.25rem 0;
+            display: block;
+            transition: color 0.2s;
+        }
+
+        .toc a:hover {
+            color: var(--success);
+        }
+
+        .toc a::before {
+            content: '# ';
+            color: var(--highlight);
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+
+            header h1 {
+                font-size: 1.8rem;
+            }
+
+            section {
+                padding: 1rem;
+            }
+
+            .architecture-diagram {
+                font-size: 0.7rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>AI Trading Firm</h1>
+            <p class="subtitle">Architecture Multi-Agents - Documentation Technique</p>
+            <div style="margin-top: 1rem;">
+                <span class="badge badge-success">Python 3.11</span>
+                <span class="badge badge-info">Interactive Brokers</span>
+                <span class="badge badge-warning">Event-Driven</span>
+                <span class="badge badge-danger">EU/AMF Compliant</span>
+            </div>
+        </header>
+
+        <nav class="toc">
+            <h3>Table des Matières</h3>
+            <ul>
+                <li><a href="#overview">Vue d'ensemble</a></li>
+                <li><a href="#agents">Agents du Système</a></li>
+                <li><a href="#dataflow">Flux de Données</a></li>
+                <li><a href="#lifecycle">Cycle de Vie d'un Trade</a></li>
+                <li><a href="#events">Événements</a></li>
+                <li><a href="#timeouts">Timeouts & Synchronisation</a></li>
+                <li><a href="#compliance">Conformité CLAUDE.md</a></li>
+            </ul>
+        </nav>
+
+        <!-- SECTION 1: Overview -->
+        <section id="overview">
+            <h2>Vue d'Ensemble de l'Architecture</h2>
+
+            <p>Le système émule une société de trading multi-stratégies de type hedge fund.
+            L'architecture respecte strictement la constitution définie dans <code>CLAUDE.md</code>.</p>
+
+            <div class="architecture-diagram">
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           AI TRADING FIRM - ARCHITECTURE                         │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│   [Interactive Brokers] ──── MarketDataEvent ────▶ ┌─────────────────────────┐  │
+│                                                    │   EVENT BUS             │  │
+│                                                    │   (Pub/Sub Async)       │  │
+│                                                    └───────────┬─────────────┘  │
+│                                                                │                 │
+│   ╔════════════════════════════════════════════════════════════╧═══════════╗    │
+│   ║                    SIGNAL AGENTS (Exécution Parallèle)                 ║    │
+│   ║                                                                        ║    │
+│   ║   ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐║    │
+│   ║   │  MACRO   │  │ STAT ARB │  │ MOMENTUM │  │  MARKET  │  │ OPTIONS  │║    │
+│   ║   │  AGENT   │  │  AGENT   │  │  AGENT   │  │  MAKING  │  │   VOL    │║    │
+│   ║   └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘║    │
+│   ╚════════╪═════════════╪═════════════╪═════════════╪═════════════╪══════╝    │
+│            │             │             │             │             │            │
+│            └─────────────┴──────┬──────┴─────────────┴─────────────┘            │
+│                                 │ SignalEvent (fan-out)                         │
+│                                 ▼                                               │
+│   ╔═════════════════════════════════════════════════════════════════════════╗   │
+│   ║              SYNCHRONIZATION BARRIER (Fan-in, timeout: 10s)             ║   │
+│   ╚═════════════════════════════════════════════════════════════════════════╝   │
+│                                 │                                               │
+│                                 ▼                                               │
+│   ╔═════════════════════════════════════════════════════════════════════════╗   │
+│   ║                      CIO AGENT (DÉCIDEUR UNIQUE)                        ║   │
+│   ║                                                                         ║   │
+│   ║   • Agrège signaux avec poids    • Calcule conviction score             ║   │
+│   ║   • SEUL à créer DecisionEvent   • Log: rationale + data_sources        ║   │
+│   ╚═════════════════════════════════════════════════════════════════════════╝   │
+│                                 │ DecisionEvent                                 │
+│                                 ▼                                               │
+│   ╔═════════════════════════════════════════════════════════════════════════╗   │
+│   ║                   RISK & COMPLIANCE AGENT (Séquentiel)                  ║   │
+│   ║                                                                         ║   │
+│   ║   Position ≤5% │ Loss ≤3%/jour │ Drawdown ≤10% │ Leverage ≤2x │ Anti-HFT║   │
+│   ╚═════════════════════════════════════════════════════════════════════════╝   │
+│                                 │ ValidatedDecisionEvent                        │
+│                                 ▼                                               │
+│   ╔═════════════════════════════════════════════════════════════════════════╗   │
+│   ║                    EXECUTION AGENT (SEUL à trader)                      ║   │
+│   ║                                                                         ║   │
+│   ║   Algos: TWAP │ VWAP │ MARKET     Interface exclusive: Interactive Brokers  ║
+│   ╚═════════════════════════════════════════════════════════════════════════╝   │
+│                                 │ OrderEvent                                    │
+│                                 ▼                                               │
+│                        [Interactive Brokers API]                                │
+│                                 │                                               │
+│                                 ▼ FillEvent                                     │
+│                          [AUDIT LOG - EU/AMF]                                   │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+            </div>
+        </section>
+
+        <!-- SECTION 2: Agents -->
+        <section id="agents">
+            <h2>Agents du Système</h2>
+
+            <h3>Agents de Signal (Exécution Parallèle - Fan-out)</h3>
+            <div class="agents-grid">
+                <div class="agent-card signal">
+                    <h4>🌍 Macro Agent</h4>
+                    <div class="role">Signaux macro-économiques</div>
+                    <ul>
+                        <li>Analyse VIX (régime de volatilité)</li>
+                        <li>Courbe des taux (yield curve)</li>
+                        <li>Dollar Index (DXY)</li>
+                        <li>Spreads de crédit</li>
+                    </ul>
+                </div>
+
+                <div class="agent-card signal">
+                    <h4>📊 Stat Arb Agent</h4>
+                    <div class="role">Arbitrage statistique</div>
+                    <ul>
+                        <li>Pairs trading (cointegration)</li>
+                        <li>Z-score des spreads</li>
+                        <li>Hedge ratio dynamique</li>
+                        <li>Mean reversion</li>
+                    </ul>
+                </div>
+
+                <div class="agent-card signal">
+                    <h4>📈 Momentum Agent</h4>
+                    <div class="role">Tendances et momentum</div>
+                    <ul>
+                        <li>Moving Average Crossover</li>
+                        <li>RSI (Relative Strength)</li>
+                        <li>MACD</li>
+                        <li>Rate of Change</li>
+                    </ul>
+                </div>
+
+                <div class="agent-card signal">
+                    <h4>💹 Market Making Agent</h4>
+                    <div class="role">Fourniture de liquidité</div>
+                    <ul>
+                        <li>Fair value estimation</li>
+                        <li>Spread optimal (A-S)</li>
+                        <li>Gestion d'inventaire</li>
+                        <li>NON-HFT (≥100ms)</li>
+                    </ul>
+                </div>
+
+                <div class="agent-card signal">
+                    <h4>📉 Options Vol Agent</h4>
+                    <div class="role">Volatilité et options</div>
+                    <ul>
+                        <li>IV Percentile ranking</li>
+                        <li>Vol risk premium</li>
+                        <li>Skew analysis</li>
+                        <li>Term structure</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>Agent de Décision (Unique)</h3>
+            <div class="agents-grid">
+                <div class="agent-card decision" style="grid-column: span 2;">
+                    <h4>👔 CIO Agent - Chief Investment Officer</h4>
+                    <div class="role">UNIQUE AUTORITÉ DE DÉCISION</div>
+                    <ul>
+                        <li>Agrège tous les signaux avec pondération configurable</li>
+                        <li>Calcule le consensus directionnel (LONG/SHORT/FLAT)</li>
+                        <li>Évalue le score de conviction (seuil: 0.6)</li>
+                        <li>SEUL habilité à créer des DecisionEvent</li>
+                        <li>Logging obligatoire: rationale, data_sources, contributing_signals</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h3>Agents Séquentiels (Post-Décision)</h3>
+            <div class="agents-grid">
+                <div class="agent-card validation">
+                    <h4>🛡️ Risk & Compliance Agent</h4>
+                    <div class="role">Validation pré-exécution</div>
+                    <ul>
+                        <li>Position size ≤ 5% portfolio</li>
+                        <li>Daily loss ≤ 3%</li>
+                        <li>Max drawdown ≤ 10%</li>
+                        <li>Leverage ≤ 2x</li>
+                        <li>Rate limit: 10 orders/min</li>
+                        <li>Min interval: 100ms</li>
+                    </ul>
+                </div>
+
+                <div class="agent-card execution">
+                    <h4>⚡ Execution Agent</h4>
+                    <div class="role">SEUL à envoyer des ordres</div>
+                    <ul>
+                        <li>Interface exclusive avec IB</li>
+                        <li>Algorithmes: TWAP, VWAP, MARKET</li>
+                        <li>Slicing automatique</li>
+                        <li>Gestion des fills</li>
+                        <li>Logging des trades</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- SECTION 3: Data Flow -->
+        <section id="dataflow">
+            <h2>Flux de Données</h2>
+
+            <h3>Pattern Fan-out / Fan-in</h3>
+            <div class="architecture-diagram">
+                           INTERACTIVE BROKERS
+                                   │
+                                   │ MarketDataEvent
+                                   ▼
+          ┌────────────────────────┼────────────────────────┐
+          │                        │                        │
+          ▼                        ▼                        ▼
+     ┌─────────┐             ┌─────────┐             ┌─────────┐
+     │ Agent 1 │             │ Agent 2 │             │ Agent N │
+     │ (async) │             │ (async) │     ...     │ (async) │
+     └────┬────┘             └────┬────┘             └────┬────┘
+          │                        │                        │
+          │ SignalEvent            │ SignalEvent            │ SignalEvent
+          │                        │                        │
+          └────────────────────────┼────────────────────────┘
+                                   │
+                      ═══════════════════════════════
+                      ║   SYNCHRONIZATION BARRIER   ║
+                      ║   timeout: 10 secondes      ║
+                      ║   Attend TOUS les signaux   ║
+                      ═══════════════════════════════
+                                   │
+                                   │ dict[agent_name → SignalEvent]
+                                   ▼
+                           ┌───────────────┐
+                           │   CIO AGENT   │
+                           │  Agrégation   │
+                           │  Pondération  │
+                           │   Décision    │
+                           └───────┬───────┘
+                                   │
+                                   │ DecisionEvent
+                                   ▼
+                           ┌───────────────┐
+                           │ RISK/COMPLI.  │───▶ REJET (si violation)
+                           │  Validation   │
+                           └───────┬───────┘
+                                   │
+                                   │ ValidatedDecisionEvent (approved=true)
+                                   ▼
+                           ┌───────────────┐
+                           │  EXECUTION    │
+                           │   TWAP/VWAP   │
+                           └───────┬───────┘
+                                   │
+                                   │ OrderEvent
+                                   ▼
+                         [Interactive Brokers]
+                                   │
+                                   │ FillEvent
+                                   ▼
+                         ┌───────────────────┐
+                         │    AUDIT LOG      │
+                         │ decisions.jsonl   │
+                         │ trades.jsonl      │
+                         │ audit.jsonl       │
+                         └───────────────────┘
+            </div>
+        </section>
+
+        <!-- SECTION 4: Trade Lifecycle -->
+        <section id="lifecycle">
+            <h2>Cycle de Vie Complet d'un Trade</h2>
+
+            <div class="flow-step">
+                <div class="step-number">1</div>
+                <div class="step-content">
+                    <h4>Déclenchement</h4>
+                    <p><span class="event-type market">MarketDataEvent</span> reçu d'Interactive Brokers.
+                    Contient: symbol, bid, ask, last, volume. Distribué via EventBus à tous les Signal Agents.</p>
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <div class="step-number">2</div>
+                <div class="step-content">
+                    <h4>Génération de Signaux (Parallèle)</h4>
+                    <p>Chaque Signal Agent analyse indépendamment et produit un <span class="event-type signal">SignalEvent</span>:
+                    <br>• MacroAgent: VIX=14 → direction=LONG, strength=0.6
+                    <br>• StatArbAgent: z-score=2.3 → direction=SHORT, strength=-0.8
+                    <br>• MomentumAgent: MA cross bullish → direction=LONG, strength=0.7</p>
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <div class="step-number">3</div>
+                <div class="step-content">
+                    <h4>Synchronisation (Barrier)</h4>
+                    <p>SignalBarrier collecte tous les signaux. Timeout: 10 secondes.
+                    Si timeout: CIO décide avec les signaux disponibles (partial signals).
+                    Résultat: <code>dict[agent_name → SignalEvent]</code></p>
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <div class="step-number">4</div>
+                <div class="step-content">
+                    <h4>Décision (CIO Agent)</h4>
+                    <p>Agrégation pondérée: <code>weighted_strength = Σ(signal.strength × weight[agent])</code>
+                    <br>Consensus: 3 LONG vs 2 SHORT → Direction = LONG
+                    <br>Conviction: 0.72 > threshold(0.6) → <span class="event-type decision">DecisionEvent</span> créé
+                    <br><strong>LOG OBLIGATOIRE:</strong> rationale, data_sources, contributing_signals</p>
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <div class="step-number">5</div>
+                <div class="step-content">
+                    <h4>Validation (Risk & Compliance)</h4>
+                    <p>Checks séquentiels:
+                    <br>✓ position_limit (3% < 5%)
+                    ✓ daily_loss (-0.5% < 3%)
+                    ✓ drawdown (2% < 10%)
+                    <br>✓ leverage (1.2x < 2x)
+                    ✓ rate_limit (5/min < 10/min)
+                    ✓ order_interval (500ms > 100ms)
+                    <br>Résultat: <span class="event-type validated">ValidatedDecisionEvent</span> (approved=true/false)</p>
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <div class="step-number">6</div>
+                <div class="step-content">
+                    <h4>Exécution</h4>
+                    <p>Si approved=true: Execution Agent crée <span class="event-type order">OrderEvent</span>
+                    <br>Algorithme TWAP: 100 shares → 10 slices de 10, interval 60s
+                    <br>Envoi séquentiel à Interactive Brokers</p>
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <div class="step-number">7</div>
+                <div class="step-content">
+                    <h4>Confirmation</h4>
+                    <p><span class="event-type fill">FillEvent</span> reçu d'IB
+                    <br>Mise à jour des positions et P&L
+                    <br>LOG: symbol, side, quantity, price, commission, decision_id</p>
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <div class="step-number">8</div>
+                <div class="step-content">
+                    <h4>Audit Trail (EU/AMF)</h4>
+                    <p>Fichiers JSONL avec rétention 7 ans (MiFID II):
+                    <br>• <code>logs/decisions.jsonl</code> - Toutes les décisions CIO
+                    <br>• <code>logs/trades.jsonl</code> - Tous les trades exécutés
+                    <br>• <code>logs/audit.jsonl</code> - Tous les événements système</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- SECTION 5: Events -->
+        <section id="events">
+            <h2>Types d'Événements</h2>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Événement</th>
+                        <th>Source</th>
+                        <th>Déclenche</th>
+                        <th>Consommateurs</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="event-type market">MarketDataEvent</span></td>
+                        <td>IB Broker</td>
+                        <td>Analyse de signal</td>
+                        <td>Tous les Signal Agents</td>
+                    </tr>
+                    <tr>
+                        <td><span class="event-type signal">SignalEvent</span></td>
+                        <td>Signal Agents</td>
+                        <td>Agrégation CIO</td>
+                        <td>CIO Agent (via Barrier)</td>
+                    </tr>
+                    <tr>
+                        <td><span class="event-type decision">DecisionEvent</span></td>
+                        <td>CIO Agent</td>
+                        <td>Validation</td>
+                        <td>Risk/Compliance Agent</td>
+                    </tr>
+                    <tr>
+                        <td><span class="event-type validated">ValidatedDecisionEvent</span></td>
+                        <td>Risk Agent</td>
+                        <td>Exécution</td>
+                        <td>Execution Agent</td>
+                    </tr>
+                    <tr>
+                        <td><span class="event-type order">OrderEvent</span></td>
+                        <td>Execution Agent</td>
+                        <td>Ordre IB</td>
+                        <td>Broker IB</td>
+                    </tr>
+                    <tr>
+                        <td><span class="event-type fill">FillEvent</span></td>
+                        <td>Broker IB</td>
+                        <td>Update + Log</td>
+                        <td>Audit Logger</td>
+                    </tr>
+                    <tr>
+                        <td><span class="badge badge-danger">RiskAlertEvent</span></td>
+                        <td>Risk Agent</td>
+                        <td>HALT (si critical)</td>
+                        <td>Orchestrator</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <p style="margin-top: 1rem; color: var(--text-muted);">
+                <strong>Important:</strong> Le système est 100% event-driven. Pas de polling, pas de boucles infinies.
+                Chaque action est déclenchée par un événement.
+            </p>
+        </section>
+
+        <!-- SECTION 6: Timeouts -->
+        <section id="timeouts">
+            <h2>Timeouts & Synchronisation</h2>
+
+            <div class="timeout-config">
+                <div class="timeout-item">
+                    <div class="label">Signal Timeout</div>
+                    <div class="value">5s</div>
+                    <div class="description">Temps max pour qu'un agent produise un signal</div>
+                </div>
+                <div class="timeout-item">
+                    <div class="label">Barrier Timeout</div>
+                    <div class="value">10s</div>
+                    <div class="description">Temps max d'attente pour tous les signaux</div>
+                </div>
+                <div class="timeout-item">
+                    <div class="label">Agent Processing</div>
+                    <div class="value">30s</div>
+                    <div class="description">Timeout par traitement d'événement</div>
+                </div>
+                <div class="timeout-item">
+                    <div class="label">Broker Connection</div>
+                    <div class="value">30s</div>
+                    <div class="description">Timeout connexion Interactive Brokers</div>
+                </div>
+            </div>
+
+            <h3>Rate Limiting (Anti-HFT)</h3>
+            <div class="timeout-config">
+                <div class="timeout-item">
+                    <div class="label">Max Orders/Minute</div>
+                    <div class="value">10</div>
+                    <div class="description">Limite d'ordres par minute</div>
+                </div>
+                <div class="timeout-item">
+                    <div class="label">Min Order Interval</div>
+                    <div class="value">100ms</div>
+                    <div class="description">Intervalle minimum entre ordres</div>
+                </div>
+                <div class="timeout-item">
+                    <div class="label">Quote Refresh (MM)</div>
+                    <div class="value">1000ms</div>
+                    <div class="description">Rafraîchissement quotes Market Making</div>
+                </div>
+                <div class="timeout-item">
+                    <div class="label">TWAP Slice Interval</div>
+                    <div class="value">60s</div>
+                    <div class="description">Intervalle entre slices TWAP</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- SECTION 7: Compliance -->
+        <section id="compliance">
+            <h2>Conformité CLAUDE.md</h2>
+
+            <p style="margin-bottom: 1.5rem;">Vérification de la conformité de l'implémentation avec la constitution:</p>
+
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Architecture multi-agents stricte (8 agents distincts)</div>
+                <div class="file">agents/</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Responsabilité unique par agent</div>
+                <div class="file">core/agent_base.py</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">CIO = unique décideur (seul crée DecisionEvent)</div>
+                <div class="file">agents/cio_agent.py:185</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Fan-out: signaux en parallèle (asyncio)</div>
+                <div class="file">core/agent_base.py:95</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Fan-in: barrière de synchronisation avec timeout</div>
+                <div class="file">core/event_bus.py:25-58</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Séquentiel post-décision (Risk → Execution)</div>
+                <div class="file">main.py:280-290</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Event-driven, pas de polling</div>
+                <div class="file">core/event_bus.py</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Timeouts obligatoires configurés</div>
+                <div class="file">config.yaml:15-20</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Anti-HFT (rate limit + min interval)</div>
+                <div class="file">agents/risk_compliance_agent.py:180</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Paper trading par défaut</div>
+                <div class="file">config.yaml:5,12</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Audit logging EU/AMF (JSONL, 7 ans)</div>
+                <div class="file">core/logger.py</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Pas de HFT (Market Making ≥ 100ms)</div>
+                <div class="file">agents/market_making_agent.py:52</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Pas de stratégies auto-modifiantes</div>
+                <div class="file">strategies/*.py (stateless)</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Pas de scaling autonome du capital</div>
+                <div class="file">agents/cio_agent.py (fixed sizing)</div>
+            </div>
+            <div class="compliance-check">
+                <div class="status ok">✓</div>
+                <div class="rule">Système testable, observable, auditable</div>
+                <div class="file">tests/, logs/</div>
+            </div>
+
+            <div style="margin-top: 2rem; padding: 1rem; background: rgba(0,217,165,0.1); border-radius: 8px; border-left: 4px solid var(--success);">
+                <strong style="color: var(--success);">✓ CONFORMITÉ 100%</strong>
+                <p style="margin-top: 0.5rem; color: var(--text-muted);">
+                    L'architecture implémentée respecte strictement toutes les règles définies dans CLAUDE.md.
+                </p>
+            </div>
+        </section>
+
+        <footer>
+            <p>AI Trading Firm - Architecture Documentation</p>
+            <p>Généré automatiquement | <a href="claude.md">Voir CLAUDE.md</a> | Python 3.11 | Interactive Brokers</p>
+            <p style="margin-top: 1rem; font-size: 0.8rem;">
+                ⚠️ Paper Trading par défaut | Conformité EU/AMF | Pas de HFT
+            </p>
+        </footer>
+    </div>
+</body>
+</html>

@@ -1,0 +1,1625 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Compliance - Cadre UE/AMF</title>
+    <style>
+        :root {
+            --primary: #1a237e;
+            --secondary: #303f9f;
+            --accent: #ff6f00;
+            --success: #2e7d32;
+            --danger: #c62828;
+            --warning: #f57f17;
+            --bg: #fafafa;
+            --card: #ffffff;
+            --text: #212121;
+            --border: #e0e0e0;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+        .header {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            padding: 3rem 2rem;
+            text-align: center;
+        }
+        .header h1 { font-size: 2.5rem; margin-bottom: 0.5rem; }
+        .header .subtitle { opacity: 0.9; font-size: 1.2rem; }
+        .badge {
+            display: inline-block;
+            padding: 0.3rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin: 0.5rem 0.25rem;
+        }
+        .badge-eu { background: #1565c0; color: white; }
+        .badge-amf { background: #6a1b9a; color: white; }
+        .badge-mifid { background: #00695c; color: white; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 2rem; }
+        .nav {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .nav h3 { color: var(--primary); margin-bottom: 1rem; }
+        .nav-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 0.5rem;
+        }
+        .nav a {
+            color: var(--secondary);
+            text-decoration: none;
+            padding: 0.5rem;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+        .nav a:hover { background: #e8eaf6; }
+        .section {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .section h2 {
+            color: var(--primary);
+            border-bottom: 3px solid var(--accent);
+            padding-bottom: 0.5rem;
+            margin-bottom: 1.5rem;
+        }
+        .section h3 { color: var(--secondary); margin: 1.5rem 0 1rem; }
+        .section h4 { color: #455a64; margin: 1rem 0 0.5rem; }
+        .reg-box {
+            background: linear-gradient(135deg, #e8eaf6, #c5cae9);
+            border-left: 4px solid var(--primary);
+            padding: 1.5rem;
+            border-radius: 0 8px 8px 0;
+            margin: 1rem 0;
+        }
+        .reg-box .title {
+            font-weight: 700;
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+        }
+        .checklist {
+            background: #f5f5f5;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+        }
+        .check-item {
+            display: flex;
+            align-items: flex-start;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .check-item:last-child { border-bottom: none; }
+        .check-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 1rem;
+            flex-shrink: 0;
+            font-weight: bold;
+            font-size: 0.8rem;
+        }
+        .check-mandatory { background: var(--danger); color: white; }
+        .check-conditional { background: var(--warning); color: white; }
+        .check-info { background: var(--secondary); color: white; }
+        .check-content { flex: 1; }
+        .check-content strong { color: var(--text); }
+        .check-content .desc { color: #666; font-size: 0.9rem; margin-top: 0.25rem; }
+        .blackout-card {
+            background: #fff3e0;
+            border: 2px solid var(--accent);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+        }
+        .blackout-card .type {
+            font-weight: 700;
+            color: var(--accent);
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+        }
+        .blackout-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+        }
+        .timeline {
+            position: relative;
+            padding-left: 2rem;
+            margin: 1rem 0;
+        }
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: var(--secondary);
+        }
+        .timeline-item {
+            position: relative;
+            padding: 1rem 0;
+        }
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -2rem;
+            top: 1.3rem;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--secondary);
+            border: 2px solid white;
+        }
+        .timeline-item.blocked::before { background: var(--danger); }
+        .timeline-item.allowed::before { background: var(--success); }
+        .reject-box {
+            background: #ffebee;
+            border-left: 4px solid var(--danger);
+            padding: 1.5rem;
+            border-radius: 0 8px 8px 0;
+            margin: 1rem 0;
+        }
+        .reject-box .code {
+            font-family: 'Consolas', monospace;
+            background: var(--danger);
+            color: white;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            margin-right: 0.5rem;
+        }
+        .log-format {
+            background: #263238;
+            color: #aed581;
+            padding: 1.5rem;
+            border-radius: 8px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+            margin: 1rem 0;
+        }
+        .log-format .comment { color: #78909c; }
+        .log-format .key { color: #81d4fa; }
+        .log-format .string { color: #c5e1a5; }
+        .log-format .number { color: #ffcc80; }
+        .log-format .bool { color: #f48fb1; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        th {
+            background: #e8eaf6;
+            color: var(--primary);
+            font-weight: 600;
+        }
+        tr:hover { background: #f5f5f5; }
+        .status-approved {
+            background: #e8f5e9;
+            color: var(--success);
+            padding: 0.2rem 0.6rem;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        .status-rejected {
+            background: #ffebee;
+            color: var(--danger);
+            padding: 0.2rem 0.6rem;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        .status-pending {
+            background: #fff8e1;
+            color: var(--warning);
+            padding: 0.2rem 0.6rem;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        .flowchart {
+            background: #fafafa;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 2rem;
+            margin: 1rem 0;
+            text-align: center;
+        }
+        .flow-node {
+            display: inline-block;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            margin: 0.5rem;
+            font-weight: 600;
+        }
+        .flow-start { background: #e3f2fd; border: 2px solid #1976d2; }
+        .flow-check { background: #fff3e0; border: 2px solid #f57c00; }
+        .flow-reject { background: #ffebee; border: 2px solid #d32f2f; }
+        .flow-approve { background: #e8f5e9; border: 2px solid #388e3c; }
+        .flow-arrow {
+            display: inline-block;
+            color: #666;
+            margin: 0 0.5rem;
+            font-size: 1.2rem;
+        }
+        .article-ref {
+            font-size: 0.85rem;
+            color: #666;
+            font-style: italic;
+        }
+        .penalty-box {
+            background: #fce4ec;
+            border: 1px solid #f48fb1;
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 0.5rem 0;
+        }
+        .retention-info {
+            background: #e0f2f1;
+            border-left: 4px solid #00897b;
+            padding: 1rem;
+            border-radius: 0 8px 8px 0;
+            margin: 1rem 0;
+        }
+        @media (max-width: 768px) {
+            .header h1 { font-size: 1.8rem; }
+            .container { padding: 1rem; }
+            .section { padding: 1.5rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Agent Compliance</h1>
+        <p class="subtitle">Validation Réglementaire UE / AMF</p>
+        <div>
+            <span class="badge badge-eu">Règlement UE</span>
+            <span class="badge badge-amf">AMF France</span>
+            <span class="badge badge-mifid">MiFID II</span>
+        </div>
+    </div>
+
+    <div class="container">
+        <nav class="nav">
+            <h3>Navigation</h3>
+            <div class="nav-grid">
+                <a href="#mission">1. Mission & Cadre Légal</a>
+                <a href="#checklist">2. Checklist Pré-Trade</a>
+                <a href="#blackout">3. Règles de Blackout</a>
+                <a href="#insider">4. Détection Délit d'Initié</a>
+                <a href="#logging">5. Format de Journalisation</a>
+                <a href="#rejection">6. Cas de Refus Automatique</a>
+                <a href="#audit">7. Piste d'Audit</a>
+                <a href="#retention">8. Conservation des Données</a>
+                <a href="#sanctions">9. Sanctions & Alertes</a>
+                <a href="#integration">10. Intégration Système</a>
+            </div>
+        </nav>
+
+        <!-- Section 1: Mission -->
+        <section id="mission" class="section">
+            <h2>1. Mission & Cadre Légal</h2>
+
+            <div class="reg-box">
+                <div class="title">Conformité CLAUDE.md</div>
+                <p><strong>Article 33-41:</strong> "Conception compatible UE / AMF - Pas de délit d'initié -
+                Pas de données illégales, divulguées ou privilégiées - Toutes les décisions doivent être
+                journalisées avec: horodatage, sources de données, justification, agent responsable"</p>
+            </div>
+
+            <h3>1.1 Rôle de l'Agent Compliance</h3>
+            <p>L'agent Compliance est le <strong>gardien réglementaire</strong> du système. Il intervient
+            <strong>après</strong> la validation Risk et <strong>avant</strong> l'exécution pour garantir
+            que chaque ordre respecte le cadre légal européen.</p>
+
+            <h3>1.2 Cadre Réglementaire Applicable</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Règlement</th>
+                        <th>Périmètre</th>
+                        <th>Obligations Clés</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>MAR</strong><br><span class="article-ref">Règlement 596/2014</span></td>
+                        <td>Abus de marché</td>
+                        <td>Interdiction délit d'initié, manipulation, divulgation illicite</td>
+                    </tr>
+                    <tr>
+                        <td><strong>MiFID II</strong><br><span class="article-ref">Directive 2014/65/UE</span></td>
+                        <td>Marchés financiers</td>
+                        <td>Best execution, transparence, reporting</td>
+                    </tr>
+                    <tr>
+                        <td><strong>MiFIR</strong><br><span class="article-ref">Règlement 600/2014</span></td>
+                        <td>Transparence</td>
+                        <td>Déclaration des transactions, piste d'audit</td>
+                    </tr>
+                    <tr>
+                        <td><strong>EMIR</strong><br><span class="article-ref">Règlement 648/2012</span></td>
+                        <td>Dérivés OTC</td>
+                        <td>Compensation, déclaration, atténuation risques</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Règlement AMF</strong><br><span class="article-ref">RG AMF</span></td>
+                        <td>France spécifique</td>
+                        <td>Obligations déclaratives, listes d'initiés</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>1.3 Position dans le Pipeline</h3>
+            <div class="flowchart">
+                <span class="flow-node flow-start">DecisionEvent<br>(CIO)</span>
+                <span class="flow-arrow">→</span>
+                <span class="flow-node flow-check">Risk Agent<br>(Validation)</span>
+                <span class="flow-arrow">→</span>
+                <span class="flow-node flow-check" style="border-color: var(--primary);">Compliance Agent<br>(Validation Légale)</span>
+                <span class="flow-arrow">→</span>
+                <span class="flow-node flow-approve">Execution Agent<br>(Ordres)</span>
+            </div>
+        </section>
+
+        <!-- Section 2: Checklist Pré-Trade -->
+        <section id="checklist" class="section">
+            <h2>2. Checklist Pré-Trade</h2>
+            <p>Avant chaque ordre, l'agent Compliance exécute une série de vérifications obligatoires.</p>
+
+            <h3>2.1 Vérifications Obligatoires (Bloquantes)</h3>
+            <div class="checklist">
+                <div class="check-item">
+                    <div class="check-icon check-mandatory">1</div>
+                    <div class="check-content">
+                        <strong>Instrument Autorisé</strong>
+                        <div class="desc">L'instrument est-il dans l'univers d'investissement approuvé ?
+                        Pas de titres restreints, sanctions OFAC/UE.</div>
+                    </div>
+                </div>
+                <div class="check-item">
+                    <div class="check-icon check-mandatory">2</div>
+                    <div class="check-content">
+                        <strong>Période de Blackout</strong>
+                        <div class="desc">Vérifier si l'émetteur est en période de blackout (earnings,
+                        opérations corporate en cours).</div>
+                    </div>
+                </div>
+                <div class="check-item">
+                    <div class="check-icon check-mandatory">3</div>
+                    <div class="check-content">
+                        <strong>Information Privilégiée</strong>
+                        <div class="desc">Aucune source de données du signal ne contient d'information
+                        privilégiée non publique (MNPI).</div>
+                    </div>
+                </div>
+                <div class="check-item">
+                    <div class="check-icon check-mandatory">4</div>
+                    <div class="check-content">
+                        <strong>Marché Ouvert</strong>
+                        <div class="desc">Le marché cible est-il ouvert ? Pas d'ordres hors séance
+                        sans autorisation explicite.</div>
+                    </div>
+                </div>
+                <div class="check-item">
+                    <div class="check-icon check-mandatory">5</div>
+                    <div class="check-content">
+                        <strong>Seuil de Déclaration</strong>
+                        <div class="desc">L'ordre déclenchera-t-il un seuil de déclaration AMF
+                        (5%, 10%, etc.) ? Si oui, préparer notification.</div>
+                    </div>
+                </div>
+                <div class="check-item">
+                    <div class="check-icon check-mandatory">6</div>
+                    <div class="check-content">
+                        <strong>Short Selling Autorisé</strong>
+                        <div class="desc">Pour les ventes à découvert: le titre est-il empruntable ?
+                        Pas d'interdiction temporaire SSR ?</div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>2.2 Vérifications Conditionnelles</h3>
+            <div class="checklist">
+                <div class="check-item">
+                    <div class="check-icon check-conditional">C1</div>
+                    <div class="check-content">
+                        <strong>Large Order Flag</strong>
+                        <div class="desc">Si ordre > 1% du volume quotidien moyen: activer surveillance
+                        manipulation de marché.</div>
+                    </div>
+                </div>
+                <div class="check-item">
+                    <div class="check-icon check-conditional">C2</div>
+                    <div class="check-content">
+                        <strong>Cross-Border</strong>
+                        <div class="desc">Si instrument non-UE: vérifier équivalence réglementaire
+                        et restrictions locales.</div>
+                    </div>
+                </div>
+                <div class="check-item">
+                    <div class="check-icon check-conditional">C3</div>
+                    <div class="check-content">
+                        <strong>Dérivés OTC</strong>
+                        <div class="desc">Si dérivé OTC: vérifier obligation de compensation EMIR,
+                        marge initiale.</div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>2.3 Informations Collectées</h3>
+            <div class="checklist">
+                <div class="check-item">
+                    <div class="check-icon check-info">i</div>
+                    <div class="check-content">
+                        <strong>Horodatage Précis</strong>
+                        <div class="desc">Timestamp UTC avec précision milliseconde pour chaque
+                        étape de validation.</div>
+                    </div>
+                </div>
+                <div class="check-item">
+                    <div class="check-icon check-info">i</div>
+                    <div class="check-content">
+                        <strong>Sources de Données</strong>
+                        <div class="desc">Liste exhaustive des sources utilisées par les agents
+                        de signaux pour cette décision.</div>
+                    </div>
+                </div>
+                <div class="check-item">
+                    <div class="check-icon check-info">i</div>
+                    <div class="check-content">
+                        <strong>Chaîne de Décision</strong>
+                        <div class="desc">Identifiants de tous les agents impliqués: signal → CIO →
+                        Risk → Compliance.</div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>2.4 Algorithme de Validation</h3>
+            <div class="log-format">
+<span class="comment"># Pseudo-code de la checklist pré-trade</span>
+
+<span class="key">async def</span> validate_pretrade(decision: ValidatedDecisionEvent) -> ComplianceResult:
+    checks = []
+
+    <span class="comment"># 1. Instrument autorisé</span>
+    <span class="key">if</span> decision.symbol <span class="key">in</span> RESTRICTED_LIST:
+        <span class="key">return</span> reject(<span class="string">"RESTRICTED_INSTRUMENT"</span>)
+    checks.append((<span class="string">"instrument_allowed"</span>, <span class="bool">True</span>))
+
+    <span class="comment"># 2. Période de blackout</span>
+    blackout = <span class="key">await</span> check_blackout_period(decision.symbol)
+    <span class="key">if</span> blackout.is_active:
+        <span class="key">return</span> reject(<span class="string">"BLACKOUT_PERIOD"</span>, blackout.reason)
+    checks.append((<span class="string">"blackout_clear"</span>, <span class="bool">True</span>))
+
+    <span class="comment"># 3. Information privilégiée</span>
+    <span class="key">for</span> source <span class="key">in</span> decision.data_sources:
+        <span class="key">if</span> <span class="key">await</span> is_mnpi_source(source):
+            <span class="key">return</span> reject(<span class="string">"MNPI_DETECTED"</span>, source)
+    checks.append((<span class="string">"no_mnpi"</span>, <span class="bool">True</span>))
+
+    <span class="comment"># 4. Marché ouvert</span>
+    <span class="key">if not await</span> is_market_open(decision.symbol):
+        <span class="key">return</span> reject(<span class="string">"MARKET_CLOSED"</span>)
+    checks.append((<span class="string">"market_open"</span>, <span class="bool">True</span>))
+
+    <span class="comment"># 5. Seuil de déclaration</span>
+    threshold = <span class="key">await</span> check_declaration_threshold(decision)
+    <span class="key">if</span> threshold.triggered:
+        <span class="key">await</span> prepare_amf_notification(threshold)
+    checks.append((<span class="string">"threshold_checked"</span>, <span class="bool">True</span>, threshold))
+
+    <span class="comment"># 6. Short selling</span>
+    <span class="key">if</span> decision.side == <span class="string">"SELL"</span> <span class="key">and</span> decision.is_short:
+        <span class="key">if await</span> is_ssr_active(decision.symbol):
+            <span class="key">return</span> reject(<span class="string">"SSR_RESTRICTION"</span>)
+        <span class="key">if not await</span> check_borrow_availability(decision.symbol):
+            <span class="key">return</span> reject(<span class="string">"NO_BORROW_AVAILABLE"</span>)
+    checks.append((<span class="string">"short_selling_ok"</span>, <span class="bool">True</span>))
+
+    <span class="key">return</span> approve(checks)
+            </div>
+        </section>
+
+        <!-- Section 3: Règles de Blackout -->
+        <section id="blackout" class="section">
+            <h2>3. Règles de Blackout</h2>
+
+            <div class="reg-box">
+                <div class="title">Base Légale - MAR Article 19</div>
+                <p>Les personnes exerçant des responsabilités dirigeantes ne peuvent pas effectuer de
+                transactions pendant une période de 30 jours calendaires avant l'annonce d'un rapport
+                financier intermédiaire ou de fin d'année.</p>
+            </div>
+
+            <h3>3.1 Types de Blackout</h3>
+            <div class="blackout-grid">
+                <div class="blackout-card">
+                    <div class="type">Earnings Blackout</div>
+                    <p><strong>Déclencheur:</strong> Publication de résultats financiers</p>
+                    <p><strong>Période:</strong> -30 jours avant annonce jusqu'à +24h après</p>
+                    <p><strong>Source:</strong> Calendrier earnings (Bloomberg, Reuters)</p>
+                </div>
+                <div class="blackout-card">
+                    <div class="type">M&A Blackout</div>
+                    <p><strong>Déclencheur:</strong> Annonce de fusion/acquisition</p>
+                    <p><strong>Période:</strong> Dès rumeur crédible jusqu'à +48h post-annonce</p>
+                    <p><strong>Source:</strong> Flux news filtré, détection NLP</p>
+                </div>
+                <div class="blackout-card">
+                    <div class="type">Capital Increase Blackout</div>
+                    <p><strong>Déclencheur:</strong> Augmentation de capital, émission</p>
+                    <p><strong>Période:</strong> -15 jours jusqu'à fin de période de souscription</p>
+                    <p><strong>Source:</strong> Avis AMF, prospectus</p>
+                </div>
+                <div class="blackout-card">
+                    <div class="type">Regulatory Blackout</div>
+                    <p><strong>Déclencheur:</strong> Enquête AMF/ESMA, suspension de cotation</p>
+                    <p><strong>Période:</strong> Durée de l'enquête/suspension</p>
+                    <p><strong>Source:</strong> Bulletins AMF, alertes de marché</p>
+                </div>
+            </div>
+
+            <h3>3.2 Timeline Earnings Blackout</h3>
+            <div class="timeline">
+                <div class="timeline-item blocked">
+                    <strong>J-30 : Début période fermée</strong>
+                    <p>Aucune transaction autorisée sur le titre</p>
+                </div>
+                <div class="timeline-item blocked">
+                    <strong>J-7 : Période critique</strong>
+                    <p>Surveillance renforcée, aucune exception</p>
+                </div>
+                <div class="timeline-item blocked">
+                    <strong>J-0 : Annonce des résultats</strong>
+                    <p>Publication après clôture du marché</p>
+                </div>
+                <div class="timeline-item blocked">
+                    <strong>J+0 à J+1 : Période post-annonce</strong>
+                    <p>Attente diffusion complète de l'information</p>
+                </div>
+                <div class="timeline-item allowed">
+                    <strong>J+1 (après ouverture) : Fin blackout</strong>
+                    <p>Trading autorisé après absorption par le marché</p>
+                </div>
+            </div>
+
+            <h3>3.3 Gestion du Calendrier Blackout</h3>
+            <div class="log-format">
+<span class="comment"># Structure du calendrier blackout</span>
+<span class="key">class</span> BlackoutCalendar:
+    <span class="key">def</span> __init__(self):
+        self.earnings_calendar: Dict[str, List[EarningsEvent]] = {}
+        self.corporate_events: Dict[str, List[CorporateEvent]] = {}
+        self.regulatory_restrictions: Dict[str, List[Restriction]] = {}
+
+    <span class="key">async def</span> is_blackout_active(self, symbol: str, timestamp: datetime) -> BlackoutStatus:
+        <span class="comment"># Vérifier earnings blackout (-30j / +24h)</span>
+        <span class="key">for</span> event <span class="key">in</span> self.earnings_calendar.get(symbol, []):
+            blackout_start = event.date - timedelta(days=<span class="number">30</span>)
+            blackout_end = event.date + timedelta(hours=<span class="number">24</span>)
+            <span class="key">if</span> blackout_start <= timestamp <= blackout_end:
+                <span class="key">return</span> BlackoutStatus(
+                    is_active=<span class="bool">True</span>,
+                    type=<span class="string">"EARNINGS"</span>,
+                    reason=f<span class="string">"Earnings on {event.date}"</span>,
+                    ends_at=blackout_end
+                )
+
+        <span class="comment"># Vérifier autres événements corporate</span>
+        <span class="key">for</span> event <span class="key">in</span> self.corporate_events.get(symbol, []):
+            <span class="key">if</span> event.blackout_start <= timestamp <= event.blackout_end:
+                <span class="key">return</span> BlackoutStatus(
+                    is_active=<span class="bool">True</span>,
+                    type=event.type,
+                    reason=event.description,
+                    ends_at=event.blackout_end
+                )
+
+        <span class="key">return</span> BlackoutStatus(is_active=<span class="bool">False</span>)
+            </div>
+
+            <h3>3.4 Sources de Données Blackout</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Source</th>
+                        <th>Type de Données</th>
+                        <th>Fréquence MAJ</th>
+                        <th>Fiabilité</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Bloomberg Terminal</td>
+                        <td>Calendrier earnings, événements corporate</td>
+                        <td>Temps réel</td>
+                        <td>Haute</td>
+                    </tr>
+                    <tr>
+                        <td>AMF BDIF</td>
+                        <td>Décisions, sanctions, suspensions</td>
+                        <td>Quotidienne</td>
+                        <td>Officielle</td>
+                    </tr>
+                    <tr>
+                        <td>Euronext Notices</td>
+                        <td>Suspensions, halts, corporate actions</td>
+                        <td>Temps réel</td>
+                        <td>Officielle</td>
+                    </tr>
+                    <tr>
+                        <td>Reuters News</td>
+                        <td>M&A rumors, breaking news</td>
+                        <td>Temps réel</td>
+                        <td>Haute</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Section 4: Détection Délit d'Initié -->
+        <section id="insider" class="section">
+            <h2>4. Détection Information Privilégiée</h2>
+
+            <div class="reg-box">
+                <div class="title">MAR - Définition Information Privilégiée (Article 7)</div>
+                <p>Information à caractère précis, non publique, concernant directement ou indirectement
+                un ou plusieurs émetteurs ou instruments financiers, et qui, si elle était rendue publique,
+                serait susceptible d'influencer de façon sensible le cours des instruments financiers.</p>
+            </div>
+
+            <h3>4.1 Sources de Données Interdites</h3>
+            <div class="reject-box">
+                <p><span class="code">BANNED</span> Flux de données non autorisés ou sources douteuses</p>
+                <ul style="margin-top: 1rem; margin-left: 1.5rem;">
+                    <li>Données issues de leaks ou piratage</li>
+                    <li>Informations de forums/réseaux avant publication officielle</li>
+                    <li>Communications internes d'entreprises tierces</li>
+                    <li>Données de géolocalisation de dirigeants</li>
+                    <li>Interception de communications</li>
+                    <li>Données satellite avant publication officielle</li>
+                </ul>
+            </div>
+
+            <h3>4.2 Sources de Données Autorisées</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Catégorie</th>
+                        <th>Sources Approuvées</th>
+                        <th>Validation</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Données de Marché</strong></td>
+                        <td>Bloomberg, Reuters, Interactive Brokers feed</td>
+                        <td class="status-approved">Approuvé</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Fondamentaux</strong></td>
+                        <td>SEC EDGAR, AMF BDIF, rapports publiés</td>
+                        <td class="status-approved">Approuvé</td>
+                    </tr>
+                    <tr>
+                        <td><strong>News</strong></td>
+                        <td>Reuters, Bloomberg News, communiqués officiels</td>
+                        <td class="status-approved">Approuvé</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Données Alternatives</strong></td>
+                        <td>Satellite (après publication), web scraping public</td>
+                        <td class="status-pending">Cas par cas</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>4.3 Algorithme de Détection MNPI</h3>
+            <div class="log-format">
+<span class="comment"># Vérification des sources pour MNPI (Material Non-Public Information)</span>
+
+<span class="key">class</span> MNPIDetector:
+    APPROVED_SOURCES = {
+        <span class="string">"bloomberg"</span>, <span class="string">"reuters"</span>, <span class="string">"interactive_brokers"</span>,
+        <span class="string">"sec_edgar"</span>, <span class="string">"amf_bdif"</span>, <span class="string">"euronext"</span>,
+        <span class="string">"company_ir"</span>,  <span class="comment"># Relations investisseurs officielles</span>
+    }
+
+    SUSPICIOUS_PATTERNS = [
+        r<span class="string">"leaked?"</span>, r<span class="string">"insider"</span>, r<span class="string">"confidential"</span>,
+        r<span class="string">"not.+public"</span>, r<span class="string">"embargo"</span>, r<span class="string">"pre.?release"</span>,
+    ]
+
+    <span class="key">async def</span> validate_data_sources(self, decision: DecisionEvent) -> MNPIResult:
+        violations = []
+
+        <span class="key">for</span> signal <span class="key">in</span> decision.contributing_signals:
+            <span class="comment"># Vérifier source approuvée</span>
+            <span class="key">for</span> source <span class="key">in</span> signal.data_sources:
+                <span class="key">if</span> source.provider <span class="key">not in</span> self.APPROVED_SOURCES:
+                    violations.append(MNPIViolation(
+                        type=<span class="string">"UNAPPROVED_SOURCE"</span>,
+                        source=source.provider,
+                        signal_id=signal.id
+                    ))
+
+                <span class="comment"># Scanner contenu pour patterns suspects</span>
+                <span class="key">if</span> source.has_text_content:
+                    <span class="key">for</span> pattern <span class="key">in</span> self.SUSPICIOUS_PATTERNS:
+                        <span class="key">if</span> re.search(pattern, source.content, re.I):
+                            violations.append(MNPIViolation(
+                                type=<span class="string">"SUSPICIOUS_CONTENT"</span>,
+                                pattern=pattern,
+                                source=source.provider
+                            ))
+
+        <span class="key">return</span> MNPIResult(
+            is_clean=len(violations) == <span class="number">0</span>,
+            violations=violations
+        )
+            </div>
+
+            <h3>4.4 Traçabilité des Sources</h3>
+            <p>Chaque signal doit documenter ses sources de données pour audit:</p>
+            <div class="log-format">
+<span class="comment"># Chaque SignalEvent doit contenir:</span>
+{
+    <span class="key">"signal_id"</span>: <span class="string">"SIG-20240115-143022-MACRO"</span>,
+    <span class="key">"data_sources"</span>: [
+        {
+            <span class="key">"provider"</span>: <span class="string">"bloomberg"</span>,
+            <span class="key">"feed"</span>: <span class="string">"BPIPE"</span>,
+            <span class="key">"data_type"</span>: <span class="string">"market_data"</span>,
+            <span class="key">"symbols"</span>: [<span class="string">"VIX Index"</span>, <span class="string">"SPX Index"</span>],
+            <span class="key">"timestamp"</span>: <span class="string">"2024-01-15T14:30:00Z"</span>,
+            <span class="key">"is_public"</span>: <span class="bool">true</span>
+        },
+        {
+            <span class="key">"provider"</span>: <span class="string">"reuters"</span>,
+            <span class="key">"feed"</span>: <span class="string">"RTRS_NEWS"</span>,
+            <span class="key">"data_type"</span>: <span class="string">"news"</span>,
+            <span class="key">"article_id"</span>: <span class="string">"nL1N3XYZ123"</span>,
+            <span class="key">"headline"</span>: <span class="string">"Fed signals rate hold..."</span>,
+            <span class="key">"published_at"</span>: <span class="string">"2024-01-15T14:25:00Z"</span>,
+            <span class="key">"is_public"</span>: <span class="bool">true</span>
+        }
+    ]
+}
+            </div>
+        </section>
+
+        <!-- Section 5: Format de Journalisation -->
+        <section id="logging" class="section">
+            <h2>5. Format de Journalisation</h2>
+
+            <div class="reg-box">
+                <div class="title">Conformité CLAUDE.md - Articles 37-40</div>
+                <p>Toutes les décisions doivent être journalisées avec: horodatage, sources de données,
+                justification, agent responsable.</p>
+            </div>
+
+            <h3>5.1 Structure du Log de Compliance</h3>
+            <div class="log-format">
+<span class="comment">// Format JSONL - Un enregistrement par ligne</span>
+{
+    <span class="key">"log_id"</span>: <span class="string">"COMPL-20240115-143022-789"</span>,
+    <span class="key">"timestamp"</span>: <span class="string">"2024-01-15T14:30:22.789Z"</span>,
+    <span class="key">"event_type"</span>: <span class="string">"COMPLIANCE_CHECK"</span>,
+
+    <span class="comment">// Identification</span>
+    <span class="key">"decision_id"</span>: <span class="string">"DEC-20240115-143021-456"</span>,
+    <span class="key">"agent_id"</span>: <span class="string">"compliance_agent"</span>,
+    <span class="key">"agent_version"</span>: <span class="string">"1.2.0"</span>,
+
+    <span class="comment">// Contexte de la décision</span>
+    <span class="key">"symbol"</span>: <span class="string">"AAPL"</span>,
+    <span class="key">"action"</span>: <span class="string">"BUY"</span>,
+    <span class="key">"quantity"</span>: <span class="number">100</span>,
+    <span class="key">"notional_eur"</span>: <span class="number">18500.00</span>,
+
+    <span class="comment">// Résultat de validation</span>
+    <span class="key">"result"</span>: <span class="string">"APPROVED"</span>,  <span class="comment">// ou "REJECTED"</span>
+    <span class="key">"rejection_code"</span>: <span class="bool">null</span>,
+    <span class="key">"rejection_reason"</span>: <span class="bool">null</span>,
+
+    <span class="comment">// Checklist détaillée</span>
+    <span class="key">"checks"</span>: {
+        <span class="key">"instrument_allowed"</span>: { <span class="key">"passed"</span>: <span class="bool">true</span>, <span class="key">"details"</span>: <span class="string">"In approved universe"</span> },
+        <span class="key">"blackout_clear"</span>: { <span class="key">"passed"</span>: <span class="bool">true</span>, <span class="key">"details"</span>: <span class="string">"No active blackout"</span> },
+        <span class="key">"no_mnpi"</span>: { <span class="key">"passed"</span>: <span class="bool">true</span>, <span class="key">"details"</span>: <span class="string">"All sources approved"</span> },
+        <span class="key">"market_open"</span>: { <span class="key">"passed"</span>: <span class="bool">true</span>, <span class="key">"details"</span>: <span class="string">"NASDAQ open"</span> },
+        <span class="key">"threshold_check"</span>: { <span class="key">"passed"</span>: <span class="bool">true</span>, <span class="key">"details"</span>: <span class="string">"Below 5% threshold"</span> },
+        <span class="key">"short_selling_ok"</span>: { <span class="key">"passed"</span>: <span class="bool">true</span>, <span class="key">"details"</span>: <span class="string">"N/A - long position"</span> }
+    },
+
+    <span class="comment">// Traçabilité sources</span>
+    <span class="key">"data_sources"</span>: [
+        { <span class="key">"provider"</span>: <span class="string">"bloomberg"</span>, <span class="key">"type"</span>: <span class="string">"market_data"</span> },
+        { <span class="key">"provider"</span>: <span class="string">"reuters"</span>, <span class="key">"type"</span>: <span class="string">"news"</span> }
+    ],
+
+    <span class="comment">// Chaîne de responsabilité</span>
+    <span class="key">"decision_chain"</span>: {
+        <span class="key">"signals"</span>: [<span class="string">"macro_agent"</span>, <span class="string">"momentum_agent"</span>],
+        <span class="key">"decision_maker"</span>: <span class="string">"cio_agent"</span>,
+        <span class="key">"risk_validator"</span>: <span class="string">"risk_agent"</span>,
+        <span class="key">"compliance_validator"</span>: <span class="string">"compliance_agent"</span>
+    },
+
+    <span class="comment">// Métadonnées système</span>
+    <span class="key">"processing_time_ms"</span>: <span class="number">12</span>,
+    <span class="key">"system_version"</span>: <span class="string">"2.1.0"</span>
+}
+            </div>
+
+            <h3>5.2 Log de Rejet</h3>
+            <div class="log-format">
+{
+    <span class="key">"log_id"</span>: <span class="string">"COMPL-20240115-150045-123"</span>,
+    <span class="key">"timestamp"</span>: <span class="string">"2024-01-15T15:00:45.123Z"</span>,
+    <span class="key">"event_type"</span>: <span class="string">"COMPLIANCE_REJECTION"</span>,
+
+    <span class="key">"decision_id"</span>: <span class="string">"DEC-20240115-150044-789"</span>,
+    <span class="key">"symbol"</span>: <span class="string">"TTE.PA"</span>,
+    <span class="key">"action"</span>: <span class="string">"BUY"</span>,
+    <span class="key">"quantity"</span>: <span class="number">500</span>,
+
+    <span class="key">"result"</span>: <span class="string">"REJECTED"</span>,
+    <span class="key">"rejection_code"</span>: <span class="string">"BLACKOUT_PERIOD"</span>,
+    <span class="key">"rejection_reason"</span>: <span class="string">"TotalEnergies earnings announcement in 5 days"</span>,
+    <span class="key">"rejection_category"</span>: <span class="string">"REGULATORY"</span>,
+
+    <span class="key">"checks"</span>: {
+        <span class="key">"instrument_allowed"</span>: { <span class="key">"passed"</span>: <span class="bool">true</span> },
+        <span class="key">"blackout_clear"</span>: {
+            <span class="key">"passed"</span>: <span class="bool">false</span>,
+            <span class="key">"details"</span>: <span class="string">"Earnings blackout active until 2024-01-21"</span>,
+            <span class="key">"event_date"</span>: <span class="string">"2024-01-20"</span>,
+            <span class="key">"blackout_ends"</span>: <span class="string">"2024-01-21T09:00:00Z"</span>
+        }
+    },
+
+    <span class="comment">// Alerte générée</span>
+    <span class="key">"alert_triggered"</span>: <span class="bool">true</span>,
+    <span class="key">"alert_level"</span>: <span class="string">"WARNING"</span>
+}
+            </div>
+
+            <h3>5.3 Champs Obligatoires MiFID II</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Champ</th>
+                        <th>Description</th>
+                        <th>Format</th>
+                        <th>Référence</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>timestamp</code></td>
+                        <td>Horodatage UTC précis</td>
+                        <td>ISO 8601 ms</td>
+                        <td>RTS 25</td>
+                    </tr>
+                    <tr>
+                        <td><code>decision_id</code></td>
+                        <td>Identifiant unique décision</td>
+                        <td>UUID/String</td>
+                        <td>MiFIR Art. 25</td>
+                    </tr>
+                    <tr>
+                        <td><code>symbol</code></td>
+                        <td>Identifiant instrument (ISIN préféré)</td>
+                        <td>ISIN/Ticker</td>
+                        <td>MiFIR Art. 26</td>
+                    </tr>
+                    <tr>
+                        <td><code>action</code></td>
+                        <td>Sens de l'ordre</td>
+                        <td>BUY/SELL</td>
+                        <td>MiFIR Art. 26</td>
+                    </tr>
+                    <tr>
+                        <td><code>quantity</code></td>
+                        <td>Quantité de l'ordre</td>
+                        <td>Integer</td>
+                        <td>MiFIR Art. 26</td>
+                    </tr>
+                    <tr>
+                        <td><code>agent_id</code></td>
+                        <td>Identifiant de l'algorithme</td>
+                        <td>String</td>
+                        <td>MiFID II Art. 17</td>
+                    </tr>
+                    <tr>
+                        <td><code>data_sources</code></td>
+                        <td>Sources de données utilisées</td>
+                        <td>Array</td>
+                        <td>MAR Art. 16</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Section 6: Cas de Refus Automatique -->
+        <section id="rejection" class="section">
+            <h2>6. Cas de Refus Automatique</h2>
+            <p>L'agent Compliance rejette automatiquement les ordres dans les situations suivantes:</p>
+
+            <h3>6.1 Rejets Réglementaires (Non-Négociables)</h3>
+
+            <div class="reject-box">
+                <p><span class="code">REJ-001</span> <strong>BLACKOUT_PERIOD</strong></p>
+                <p>Titre en période de blackout (earnings, M&A, corporate action)</p>
+                <p class="article-ref">Base: MAR Article 19</p>
+            </div>
+
+            <div class="reject-box">
+                <p><span class="code">REJ-002</span> <strong>MNPI_DETECTED</strong></p>
+                <p>Source de données suspecte ou non autorisée détectée</p>
+                <p class="article-ref">Base: MAR Articles 7, 8, 14</p>
+            </div>
+
+            <div class="reject-box">
+                <p><span class="code">REJ-003</span> <strong>RESTRICTED_INSTRUMENT</strong></p>
+                <p>Instrument sur liste de restriction (sanctions, embargo, internal)</p>
+                <p class="article-ref">Base: Règlements UE sanctions, RG AMF</p>
+            </div>
+
+            <div class="reject-box">
+                <p><span class="code">REJ-004</span> <strong>SSR_RESTRICTION</strong></p>
+                <p>Short Selling Regulation active - vente à découvert interdite</p>
+                <p class="article-ref">Base: Règlement 236/2012 Short Selling</p>
+            </div>
+
+            <div class="reject-box">
+                <p><span class="code">REJ-005</span> <strong>MARKET_CLOSED</strong></p>
+                <p>Tentative d'ordre hors heures de marché sans autorisation</p>
+                <p class="article-ref">Base: Politique interne, best execution</p>
+            </div>
+
+            <div class="reject-box">
+                <p><span class="code">REJ-006</span> <strong>TRADING_SUSPENDED</strong></p>
+                <p>Titre suspendu de cotation par l'autorité de marché</p>
+                <p class="article-ref">Base: MiFID II, Règles de marché</p>
+            </div>
+
+            <h3>6.2 Rejets Déclaratifs</h3>
+
+            <div class="reject-box" style="background: #fff8e1; border-left-color: var(--warning);">
+                <p><span class="code" style="background: var(--warning);">REJ-010</span> <strong>THRESHOLD_BREACH_UNPREPARED</strong></p>
+                <p>L'ordre déclencherait un seuil de déclaration AMF mais la notification n'est pas prête</p>
+                <p class="article-ref">Base: Code de commerce L233-7, RG AMF 223-11</p>
+            </div>
+
+            <div class="reject-box" style="background: #fff8e1; border-left-color: var(--warning);">
+                <p><span class="code" style="background: var(--warning);">REJ-011</span> <strong>LARGE_POSITION_NO_DISCLOSURE</strong></p>
+                <p>Position nette courte > 0.2% sans déclaration préalable</p>
+                <p class="article-ref">Base: Règlement Short Selling 236/2012 Art. 5</p>
+            </div>
+
+            <h3>6.3 Rejets Opérationnels</h3>
+
+            <div class="reject-box" style="background: #e3f2fd; border-left-color: #1976d2;">
+                <p><span class="code" style="background: #1976d2;">REJ-020</span> <strong>NO_BORROW_AVAILABLE</strong></p>
+                <p>Vente à découvert sans titre empruntable disponible</p>
+                <p class="article-ref">Base: Règlement Short Selling, locate requirement</p>
+            </div>
+
+            <div class="reject-box" style="background: #e3f2fd; border-left-color: #1976d2;">
+                <p><span class="code" style="background: #1976d2;">REJ-021</span> <strong>UNAPPROVED_VENUE</strong></p>
+                <p>Lieu d'exécution non autorisé ou non conforme</p>
+                <p class="article-ref">Base: MiFID II best execution</p>
+            </div>
+
+            <h3>6.4 Tableau Récapitulatif des Rejets</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Code</th>
+                        <th>Catégorie</th>
+                        <th>Sévérité</th>
+                        <th>Action</th>
+                        <th>Alerte</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>REJ-001</td>
+                        <td>Réglementaire</td>
+                        <td><span class="status-rejected">CRITICAL</span></td>
+                        <td>Rejet immédiat</td>
+                        <td>Log + Notification</td>
+                    </tr>
+                    <tr>
+                        <td>REJ-002</td>
+                        <td>Réglementaire</td>
+                        <td><span class="status-rejected">CRITICAL</span></td>
+                        <td>Rejet + Investigation</td>
+                        <td>Log + Alerte urgente</td>
+                    </tr>
+                    <tr>
+                        <td>REJ-003</td>
+                        <td>Réglementaire</td>
+                        <td><span class="status-rejected">CRITICAL</span></td>
+                        <td>Rejet immédiat</td>
+                        <td>Log + Notification</td>
+                    </tr>
+                    <tr>
+                        <td>REJ-004</td>
+                        <td>Réglementaire</td>
+                        <td><span class="status-rejected">HIGH</span></td>
+                        <td>Rejet immédiat</td>
+                        <td>Log</td>
+                    </tr>
+                    <tr>
+                        <td>REJ-005</td>
+                        <td>Opérationnel</td>
+                        <td><span class="status-pending">MEDIUM</span></td>
+                        <td>Rejet + Queue</td>
+                        <td>Log</td>
+                    </tr>
+                    <tr>
+                        <td>REJ-010</td>
+                        <td>Déclaratif</td>
+                        <td><span class="status-pending">HIGH</span></td>
+                        <td>Rejet temporaire</td>
+                        <td>Log + Préparation</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>6.5 Scénarios Concrets de Rejet</h3>
+
+            <h4>Scénario 1: Blackout Earnings</h4>
+            <div class="log-format">
+<span class="comment">// Situation: CIO veut acheter LVMH, mais earnings dans 12 jours</span>
+
+Input DecisionEvent:
+  symbol: <span class="string">"MC.PA"</span> (LVMH)
+  action: <span class="string">"BUY"</span>
+  quantity: <span class="number">50</span>
+  conviction: <span class="number">0.78</span>
+
+Compliance Check:
+  <span class="key">check_blackout</span>(<span class="string">"MC.PA"</span>) → {
+    is_active: <span class="bool">true</span>,
+    type: <span class="string">"EARNINGS"</span>,
+    event_date: <span class="string">"2024-01-27"</span>,
+    days_until: <span class="number">12</span>  <span class="comment">// < 30 jours</span>
+  }
+
+Result: <span class="key">REJECTED</span>
+  code: <span class="string">"BLACKOUT_PERIOD"</span>
+  reason: <span class="string">"LVMH earnings in 12 days, blackout active"</span>
+            </div>
+
+            <h4>Scénario 2: Short Selling Restriction</h4>
+            <div class="log-format">
+<span class="comment">// Situation: Signal de vendre Société Générale à découvert</span>
+
+Input DecisionEvent:
+  symbol: <span class="string">"GLE.PA"</span>
+  action: <span class="string">"SELL"</span>
+  quantity: <span class="number">200</span>
+  is_short: <span class="bool">true</span>
+
+Compliance Check:
+  <span class="key">check_ssr</span>(<span class="string">"GLE.PA"</span>) → {
+    ssr_active: <span class="bool">true</span>,
+    triggered_date: <span class="string">"2024-01-14"</span>,
+    reason: <span class="string">"Price drop > 10% previous close"</span>,
+    valid_until: <span class="string">"2024-01-15T17:30:00Z"</span>
+  }
+
+Result: <span class="key">REJECTED</span>
+  code: <span class="string">"SSR_RESTRICTION"</span>
+  reason: <span class="string">"Short selling banned until market close"</span>
+            </div>
+
+            <h4>Scénario 3: Source Suspecte</h4>
+            <div class="log-format">
+<span class="comment">// Situation: Signal basé sur source non approuvée</span>
+
+Input DecisionEvent:
+  symbol: <span class="string">"ASML.AS"</span>
+  action: <span class="string">"BUY"</span>
+  contributing_signals: [
+    {
+      agent: <span class="string">"momentum_agent"</span>,
+      data_sources: [
+        { provider: <span class="string">"bloomberg"</span> },      <span class="comment">// OK</span>
+        { provider: <span class="string">"twitter_scrape"</span> }  <span class="comment">// SUSPECT</span>
+      ]
+    }
+  ]
+
+Compliance Check:
+  <span class="key">validate_sources</span>() → {
+    violations: [{
+      type: <span class="string">"UNAPPROVED_SOURCE"</span>,
+      provider: <span class="string">"twitter_scrape"</span>,
+      risk: <span class="string">"Potential MNPI from social media"</span>
+    }]
+  }
+
+Result: <span class="key">REJECTED</span>
+  code: <span class="string">"MNPI_DETECTED"</span>
+  reason: <span class="string">"Unapproved data source: twitter_scrape"</span>
+  action: <span class="string">"Manual review required"</span>
+            </div>
+        </section>
+
+        <!-- Section 7: Piste d'Audit -->
+        <section id="audit" class="section">
+            <h2>7. Piste d'Audit</h2>
+
+            <div class="reg-box">
+                <div class="title">MiFID II - Exigences de Traçabilité</div>
+                <p>Les entreprises d'investissement utilisant le trading algorithmique doivent conserver
+                des enregistrements de tous les ordres et transactions, y compris les décisions de ne pas
+                passer d'ordres, pendant une période d'au moins 5 ans.</p>
+            </div>
+
+            <h3>7.1 Éléments de la Piste d'Audit</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Élément</th>
+                        <th>Contenu</th>
+                        <th>Granularité</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Signal Trail</strong></td>
+                        <td>Tous les signaux générés, même non retenus</td>
+                        <td>Par signal</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Decision Trail</strong></td>
+                        <td>Décisions CIO avec justification complète</td>
+                        <td>Par décision</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Validation Trail</strong></td>
+                        <td>Résultats Risk + Compliance avec détails</td>
+                        <td>Par validation</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Execution Trail</strong></td>
+                        <td>Ordres envoyés, fills reçus, slippage</td>
+                        <td>Par ordre</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Rejection Trail</strong></td>
+                        <td>Tous les rejets avec codes et raisons</td>
+                        <td>Par rejet</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>7.2 Format de Stockage</h3>
+            <div class="log-format">
+<span class="comment"># Structure des fichiers d'audit</span>
+
+audit/
+├── signals/
+│   └── 2024-01-15/
+│       ├── macro_agent.jsonl
+│       ├── momentum_agent.jsonl
+│       └── stat_arb_agent.jsonl
+├── decisions/
+│   └── 2024-01-15/
+│       └── cio_decisions.jsonl
+├── validations/
+│   └── 2024-01-15/
+│       ├── risk_validations.jsonl
+│       └── compliance_validations.jsonl  <span class="comment">← Compliance logs</span>
+├── executions/
+│   └── 2024-01-15/
+│       └── orders.jsonl
+└── rejections/
+    └── 2024-01-15/
+        └── all_rejections.jsonl
+            </div>
+
+            <h3>7.3 Corrélation des Événements</h3>
+            <p>Chaque événement contient des identifiants permettant de reconstituer la chaîne complète:</p>
+            <div class="log-format">
+<span class="comment">// Exemple de corrélation</span>
+
+Signal → <span class="key">"signal_id"</span>: <span class="string">"SIG-20240115-143021-MACRO"</span>
+    ↓
+Decision → <span class="key">"decision_id"</span>: <span class="string">"DEC-20240115-143022-001"</span>
+           <span class="key">"contributing_signals"</span>: [<span class="string">"SIG-...-MACRO"</span>, <span class="string">"SIG-...-MOM"</span>]
+    ↓
+Risk Validation → <span class="key">"validation_id"</span>: <span class="string">"RISK-20240115-143022-001"</span>
+                  <span class="key">"decision_id"</span>: <span class="string">"DEC-20240115-143022-001"</span>
+    ↓
+Compliance Validation → <span class="key">"validation_id"</span>: <span class="string">"COMPL-20240115-143023-001"</span>
+                        <span class="key">"decision_id"</span>: <span class="string">"DEC-20240115-143022-001"</span>
+    ↓
+Execution → <span class="key">"order_id"</span>: <span class="string">"ORD-20240115-143024-001"</span>
+            <span class="key">"decision_id"</span>: <span class="string">"DEC-20240115-143022-001"</span>
+            </div>
+
+            <h3>7.4 Requêtes d'Audit Typiques</h3>
+            <div class="log-format">
+<span class="comment"># Reconstituer l'historique complet d'un trade</span>
+<span class="key">async def</span> reconstruct_trade_history(order_id: str) -> TradeHistory:
+    order = <span class="key">await</span> load_order(order_id)
+    decision = <span class="key">await</span> load_decision(order.decision_id)
+    signals = <span class="key">await</span> load_signals(decision.contributing_signals)
+    risk_val = <span class="key">await</span> load_risk_validation(decision.decision_id)
+    compl_val = <span class="key">await</span> load_compliance_validation(decision.decision_id)
+
+    <span class="key">return</span> TradeHistory(
+        signals=signals,
+        decision=decision,
+        risk_validation=risk_val,
+        compliance_validation=compl_val,
+        order=order,
+        fills=order.fills
+    )
+
+<span class="comment"># Tous les rejets d'une journée</span>
+<span class="key">async def</span> daily_rejections(date: str) -> List[Rejection]:
+    <span class="key">return await</span> query_jsonl(
+        f<span class="string">"rejections/{date}/all_rejections.jsonl"</span>
+    )
+
+<span class="comment"># Alertes MNPI sur une période</span>
+<span class="key">async def</span> mnpi_alerts(start: str, end: str) -> List[Alert]:
+    <span class="key">return await</span> query_jsonl(
+        <span class="string">"compliance_validations/*.jsonl"</span>,
+        filter={<span class="string">"rejection_code"</span>: <span class="string">"MNPI_DETECTED"</span>},
+        date_range=(start, end)
+    )
+            </div>
+        </section>
+
+        <!-- Section 8: Conservation des Données -->
+        <section id="retention" class="section">
+            <h2>8. Conservation des Données</h2>
+
+            <div class="retention-info">
+                <strong>Durée de Conservation Légale</strong><br>
+                MiFID II exige une conservation minimale de <strong>5 ans</strong>.<br>
+                CLAUDE.md spécifie une conservation de <strong>7 ans</strong> pour conformité étendue.
+            </div>
+
+            <h3>8.1 Politique de Rétention</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Type de Données</th>
+                        <th>Durée</th>
+                        <th>Format</th>
+                        <th>Chiffrement</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Logs de trading (ordres, fills)</td>
+                        <td>7 ans</td>
+                        <td>JSONL compressé</td>
+                        <td>AES-256</td>
+                    </tr>
+                    <tr>
+                        <td>Logs de compliance</td>
+                        <td>7 ans</td>
+                        <td>JSONL compressé</td>
+                        <td>AES-256</td>
+                    </tr>
+                    <tr>
+                        <td>Signaux et décisions</td>
+                        <td>7 ans</td>
+                        <td>JSONL compressé</td>
+                        <td>AES-256</td>
+                    </tr>
+                    <tr>
+                        <td>Alertes et incidents</td>
+                        <td>10 ans</td>
+                        <td>JSONL + PDF</td>
+                        <td>AES-256</td>
+                    </tr>
+                    <tr>
+                        <td>Données de marché brutes</td>
+                        <td>5 ans</td>
+                        <td>Parquet</td>
+                        <td>Optionnel</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>8.2 Architecture de Stockage</h3>
+            <div class="log-format">
+<span class="comment"># Hiérarchie de stockage avec tiering</span>
+
+storage/
+├── hot/           <span class="comment"># Accès rapide - 90 jours</span>
+│   └── 2024/
+│       └── 01/
+│           └── 15/
+│               ├── compliance/
+│               ├── trading/
+│               └── signals/
+├── warm/          <span class="comment"># Accès modéré - 1 an</span>
+│   └── 2023/
+│       └── compressed/
+└── cold/          <span class="comment"># Archive longue durée - 7 ans</span>
+    └── archives/
+        ├── 2022.tar.gz.enc
+        ├── 2021.tar.gz.enc
+        └── ...
+            </div>
+
+            <h3>8.3 Intégrité et Non-Répudiation</h3>
+            <div class="checklist">
+                <div class="check-item">
+                    <div class="check-icon check-mandatory">1</div>
+                    <div class="check-content">
+                        <strong>Hachage SHA-256</strong>
+                        <div class="desc">Chaque fichier de log est hashé quotidiennement</div>
+                    </div>
+                </div>
+                <div class="check-item">
+                    <div class="check-icon check-mandatory">2</div>
+                    <div class="check-content">
+                        <strong>Chaîne de Hachage</strong>
+                        <div class="desc">Les hashes quotidiens forment une chaîne pour détecter toute altération</div>
+                    </div>
+                </div>
+                <div class="check-item">
+                    <div class="check-icon check-mandatory">3</div>
+                    <div class="check-content">
+                        <strong>Horodatage Certifié</strong>
+                        <div class="desc">Timestamp TSA (Time Stamping Authority) pour preuve légale</div>
+                    </div>
+                </div>
+                <div class="check-item">
+                    <div class="check-icon check-mandatory">4</div>
+                    <div class="check-content">
+                        <strong>Immutabilité</strong>
+                        <div class="desc">Stockage WORM (Write Once Read Many) pour archives</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 9: Sanctions & Alertes -->
+        <section id="sanctions" class="section">
+            <h2>9. Sanctions & Alertes</h2>
+
+            <h3>9.1 Niveaux d'Alerte</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Niveau</th>
+                        <th>Déclencheur</th>
+                        <th>Action</th>
+                        <th>Notification</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="status-approved">INFO</span></td>
+                        <td>Validation réussie avec note</td>
+                        <td>Log uniquement</td>
+                        <td>Aucune</td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-pending">WARNING</span></td>
+                        <td>Blackout, threshold proche</td>
+                        <td>Log + Surveillance</td>
+                        <td>Dashboard</td>
+                    </tr>
+                    <tr>
+                        <td><span class="status-rejected">CRITICAL</span></td>
+                        <td>MNPI, restricted instrument</td>
+                        <td>Log + Halt + Review</td>
+                        <td>Email + SMS</td>
+                    </tr>
+                    <tr>
+                        <td style="background: #880e4f; color: white;">EMERGENCY</td>
+                        <td>Suspicion manipulation, enquête</td>
+                        <td>Kill-switch global</td>
+                        <td>Escalade immédiate</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>9.2 Sanctions Réglementaires Potentielles</h3>
+            <div class="penalty-box">
+                <strong>MAR - Abus de Marché</strong>
+                <p>Jusqu'à 5 millions EUR pour personnes physiques</p>
+                <p>Jusqu'à 15% du CA annuel pour personnes morales</p>
+            </div>
+            <div class="penalty-box">
+                <strong>MiFID II - Non-conformité</strong>
+                <p>Retrait d'agrément possible</p>
+                <p>Sanctions administratives et pénales</p>
+            </div>
+
+            <h3>9.3 Processus d'Escalade</h3>
+            <div class="flowchart">
+                <div style="text-align: left; max-width: 600px; margin: 0 auto;">
+                    <p><strong>Niveau 1 - Automatique:</strong> Log, rejet de l'ordre</p>
+                    <p style="margin: 0.5rem 0;">↓ Si CRITICAL</p>
+                    <p><strong>Niveau 2 - Compliance Officer:</strong> Revue manuelle, documentation</p>
+                    <p style="margin: 0.5rem 0;">↓ Si suspicion confirmée</p>
+                    <p><strong>Niveau 3 - Direction:</strong> Décision de déclaration à l'AMF</p>
+                    <p style="margin: 0.5rem 0;">↓ Si requis</p>
+                    <p><strong>Niveau 4 - Régulateur:</strong> Déclaration de soupçon (STOR)</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 10: Intégration Système -->
+        <section id="integration" class="section">
+            <h2>10. Intégration Système</h2>
+
+            <h3>10.1 Position dans le Pipeline</h3>
+            <div class="flowchart">
+                <span class="flow-node flow-start">SignalEvent(s)<br>Fan-out</span>
+                <span class="flow-arrow">→</span>
+                <span class="flow-node flow-check">CIO Agent<br>DecisionEvent</span>
+                <span class="flow-arrow">→</span>
+                <span class="flow-node flow-check">Risk Agent<br>ValidatedDecisionEvent</span>
+                <span class="flow-arrow">→</span>
+                <span class="flow-node" style="background: #e8eaf6; border: 2px solid var(--primary);">Compliance Agent<br>ComplianceApprovedEvent</span>
+                <span class="flow-arrow">→</span>
+                <span class="flow-node flow-approve">Execution Agent<br>OrderEvent</span>
+            </div>
+
+            <h3>10.2 Interface avec Risk Agent</h3>
+            <p>L'agent Compliance reçoit un <code>ValidatedDecisionEvent</code> déjà validé par le Risk Agent:</p>
+            <div class="log-format">
+<span class="comment"># Input: ValidatedDecisionEvent (from Risk Agent)</span>
+{
+    <span class="key">"decision_id"</span>: <span class="string">"DEC-..."</span>,
+    <span class="key">"risk_validated"</span>: <span class="bool">true</span>,
+    <span class="key">"risk_checks"</span>: { ... },
+    <span class="key">"symbol"</span>: <span class="string">"AAPL"</span>,
+    <span class="key">"action"</span>: <span class="string">"BUY"</span>,
+    <span class="key">"quantity"</span>: <span class="number">100</span>,
+    <span class="key">"contributing_signals"</span>: [ ... ]
+}
+
+<span class="comment"># Output: ComplianceApprovedEvent (to Execution Agent)</span>
+{
+    <span class="key">"decision_id"</span>: <span class="string">"DEC-..."</span>,
+    <span class="key">"risk_validated"</span>: <span class="bool">true</span>,
+    <span class="key">"compliance_validated"</span>: <span class="bool">true</span>,
+    <span class="key">"compliance_checks"</span>: {
+        <span class="key">"blackout_clear"</span>: <span class="bool">true</span>,
+        <span class="key">"no_mnpi"</span>: <span class="bool">true</span>,
+        <span class="key">"instrument_allowed"</span>: <span class="bool">true</span>,
+        <span class="key">"market_open"</span>: <span class="bool">true</span>
+    },
+    <span class="key">"validation_timestamp"</span>: <span class="string">"2024-01-15T14:30:23.456Z"</span>,
+    <span class="key">"symbol"</span>: <span class="string">"AAPL"</span>,
+    <span class="key">"action"</span>: <span class="string">"BUY"</span>,
+    <span class="key">"quantity"</span>: <span class="number">100</span>
+}
+            </div>
+
+            <h3>10.3 Code de l'Agent Compliance</h3>
+            <div class="log-format">
+<span class="key">class</span> ComplianceAgent(ValidationAgent):
+    <span class="string">"""Agent de validation réglementaire UE/AMF"""</span>
+
+    <span class="key">def</span> __init__(self, config: dict):
+        super().__init__(<span class="string">"compliance_agent"</span>)
+        self.blackout_calendar = BlackoutCalendar()
+        self.restricted_list = RestrictedInstruments()
+        self.mnpi_detector = MNPIDetector()
+        self.declaration_tracker = DeclarationTracker()
+
+    <span class="key">async def</span> validate(self, event: ValidatedDecisionEvent) -> ComplianceResult:
+        <span class="string">"""Exécute la checklist de compliance complète"""</span>
+
+        checks = {}
+
+        <span class="comment"># 1. Instrument autorisé</span>
+        checks[<span class="string">"instrument_allowed"</span>] = <span class="key">await</span> self._check_instrument(event.symbol)
+        <span class="key">if not</span> checks[<span class="string">"instrument_allowed"</span>].passed:
+            <span class="key">return</span> self._reject(event, <span class="string">"RESTRICTED_INSTRUMENT"</span>, checks)
+
+        <span class="comment"># 2. Blackout</span>
+        checks[<span class="string">"blackout_clear"</span>] = <span class="key">await</span> self._check_blackout(event.symbol)
+        <span class="key">if not</span> checks[<span class="string">"blackout_clear"</span>].passed:
+            <span class="key">return</span> self._reject(event, <span class="string">"BLACKOUT_PERIOD"</span>, checks)
+
+        <span class="comment"># 3. MNPI</span>
+        checks[<span class="string">"no_mnpi"</span>] = <span class="key">await</span> self.mnpi_detector.validate(event)
+        <span class="key">if not</span> checks[<span class="string">"no_mnpi"</span>].passed:
+            <span class="key">return</span> self._reject(event, <span class="string">"MNPI_DETECTED"</span>, checks)
+
+        <span class="comment"># 4. Marché ouvert</span>
+        checks[<span class="string">"market_open"</span>] = <span class="key">await</span> self._check_market_hours(event.symbol)
+        <span class="key">if not</span> checks[<span class="string">"market_open"</span>].passed:
+            <span class="key">return</span> self._reject(event, <span class="string">"MARKET_CLOSED"</span>, checks)
+
+        <span class="comment"># 5. Seuils déclaratifs</span>
+        checks[<span class="string">"threshold_ok"</span>] = <span class="key">await</span> self._check_thresholds(event)
+
+        <span class="comment"># 6. Short selling si applicable</span>
+        <span class="key">if</span> event.action == <span class="string">"SELL"</span> <span class="key">and</span> event.is_short:
+            checks[<span class="string">"short_selling_ok"</span>] = <span class="key">await</span> self._check_short_selling(event)
+            <span class="key">if not</span> checks[<span class="string">"short_selling_ok"</span>].passed:
+                <span class="key">return</span> self._reject(event, checks[<span class="string">"short_selling_ok"</span>].code, checks)
+
+        <span class="comment"># Toutes les vérifications passées</span>
+        <span class="key">return</span> self._approve(event, checks)
+
+    <span class="key">async def</span> _log_result(self, event, result, checks):
+        <span class="string">"""Journalise le résultat pour piste d'audit"""</span>
+        log_entry = {
+            <span class="string">"timestamp"</span>: datetime.utcnow().isoformat(),
+            <span class="string">"decision_id"</span>: event.decision_id,
+            <span class="string">"result"</span>: result,
+            <span class="string">"checks"</span>: checks,
+            <span class="string">"data_sources"</span>: self._extract_sources(event)
+        }
+        <span class="key">await</span> self.audit_logger.log(log_entry)
+            </div>
+
+            <h3>10.4 Diagramme de Séquence</h3>
+            <div class="log-format" style="background: #f5f5f5; color: #333;">
+Risk Agent          Compliance Agent        Execution Agent
+    │                      │                      │
+    │ ValidatedDecisionEvent                      │
+    │─────────────────────>│                      │
+    │                      │                      │
+    │                      │ check_instrument()   │
+    │                      │ check_blackout()     │
+    │                      │ validate_mnpi()      │
+    │                      │ check_market()       │
+    │                      │ check_thresholds()   │
+    │                      │                      │
+    │                      │ [All passed]         │
+    │                      │                      │
+    │                      │ ComplianceApprovedEvent
+    │                      │─────────────────────>│
+    │                      │                      │
+    │                      │                      │ create_order()
+    │                      │                      │ send_to_broker()
+            </div>
+        </section>
+
+        <footer style="text-align: center; padding: 2rem; color: #666;">
+            <p>Documentation Agent Compliance - AI Trading Firm</p>
+            <p>Conforme CLAUDE.md | UE/AMF | MiFID II | MAR</p>
+            <p>Généré le 2024-01-15</p>
+        </footer>
+    </div>
+</body>
+</html>

@@ -1,0 +1,1093 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trading Firm - Modèle de Concurrence</title>
+    <style>
+        :root {
+            --primary: #0d1117;
+            --secondary: #161b22;
+            --accent: #21262d;
+            --highlight: #58a6ff;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
+            --purple: #a371f7;
+            --text: #c9d1d9;
+            --text-muted: #8b949e;
+            --border: #30363d;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--primary);
+            color: var(--text);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            padding: 3rem 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 2rem;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            color: var(--highlight);
+            margin-bottom: 0.5rem;
+        }
+
+        header .subtitle {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin: 0.25rem;
+        }
+
+        .badge-blue { background: var(--highlight); color: var(--primary); }
+        .badge-green { background: var(--success); color: var(--primary); }
+        .badge-yellow { background: var(--warning); color: var(--primary); }
+        .badge-red { background: var(--danger); color: white; }
+        .badge-purple { background: var(--purple); color: var(--primary); }
+
+        section {
+            background: var(--secondary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        section h2 {
+            color: var(--highlight);
+            font-size: 1.4rem;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        section h3 {
+            color: var(--success);
+            margin: 1.5rem 0 1rem;
+            font-size: 1.1rem;
+        }
+
+        .diagram {
+            background: var(--primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1.5rem;
+            overflow-x: auto;
+            font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+            font-size: 0.8rem;
+            line-height: 1.3;
+            white-space: pre;
+            color: var(--success);
+        }
+
+        .code-block {
+            background: var(--primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+            overflow-x: auto;
+            font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+            font-size: 0.85rem;
+            line-height: 1.5;
+            margin: 1rem 0;
+        }
+
+        .code-block .comment { color: var(--text-muted); }
+        .code-block .keyword { color: var(--danger); }
+        .code-block .function { color: var(--purple); }
+        .code-block .string { color: var(--success); }
+        .code-block .decorator { color: var(--warning); }
+        .code-block .class-name { color: var(--highlight); }
+        .code-block .number { color: var(--warning); }
+
+        .phase-container {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            margin: 1.5rem 0;
+        }
+
+        .phase {
+            background: var(--accent);
+            border-radius: 6px;
+            padding: 1.25rem;
+            border-left: 4px solid var(--highlight);
+        }
+
+        .phase.parallel { border-left-color: var(--success); }
+        .phase.barrier { border-left-color: var(--warning); }
+        .phase.sequential { border-left-color: var(--danger); }
+
+        .phase-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .phase-number {
+            background: var(--highlight);
+            color: var(--primary);
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 0.9rem;
+        }
+
+        .phase.parallel .phase-number { background: var(--success); }
+        .phase.barrier .phase-number { background: var(--warning); }
+        .phase.sequential .phase-number { background: var(--danger); }
+
+        .phase-title {
+            font-weight: 600;
+            font-size: 1rem;
+        }
+
+        .phase-content {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        .phase-content code {
+            background: var(--primary);
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            font-family: 'SF Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--highlight);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border: 1px solid var(--border);
+        }
+
+        th {
+            background: var(--accent);
+            color: var(--highlight);
+            font-weight: 600;
+        }
+
+        tr:hover {
+            background: rgba(88, 166, 255, 0.05);
+        }
+
+        .timeline {
+            position: relative;
+            padding-left: 2rem;
+            margin: 1.5rem 0;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 8px;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: var(--border);
+        }
+
+        .timeline-event {
+            position: relative;
+            padding: 0.75rem 0 0.75rem 1.5rem;
+        }
+
+        .timeline-event::before {
+            content: '';
+            position: absolute;
+            left: -1.5rem;
+            top: 1rem;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--accent);
+            border: 2px solid var(--highlight);
+        }
+
+        .timeline-event.success::before { border-color: var(--success); background: var(--success); }
+        .timeline-event.error::before { border-color: var(--danger); background: var(--danger); }
+        .timeline-event.timeout::before { border-color: var(--warning); background: var(--warning); }
+        .timeline-event.barrier::before { border-color: var(--purple); background: var(--purple); }
+
+        .timeline-time {
+            font-family: 'SF Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-bottom: 0.25rem;
+        }
+
+        .timeline-title {
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .timeline-desc {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .agents-parallel {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 0.75rem;
+            margin: 1rem 0;
+        }
+
+        .agent-task {
+            background: var(--accent);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 0.75rem;
+            text-align: center;
+            font-size: 0.85rem;
+        }
+
+        .agent-task .name {
+            font-weight: 600;
+            color: var(--success);
+            margin-bottom: 0.25rem;
+        }
+
+        .agent-task .status {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .agent-task.running { border-color: var(--highlight); }
+        .agent-task.success { border-color: var(--success); }
+        .agent-task.error { border-color: var(--danger); }
+        .agent-task.timeout { border-color: var(--warning); }
+
+        .flow-arrow {
+            text-align: center;
+            padding: 0.5rem;
+            color: var(--text-muted);
+            font-size: 1.5rem;
+        }
+
+        .compliance-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .compliance-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.75rem;
+            padding: 0.75rem;
+            background: var(--accent);
+            border-radius: 6px;
+        }
+
+        .compliance-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: var(--success);
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8rem;
+            flex-shrink: 0;
+        }
+
+        .compliance-text {
+            font-size: 0.9rem;
+        }
+
+        .compliance-text strong {
+            color: var(--text);
+        }
+
+        .compliance-text span {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+
+        .sequence-visual {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            padding: 1.5rem;
+            background: var(--primary);
+            border-radius: 6px;
+            margin: 1rem 0;
+        }
+
+        .seq-box {
+            padding: 0.75rem 1rem;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            text-align: center;
+            min-width: 100px;
+        }
+
+        .seq-box.parallel {
+            background: linear-gradient(135deg, #238636, #2ea043);
+            color: white;
+        }
+
+        .seq-box.barrier {
+            background: linear-gradient(135deg, #9e6a03, #d29922);
+            color: var(--primary);
+        }
+
+        .seq-box.cio {
+            background: linear-gradient(135deg, #1f6feb, #58a6ff);
+            color: white;
+        }
+
+        .seq-box.risk {
+            background: linear-gradient(135deg, #da3633, #f85149);
+            color: white;
+        }
+
+        .seq-box.exec {
+            background: linear-gradient(135deg, #8957e5, #a371f7);
+            color: white;
+        }
+
+        .seq-arrow {
+            color: var(--text-muted);
+            font-size: 1.25rem;
+        }
+
+        .info-box {
+            background: rgba(88, 166, 255, 0.1);
+            border: 1px solid var(--highlight);
+            border-radius: 6px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+
+        .info-box.warning {
+            background: rgba(210, 153, 34, 0.1);
+            border-color: var(--warning);
+        }
+
+        .info-box.success {
+            background: rgba(63, 185, 80, 0.1);
+            border-color: var(--success);
+        }
+
+        .info-box strong {
+            color: var(--highlight);
+        }
+
+        .info-box.warning strong { color: var(--warning); }
+        .info-box.success strong { color: var(--success); }
+
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            border-top: 1px solid var(--border);
+            margin-top: 2rem;
+            font-size: 0.9rem;
+        }
+
+        footer a {
+            color: var(--highlight);
+            text-decoration: none;
+        }
+
+        @media (max-width: 768px) {
+            .container { padding: 1rem; }
+            header h1 { font-size: 1.8rem; }
+            .diagram { font-size: 0.65rem; }
+            .sequence-visual { flex-direction: column; }
+            .seq-arrow { transform: rotate(90deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Modèle de Concurrence</h1>
+            <p class="subtitle">AI Trading Firm - Exécution Parallèle des Agents</p>
+            <div style="margin-top: 1rem;">
+                <span class="badge badge-green">asyncio</span>
+                <span class="badge badge-blue">Fan-out / Fan-in</span>
+                <span class="badge badge-yellow">Barrier Sync</span>
+                <span class="badge badge-red">Fault Tolerant</span>
+            </div>
+        </header>
+
+        <!-- Section 1: Overview -->
+        <section>
+            <h2>1. Vue d'Ensemble</h2>
+
+            <p style="margin-bottom: 1rem;">Le système utilise un modèle de concurrence en 3 phases pour respecter la constitution CLAUDE.md :</p>
+
+            <div class="sequence-visual">
+                <div class="seq-box parallel">
+                    SIGNAL AGENTS<br>
+                    <small>Parallèle</small>
+                </div>
+                <span class="seq-arrow">→</span>
+                <div class="seq-box barrier">
+                    BARRIER<br>
+                    <small>Sync</small>
+                </div>
+                <span class="seq-arrow">→</span>
+                <div class="seq-box cio">
+                    CIO<br>
+                    <small>Décision</small>
+                </div>
+                <span class="seq-arrow">→</span>
+                <div class="seq-box risk">
+                    RISK<br>
+                    <small>Validation</small>
+                </div>
+                <span class="seq-arrow">→</span>
+                <div class="seq-box exec">
+                    EXEC<br>
+                    <small>Ordre</small>
+                </div>
+            </div>
+
+            <div class="phase-container">
+                <div class="phase parallel">
+                    <div class="phase-header">
+                        <div class="phase-number">1</div>
+                        <div class="phase-title">FAN-OUT : Exécution Parallèle</div>
+                    </div>
+                    <div class="phase-content">
+                        Tous les Signal Agents démarrent <strong>simultanément</strong> via <code>asyncio.gather()</code>.
+                        Chaque agent a un timeout individuel de <strong>5 secondes</strong>.
+                        Les agents s'exécutent vraiment en parallèle (concurrent I/O).
+                    </div>
+                </div>
+
+                <div class="phase barrier">
+                    <div class="phase-header">
+                        <div class="phase-number">2</div>
+                        <div class="phase-title">BARRIER : Synchronisation</div>
+                    </div>
+                    <div class="phase-content">
+                        La <code>SignalBarrier</code> collecte tous les signaux. Timeout global : <strong>10 secondes</strong>.
+                        Si timeout : le CIO décide avec les signaux disponibles (signaux partiels).
+                        Les agents lents ou défaillants sont exclus du cycle.
+                    </div>
+                </div>
+
+                <div class="phase sequential">
+                    <div class="phase-header">
+                        <div class="phase-number">3</div>
+                        <div class="phase-title">SÉQUENTIEL : Pipeline Strict</div>
+                    </div>
+                    <div class="phase-content">
+                        <strong>Pas de parallélisme</strong> - Ordre garanti : CIO → Risk → Execution.
+                        Chaque étape <code>await</code> la précédente. Un rejet à n'importe quelle étape stoppe le cycle.
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 2: Architecture Diagram -->
+        <section>
+            <h2>2. Architecture de Concurrence</h2>
+
+            <div class="diagram">
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           MODÈLE DE CONCURRENCE                                     │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  ┌───────────────────────────────────────────────────────────────────────────────┐ │
+│  │                     PHASE 1: FAN-OUT (Parallèle)                              │ │
+│  │                                                                               │ │
+│  │    asyncio.gather(*signal_tasks, return_exceptions=True)                      │ │
+│  │                                                                               │ │
+│  │    ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐       │ │
+│  │    │  MACRO  │   │ STATARB │   │MOMENTUM │   │   MM    │   │ OPTIONS │       │ │
+│  │    │  Agent  │   │  Agent  │   │  Agent  │   │  Agent  │   │  Agent  │       │ │
+│  │    └────┬────┘   └────┬────┘   └────┬────┘   └────┬────┘   └────┬────┘       │ │
+│  │         │             │             │             │             │             │ │
+│  │         │ timeout:5s  │ timeout:5s  │ timeout:5s  │ timeout:5s  │ timeout:5s  │ │
+│  │         │             │             │             │             │             │ │
+│  │         ▼             ▼             ▼             ▼             ▼             │ │
+│  │    SignalEvent   SignalEvent   SignalEvent   SignalEvent   SignalEvent       │ │
+│  │                                                                               │ │
+│  └───────────────────────────────────────────────────────────────────────────────┘ │
+│                                        │                                           │
+│                                        ▼                                           │
+│  ┌───────────────────────────────────────────────────────────────────────────────┐ │
+│  │                     PHASE 2: BARRIER (Synchronisation)                        │ │
+│  │                                                                               │ │
+│  │    ┌─────────────────────────────────────────────────────────────────────┐   │ │
+│  │    │                      SignalBarrier                                  │   │ │
+│  │    │                                                                     │   │ │
+│  │    │   expected_agents: {Macro, StatArb, Momentum, MM, Options}         │   │ │
+│  │    │   timeout: 10 secondes                                              │   │ │
+│  │    │   signals: dict[agent_name → SignalEvent]                          │   │ │
+│  │    │                                                                     │   │ │
+│  │    │   ┌─────────────────────────────────────────────────────────────┐  │   │ │
+│  │    │   │  await asyncio.wait_for(barrier.wait(), timeout=10.0)      │  │   │ │
+│  │    │   │                                                             │  │   │ │
+│  │    │   │  • Attend TOUS les signaux                                  │  │   │ │
+│  │    │   │  • OU timeout global (10s)                                  │  │   │ │
+│  │    │   │  • Retourne signaux partiels si timeout                     │  │   │ │
+│  │    │   └─────────────────────────────────────────────────────────────┘  │   │ │
+│  │    └─────────────────────────────────────────────────────────────────────┘   │ │
+│  │                                                                               │ │
+│  └───────────────────────────────────────────────────────────────────────────────┘ │
+│                                        │                                           │
+│                                        │ dict[agent_name → SignalEvent]            │
+│                                        ▼                                           │
+│  ┌───────────────────────────────────────────────────────────────────────────────┐ │
+│  │                     PHASE 3: SÉQUENTIEL STRICT                                │ │
+│  │                                                                               │ │
+│  │    ┌─────────────┐      ┌─────────────┐      ┌─────────────┐                 │ │
+│  │    │     CIO     │ ───▶ │    RISK     │ ───▶ │  EXECUTION  │                 │ │
+│  │    │   Agent     │      │   Agent     │      │    Agent    │                 │ │
+│  │    │             │      │             │      │             │                 │ │
+│  │    │   await     │      │   await     │      │   await     │                 │ │
+│  │    │   decide()  │      │  validate() │      │  execute()  │                 │ │
+│  │    └─────────────┘      └─────────────┘      └─────────────┘                 │ │
+│  │                                                                               │ │
+│  │    PAS de parallélisme - Ordre GARANTI - Un rejet stoppe le cycle            │ │
+│  │                                                                               │ │
+│  └───────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+            </div>
+        </section>
+
+        <!-- Section 3: Signal Barrier Implementation -->
+        <section>
+            <h2>3. Implémentation: SignalBarrier</h2>
+
+            <p>La barrière de synchronisation collecte les signaux et gère les timeouts :</p>
+
+            <div class="code-block">
+<span class="decorator">@dataclass</span>
+<span class="keyword">class</span> <span class="class-name">SignalBarrier</span>:
+    <span class="string">"""
+    Barrière de synchronisation pour les signaux.
+    Implémente le pattern fan-in avec timeout.
+    """</span>
+    expected_agents: set[str]          <span class="comment"># Agents attendus</span>
+    timeout_seconds: float             <span class="comment"># Timeout max (10s)</span>
+    signals: dict[str, SignalEvent] = field(default_factory=dict)
+    _event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    <span class="keyword">def</span> <span class="function">add_signal</span>(self, agent_name: str, signal: SignalEvent) -> bool:
+        <span class="string">"""Ajoute un signal. Retourne True si COMPLET."""</span>
+        self.signals[agent_name] = signal
+
+        <span class="keyword">if</span> self.<span class="function">is_complete</span>():
+            self._event.<span class="function">set</span>()  <span class="comment"># Libère la barrière</span>
+            <span class="keyword">return</span> <span class="keyword">True</span>
+        <span class="keyword">return</span> <span class="keyword">False</span>
+
+    <span class="keyword">def</span> <span class="function">is_complete</span>(self) -> bool:
+        <span class="string">"""Vérifie si tous les agents ont reporté."""</span>
+        <span class="keyword">return</span> set(self.signals.keys()) >= self.expected_agents
+
+    <span class="keyword">async def</span> <span class="function">wait</span>(self) -> dict[str, SignalEvent]:
+        <span class="string">"""
+        Attend tous les signaux OU timeout.
+        Retourne les signaux disponibles (complets ou partiels).
+        """</span>
+        <span class="keyword">try</span>:
+            <span class="keyword">await</span> asyncio.<span class="function">wait_for</span>(
+                self._event.<span class="function">wait</span>(),
+                timeout=self.timeout_seconds
+            )
+            logger.<span class="function">info</span>(<span class="string">f"Barrier complete: {len(self.signals)} signals"</span>)
+
+        <span class="keyword">except</span> asyncio.TimeoutError:
+            missing = self.expected_agents - set(self.signals.keys())
+            logger.<span class="function">warning</span>(
+                <span class="string">f"Barrier TIMEOUT. Missing: {missing}"</span>
+            )
+
+        <span class="keyword">return</span> self.signals  <span class="comment"># Retourne ce qu'on a</span>
+            </div>
+        </section>
+
+        <!-- Section 4: Parallel Execution -->
+        <section>
+            <h2>4. Implémentation: Exécution Parallèle</h2>
+
+            <div class="code-block">
+<span class="keyword">async def</span> <span class="function">process_market_event</span>(self, market_data: MarketDataEvent) -> None:
+    <span class="string">"""
+    Traite un événement de marché.
+
+    PHASE 1: Fan-out parallèle
+    PHASE 2: Barrier synchronisation
+    PHASE 3: Séquence CIO → Risk → Execution
+    """</span>
+
+    <span class="comment"># ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment"># PHASE 1: FAN-OUT - Exécution PARALLÈLE des Signal Agents</span>
+    <span class="comment"># ═══════════════════════════════════════════════════════════════</span>
+
+    <span class="comment"># Créer une nouvelle barrière pour ce cycle</span>
+    barrier = <span class="class-name">SignalBarrier</span>(
+        expected_agents={agent.name <span class="keyword">for</span> agent <span class="keyword">in</span> self._signal_agents},
+        timeout_seconds=<span class="number">10.0</span>,
+    )
+
+    <span class="comment"># Lancer TOUS les agents en parallèle</span>
+    signal_tasks = [
+        self.<span class="function">_run_signal_agent_with_timeout</span>(agent, market_data, barrier)
+        <span class="keyword">for</span> agent <span class="keyword">in</span> self._signal_agents
+    ]
+
+    <span class="comment"># Exécution VRAIMENT parallèle (concurrent)</span>
+    <span class="keyword">await</span> asyncio.<span class="function">gather</span>(*signal_tasks, return_exceptions=<span class="keyword">True</span>)
+
+    <span class="comment"># ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment"># PHASE 2: BARRIER - Synchronisation (Fan-in)</span>
+    <span class="comment"># ═══════════════════════════════════════════════════════════════</span>
+
+    signals = <span class="keyword">await</span> barrier.<span class="function">wait</span>()
+
+    <span class="keyword">if not</span> signals:
+        logger.<span class="function">warning</span>(<span class="string">"No signals received, skipping cycle"</span>)
+        <span class="keyword">return</span>
+
+    <span class="comment"># ═══════════════════════════════════════════════════════════════</span>
+    <span class="comment"># PHASE 3: SÉQUENTIEL STRICT - CIO → Risk → Execution</span>
+    <span class="comment"># ═══════════════════════════════════════════════════════════════</span>
+
+    <span class="comment"># Étape 3.1: CIO décide (UNIQUE décideur)</span>
+    decision = <span class="keyword">await</span> self._cio_agent.<span class="function">make_decision</span>(signals)
+
+    <span class="keyword">if</span> decision <span class="keyword">is None</span>:
+        <span class="keyword">return</span>  <span class="comment"># Pas d'action</span>
+
+    <span class="comment"># Étape 3.2: Risk/Compliance valide (SÉQUENTIEL après CIO)</span>
+    validation = <span class="keyword">await</span> self._risk_agent.<span class="function">validate</span>(decision)
+
+    <span class="keyword">if not</span> validation.approved:
+        <span class="keyword">return</span>  <span class="comment"># Rejeté</span>
+
+    <span class="comment"># Étape 3.3: Execution exécute (SÉQUENTIEL après Risk)</span>
+    <span class="keyword">await</span> self._execution_agent.<span class="function">execute</span>(decision, validation)
+            </div>
+        </section>
+
+        <!-- Section 5: Timeout Handling -->
+        <section>
+            <h2>5. Gestion des Timeouts et Agents Défaillants</h2>
+
+            <div class="code-block">
+<span class="keyword">async def</span> <span class="function">_run_signal_agent_with_timeout</span>(
+    self,
+    agent: SignalAgent,
+    market_data: MarketDataEvent,
+    barrier: SignalBarrier,
+) -> None:
+    <span class="string">"""
+    Exécute un signal agent avec timeout individuel.
+
+    3 cas possibles:
+    1. Succès     → Signal ajouté à la barrière
+    2. Timeout   → Agent ignoré, log d'erreur
+    3. Exception → Agent ignoré, log d'erreur
+    """</span>
+    <span class="keyword">try</span>:
+        <span class="comment"># Timeout INDIVIDUEL par agent (5s)</span>
+        signal = <span class="keyword">await</span> asyncio.<span class="function">wait_for</span>(
+            agent.<span class="function">generate_signal</span>(market_data),
+            timeout=<span class="number">5.0</span>,
+        )
+
+        <span class="keyword">if</span> signal:
+            barrier.<span class="function">add_signal</span>(agent.name, signal)
+            logger.<span class="function">debug</span>(<span class="string">f"{agent.name}: Signal OK"</span>)
+        <span class="keyword">else</span>:
+            <span class="comment"># Pas de signal (normal) → signal FLAT</span>
+            barrier.<span class="function">add_signal</span>(agent.name, <span class="class-name">FlatSignal</span>(agent.name))
+
+    <span class="keyword">except</span> asyncio.TimeoutError:
+        <span class="comment"># CAS 2: Agent LENT - on continue sans lui</span>
+        logger.<span class="function">error</span>(<span class="string">f"{agent.name}: TIMEOUT after 5s"</span>)
+        self._stats[agent.name][<span class="string">"timeouts"</span>] += <span class="number">1</span>
+        <span class="comment"># NE PAS ajouter à la barrière</span>
+
+    <span class="keyword">except</span> Exception <span class="keyword">as</span> e:
+        <span class="comment"># CAS 3: Agent en ERREUR - on continue sans lui</span>
+        logger.<span class="function">error</span>(<span class="string">f"{agent.name}: ERROR - {e}"</span>)
+        self._stats[agent.name][<span class="string">"errors"</span>] += <span class="number">1</span>
+        <span class="comment"># NE PAS ajouter à la barrière</span>
+            </div>
+
+            <div class="info-box warning">
+                <strong>Important:</strong> Les agents en timeout ou erreur ne sont PAS ajoutés à la barrière.
+                Le CIO prendra sa décision avec les signaux disponibles uniquement.
+            </div>
+        </section>
+
+        <!-- Section 6: Example Timeline -->
+        <section>
+            <h2>6. Exemple: Cycle avec Agents Défaillants</h2>
+
+            <p>Scénario: 5 agents, 2 timeout, 1 erreur, 2 succès</p>
+
+            <div class="agents-parallel">
+                <div class="agent-task success">
+                    <div class="name">MacroAgent</div>
+                    <div class="status">✓ Signal @ 0.8s</div>
+                </div>
+                <div class="agent-task timeout">
+                    <div class="name">StatArbAgent</div>
+                    <div class="status">⏱ Timeout @ 5.0s</div>
+                </div>
+                <div class="agent-task success">
+                    <div class="name">MomentumAgent</div>
+                    <div class="status">✓ Signal @ 0.3s</div>
+                </div>
+                <div class="agent-task error">
+                    <div class="name">MarketMakingAgent</div>
+                    <div class="status">✗ Error @ 0.1s</div>
+                </div>
+                <div class="agent-task timeout">
+                    <div class="name">OptionsVolAgent</div>
+                    <div class="status">⏱ Timeout @ 5.0s</div>
+                </div>
+            </div>
+
+            <h3>Timeline Détaillée</h3>
+
+            <div class="timeline">
+                <div class="timeline-event">
+                    <div class="timeline-time">t = 0.0s</div>
+                    <div class="timeline-title">MarketDataEvent reçu</div>
+                    <div class="timeline-desc">Lancement parallèle des 5 Signal Agents via asyncio.gather()</div>
+                </div>
+
+                <div class="timeline-event error">
+                    <div class="timeline-time">t = 0.1s</div>
+                    <div class="timeline-title">MarketMakingAgent: ERREUR</div>
+                    <div class="timeline-desc">Exception levée → Agent exclu du cycle, pas ajouté à la barrière</div>
+                </div>
+
+                <div class="timeline-event success">
+                    <div class="timeline-time">t = 0.3s</div>
+                    <div class="timeline-title">MomentumAgent: Signal reçu</div>
+                    <div class="timeline-desc">barrier.add_signal("MomentumAgent", signal) → signals = {Momentum}</div>
+                </div>
+
+                <div class="timeline-event success">
+                    <div class="timeline-time">t = 0.8s</div>
+                    <div class="timeline-title">MacroAgent: Signal reçu</div>
+                    <div class="timeline-desc">barrier.add_signal("MacroAgent", signal) → signals = {Momentum, Macro}</div>
+                </div>
+
+                <div class="timeline-event timeout">
+                    <div class="timeline-time">t = 5.0s</div>
+                    <div class="timeline-title">StatArbAgent & OptionsVolAgent: TIMEOUT</div>
+                    <div class="timeline-desc">Timeout individuel (5s) atteint → Agents exclus, pas ajoutés à la barrière</div>
+                </div>
+
+                <div class="timeline-event barrier">
+                    <div class="timeline-time">t = 10.0s</div>
+                    <div class="timeline-title">BARRIER TIMEOUT GLOBAL</div>
+                    <div class="timeline-desc">Timeout global (10s) atteint → Retourne signaux partiels: 2/5 agents</div>
+                </div>
+
+                <div class="timeline-event">
+                    <div class="timeline-time">t = 10.0s</div>
+                    <div class="timeline-title">CIO.decide(signals)</div>
+                    <div class="timeline-desc">Décision avec 2 signaux. Conviction: 0.65 > seuil (0.6) → DecisionEvent créé</div>
+                </div>
+
+                <div class="timeline-event">
+                    <div class="timeline-time">t = 10.1s</div>
+                    <div class="timeline-title">RiskAgent.validate(decision)</div>
+                    <div class="timeline-desc">Tous les checks passent → ValidatedDecisionEvent(approved=True)</div>
+                </div>
+
+                <div class="timeline-event">
+                    <div class="timeline-time">t = 10.2s</div>
+                    <div class="timeline-title">ExecutionAgent.execute(validated)</div>
+                    <div class="timeline-desc">TWAP envoyé à Interactive Brokers</div>
+                </div>
+            </div>
+
+            <div class="diagram">
+Timeline (secondes):
+═══════════════════════════════════════════════════════════════════════════════════
+
+t=0.0   MarketDataEvent reçu
+        │
+        ├──▶ MacroAgent.process()      ──────────────────────▶ Signal @ t=0.8s ✓
+        ├──▶ StatArbAgent.process()    ────────────────────────────────▶ TIMEOUT @ t=5.0s ✗
+        ├──▶ MomentumAgent.process()   ─────────▶ Signal @ t=0.3s ✓
+        ├──▶ MarketMakingAgent.process() ──▶ ERROR @ t=0.1s ✗
+        └──▶ OptionsVolAgent.process() ────────────────────────────────▶ TIMEOUT @ t=5.0s ✗
+
+═══════════════════════════════════════════════════════════════════════════════════
+BARRIER: Attend jusqu'à t=10.0s (timeout global)
+         Résultat: 2/5 signaux → {MacroAgent, MomentumAgent}
+═══════════════════════════════════════════════════════════════════════════════════
+
+t=10.0  CIO.decide(signals={MacroAgent, MomentumAgent})
+        │
+        │   Pondération avec 2/5 agents seulement
+        │   Conviction: 0.65 > seuil (0.6) → DÉCISION PRISE
+        │
+        └──▶ DecisionEvent
+
+t=10.1  RiskAgent.validate(decision)
+        │
+        │   Checks: position ✓, loss ✓, drawdown ✓, leverage ✓, rate_limit ✓
+        │
+        └──▶ ValidatedDecisionEvent(approved=True)
+
+t=10.2  ExecutionAgent.execute(validated)
+        │
+        │   TWAP: envoi à Interactive Brokers
+        │
+        └──▶ OrderEvent
+
+═══════════════════════════════════════════════════════════════════════════════════
+            </div>
+        </section>
+
+        <!-- Section 7: Timeouts Configuration -->
+        <section>
+            <h2>7. Configuration des Timeouts</h2>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Paramètre</th>
+                        <th>Valeur</th>
+                        <th>Fichier</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>signal_timeout_seconds</code></td>
+                        <td><span class="badge badge-yellow">5.0s</span></td>
+                        <td>config.yaml</td>
+                        <td>Timeout individuel par Signal Agent</td>
+                    </tr>
+                    <tr>
+                        <td><code>sync_barrier_timeout_seconds</code></td>
+                        <td><span class="badge badge-yellow">10.0s</span></td>
+                        <td>config.yaml</td>
+                        <td>Timeout global de la barrière de synchronisation</td>
+                    </tr>
+                    <tr>
+                        <td><code>agent_timeout_seconds</code></td>
+                        <td><span class="badge badge-yellow">30.0s</span></td>
+                        <td>config.yaml</td>
+                        <td>Timeout par traitement d'événement (général)</td>
+                    </tr>
+                    <tr>
+                        <td><code>broker_timeout_seconds</code></td>
+                        <td><span class="badge badge-yellow">30.0s</span></td>
+                        <td>config.yaml</td>
+                        <td>Timeout connexion Interactive Brokers</td>
+                    </tr>
+                    <tr>
+                        <td><code>max_orders_per_minute</code></td>
+                        <td><span class="badge badge-red">10</span></td>
+                        <td>config.yaml</td>
+                        <td>Rate limit anti-HFT</td>
+                    </tr>
+                    <tr>
+                        <td><code>min_order_interval_ms</code></td>
+                        <td><span class="badge badge-red">100ms</span></td>
+                        <td>config.yaml</td>
+                        <td>Intervalle minimum entre ordres (anti-HFT)</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Section 8: Compliance Check -->
+        <section>
+            <h2>8. Conformité CLAUDE.md</h2>
+
+            <div class="compliance-grid">
+                <div class="compliance-item">
+                    <div class="compliance-icon">✓</div>
+                    <div class="compliance-text">
+                        <strong>Signal agents en parallèle</strong><br>
+                        <span><code>asyncio.gather(*tasks)</code></span>
+                    </div>
+                </div>
+                <div class="compliance-item">
+                    <div class="compliance-icon">✓</div>
+                    <div class="compliance-text">
+                        <strong>Timeout par agent</strong><br>
+                        <span><code>asyncio.wait_for(task, timeout=5.0)</code></span>
+                    </div>
+                </div>
+                <div class="compliance-item">
+                    <div class="compliance-icon">✓</div>
+                    <div class="compliance-text">
+                        <strong>Barrière de synchronisation</strong><br>
+                        <span><code>SignalBarrier.wait()</code> avec timeout global</span>
+                    </div>
+                </div>
+                <div class="compliance-item">
+                    <div class="compliance-icon">✓</div>
+                    <div class="compliance-text">
+                        <strong>Gestion agents défaillants</strong><br>
+                        <span><code>return_exceptions=True</code> + exclusion</span>
+                    </div>
+                </div>
+                <div class="compliance-item">
+                    <div class="compliance-icon">✓</div>
+                    <div class="compliance-text">
+                        <strong>CIO après barrière uniquement</strong><br>
+                        <span><code>await barrier.wait()</code> PUIS <code>cio.decide()</code></span>
+                    </div>
+                </div>
+                <div class="compliance-item">
+                    <div class="compliance-icon">✓</div>
+                    <div class="compliance-text">
+                        <strong>Séquence stricte post-CIO</strong><br>
+                        <span><code>await</code> séquentiels sans parallélisme</span>
+                    </div>
+                </div>
+                <div class="compliance-item">
+                    <div class="compliance-icon">✓</div>
+                    <div class="compliance-text">
+                        <strong>Pas de boucle infinie</strong><br>
+                        <span>Event-driven, un cycle par MarketDataEvent</span>
+                    </div>
+                </div>
+                <div class="compliance-item">
+                    <div class="compliance-icon">✓</div>
+                    <div class="compliance-text">
+                        <strong>Comportement déterministe</strong><br>
+                        <span>Ordre garanti: Signal → Barrier → CIO → Risk → Exec</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-box success" style="margin-top: 1.5rem;">
+                <strong>✓ CONFORMITÉ 100%</strong><br>
+                Le modèle de concurrence respecte strictement toutes les règles définies dans CLAUDE.md.
+            </div>
+        </section>
+
+        <!-- Section 9: Sequence Diagram -->
+        <section>
+            <h2>9. Diagramme de Séquence</h2>
+
+            <div class="diagram">
+┌─────────┐ ┌───────┐ ┌─────────┐ ┌──────────┐ ┌────────┐ ┌─────────┐ ┌───────┐ ┌────┐ ┌──────┐ ┌──────┐
+│Orchestr.│ │ Macro │ │ StatArb │ │ Momentum │ │   MM   │ │ Options │ │Barrier│ │CIO │ │ Risk │ │ Exec │
+└────┬────┘ └───┬───┘ └────┬────┘ └────┬─────┘ └───┬────┘ └────┬────┘ └───┬───┘ └─┬──┘ └──┬───┘ └──┬───┘
+     │          │          │           │           │           │          │       │       │        │
+     │ ════════════════════════════════════════════════════════════════════       │       │        │
+     │ ║            PHASE 1: FAN-OUT PARALLÈLE (asyncio.gather)          ║       │       │        │
+     │ ════════════════════════════════════════════════════════════════════       │       │        │
+     │          │          │           │           │           │          │       │       │        │
+     ├─────────▶│          │           │           │           │          │       │       │        │
+     ├──────────┼─────────▶│           │           │           │          │       │       │        │
+     ├──────────┼──────────┼──────────▶│           │           │          │       │       │        │
+     ├──────────┼──────────┼───────────┼──────────▶│           │          │       │       │        │
+     ├──────────┼──────────┼───────────┼───────────┼──────────▶│          │       │       │        │
+     │          │          │           │           │           │          │       │       │        │
+     │          │          │           │     ✗ ERROR          │          │       │       │        │
+     │          │          │           │ ◀─────────┤           │          │       │       │        │
+     │          │          │           │           │           │          │       │       │        │
+     │          │          │     ✓ Signal (0.3s)  │           │          │       │       │        │
+     │          │          │ ◀─────────┤           │           │──────────▶       │       │        │
+     │          │          │           │           │           │  add()   │       │       │        │
+     │          │          │           │           │           │          │       │       │        │
+     │    ✓ Signal (0.8s) │           │           │           │          │       │       │        │
+     │ ◀────────┤          │           │           │           │──────────▶       │       │        │
+     │          │          │           │           │           │  add()   │       │       │        │
+     │          │          │           │           │           │          │       │       │        │
+     │          │    ✗ TIMEOUT (5s)   │           │ ✗ TIMEOUT │          │       │       │        │
+     │          │ ◀────────┤           │           │ ◀─────────┤          │       │       │        │
+     │          │          │           │           │           │          │       │       │        │
+     │ ════════════════════════════════════════════════════════════════════       │       │        │
+     │ ║            PHASE 2: BARRIER TIMEOUT (10s)                       ║       │       │        │
+     │ ════════════════════════════════════════════════════════════════════       │       │        │
+     │          │          │           │           │           │          │       │       │        │
+     │◀─────────┼──────────┼───────────┼───────────┼───────────┼──────────┤       │       │        │
+     │          │          │           │           │           │  wait()  │       │       │        │
+     │          │          │           │           │           │ returns  │       │       │        │
+     │          │          │           │           │           │ 2 signals│       │       │        │
+     │          │          │           │           │           │          │       │       │        │
+     │ ════════════════════════════════════════════════════════════════════════════════════════════
+     │ ║                    PHASE 3: SÉQUENCE STRICTE (await séquentiels)                        ║
+     │ ════════════════════════════════════════════════════════════════════════════════════════════
+     │          │          │           │           │           │          │       │       │        │
+     │──────────┼──────────┼───────────┼───────────┼───────────┼──────────┼──────▶│       │        │
+     │          │          │           │           │           │          │decide()       │        │
+     │◀─────────┼──────────┼───────────┼───────────┼───────────┼──────────┼───────┤       │        │
+     │          │          │           │           │           │          │Decision       │        │
+     │          │          │           │           │           │          │       │       │        │
+     │──────────┼──────────┼───────────┼───────────┼───────────┼──────────┼───────┼──────▶│        │
+     │          │          │           │           │           │          │       │validate()      │
+     │◀─────────┼──────────┼───────────┼───────────┼───────────┼──────────┼───────┼───────┤        │
+     │          │          │           │           │           │          │       │Validated       │
+     │          │          │           │           │           │          │       │       │        │
+     │──────────┼──────────┼───────────┼───────────┼───────────┼──────────┼───────┼───────┼───────▶│
+     │          │          │           │           │           │          │       │       │execute()
+     │◀─────────┼──────────┼───────────┼───────────┼───────────┼──────────┼───────┼───────┼────────┤
+     │          │          │           │           │           │          │       │       │  Order │
+     ▼          ▼          ▼           ▼           ▼           ▼          ▼       ▼       ▼        ▼
+            </div>
+        </section>
+
+        <footer>
+            <p>AI Trading Firm - Documentation du Modèle de Concurrence</p>
+            <p><a href="architecture.html">← Architecture</a> | <a href="../claude.md">CLAUDE.md</a></p>
+            <p style="margin-top: 0.5rem; font-size: 0.8rem;">
+                Python 3.11 | asyncio | Fan-out / Fan-in | Event-driven
+            </p>
+        </footer>
+    </div>
+</body>
+</html>
