@@ -20,6 +20,24 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 
+class TestMomentumStrategyDefaultInitialization(unittest.TestCase):
+    """Tests for MomentumStrategy default initialization (Issue #16)."""
+
+    def test_default_initialization(self):
+        """Verify MomentumStrategy initializes correctly with empty config."""
+        from strategies.momentum_strategy import MomentumStrategy
+        strategy = MomentumStrategy({})
+
+        # Verify strategy has required attributes with defaults
+        self.assertIsNotNone(strategy)
+        # Strategy should have basic configuration set
+        self.assertTrue(hasattr(strategy, 'calculate_rsi'))
+        self.assertTrue(hasattr(strategy, 'calculate_macd'))
+        self.assertTrue(hasattr(strategy, 'calculate_sma'))
+        self.assertTrue(hasattr(strategy, 'calculate_ema'))
+        self.assertTrue(hasattr(strategy, 'analyze'))
+
+
 class TestRSICalculation(unittest.TestCase):
     """Tests for RSI calculation correctness."""
 
@@ -126,11 +144,21 @@ class TestMovingAverages(unittest.TestCase):
         self.assertEqual(sma, 101.0)
 
     def test_ema_weights_recent_more(self):
-        """EMA should weight recent values more than SMA."""
-        prices = np.array([100.0] * 10 + [200.0])  # Jump at end
+        """EMA should weight recent values more than SMA (Issue #17 - more jumps in data)."""
+        # Create data with multiple jumps to better test EMA weighting
+        prices = np.array([100.0] * 5 + [120.0] * 3 + [150.0] * 2 + [200.0])
         sma = self.strategy.calculate_sma(prices, period=5)
         ema = self.strategy.calculate_ema(prices, period=5)
-        # EMA should be closer to 200 than SMA
+        # EMA should be closer to 200 than SMA due to recency weighting
+        self.assertGreater(ema, sma)
+
+    def test_ema_responds_to_multiple_jumps(self):
+        """EMA should respond more quickly to multiple price changes."""
+        # Data with gradual jumps
+        prices = np.array([100.0, 100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 200.0])
+        ema = self.strategy.calculate_ema(prices, period=5)
+        sma = self.strategy.calculate_sma(prices, period=5)
+        # With an uptrend and jumps, EMA should be higher than SMA
         self.assertGreater(ema, sma)
 
 

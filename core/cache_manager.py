@@ -61,14 +61,18 @@ class CacheStats:
 
 @dataclass
 class CacheEntry:
-    """A single cache entry."""
+    """A single cache entry.
+
+    All timestamps are float values from time.time() (Unix epoch seconds)
+    for consistency across the caching system.
+    """
     key: str
     value: Any
-    created_at: float
-    expires_at: float | None
+    created_at: float  # Unix timestamp from time.time()
+    expires_at: float | None  # Unix timestamp from time.time(), None for no expiration
     size_bytes: int
     access_count: int = 0
-    last_accessed: float = 0.0
+    last_accessed: float = 0.0  # Unix timestamp from time.time()
 
 
 class BoundedLRUCache(Generic[T]):

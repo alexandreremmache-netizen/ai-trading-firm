@@ -283,9 +283,10 @@ class CorrelationManager:
         try:
             eigenvalues = np.linalg.eigvalsh(corr_matrix.values)
             eigenvalues = np.sort(eigenvalues)[::-1]  # Descending order
-        except Exception as e:
-            logger.warning(f"Eigenvalue calculation failed: {e}")
-            eigenvalues = None
+        except (np.linalg.LinAlgError, ValueError) as e:
+            logger.warning(f"Eigenvalue calculation failed: {e}, falling back to identity matrix eigenvalues")
+            # Fallback to identity matrix eigenvalues (all 1s)
+            eigenvalues = np.ones(n)
 
         # Determine regime
         regime = self._classify_regime(avg_corr)

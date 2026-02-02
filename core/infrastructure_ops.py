@@ -15,6 +15,8 @@ Addresses MEDIUM priority issues:
 Provides production-grade infrastructure components for trading systems.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
@@ -1136,10 +1138,17 @@ class ConnectionPool:
         self._stats["recycled"] += 1
 
         # Create replacement if below min size
+        # Note: Don't decrement _total_created during recycle - only on actual removal
+        # The _create_connection will increment it when creating replacement
         with self._lock:
-            self._total_created -= 1
-            if self._pool.qsize() + len(self._in_use) < self.min_size:
+            # Only decrement if we're actually removing without replacement
+            current_pool_size = self._pool.qsize() + len(self._in_use)
+            if current_pool_size < self.min_size:
+                # Creating replacement, so net change to _total_created is 0
                 self._create_connection()
+            else:
+                # Actually removing, decrement the count
+                self._total_created -= 1
 
     def get_stats(self) -> Dict[str, Any]:
         """Get pool statistics."""

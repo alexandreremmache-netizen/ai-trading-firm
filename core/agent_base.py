@@ -13,7 +13,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from core.events import Event, EventType
 
@@ -72,7 +72,7 @@ class BaseAgent(ABC):
         self._shutdown_state = ShutdownState.STOPPED
         self._pending_tasks: set[asyncio.Task] = set()
         self._shutdown_event = asyncio.Event()
-        self._cleanup_handlers: list[asyncio.coroutine] = []
+        self._cleanup_handlers: list[Callable[[], Coroutine[Any, Any, None]]] = []
 
     @property
     def name(self) -> str:
@@ -246,7 +246,7 @@ class BaseAgent(ABC):
         """
         pass
 
-    def add_cleanup_handler(self, handler: asyncio.coroutine) -> None:
+    def add_cleanup_handler(self, handler: Callable[[], Coroutine[Any, Any, None]]) -> None:
         """
         Add a cleanup handler to run during shutdown.
 

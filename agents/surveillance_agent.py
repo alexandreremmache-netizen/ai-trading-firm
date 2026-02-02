@@ -457,11 +457,15 @@ class SurveillanceAgent(BaseAgent):
 
                 if time_diff <= self._wash_trading_window_seconds:
                     # Check quantity similarity (within 10%)
-                    qty_ratio = min(buy.quantity, sell.quantity) / max(buy.quantity, sell.quantity)
+                    max_qty = max(buy.quantity, sell.quantity)
+                    if max_qty > 0:
+                        qty_ratio = min(buy.quantity, sell.quantity) / max_qty
+                    else:
+                        continue  # Skip if both quantities are 0
 
                     if qty_ratio >= 0.9:
                         # Check price similarity
-                        if buy.fill_price and sell.fill_price:
+                        if buy.fill_price and sell.fill_price and buy.fill_price > 0:
                             price_diff_pct = abs(buy.fill_price - sell.fill_price) / buy.fill_price
 
                             if price_diff_pct < 0.01:  # Within 1%

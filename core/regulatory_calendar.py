@@ -444,12 +444,13 @@ class RegulatoryCalendar:
                 elif deadline_config.frequency == ReportFrequency.QUARTERLY:
                     quarter_start_month = ((current.month - 1) // 3) * 3 + 1
                     period_start = current.replace(month=quarter_start_month, day=1)
-                    quarter_end_month = quarter_start_month + 2
-                    if quarter_end_month > 12:
-                        period_end = current.replace(year=current.year+1, month=quarter_end_month-12, day=1) - timedelta(days=1)
+                    # Calculate next quarter start using proper month arithmetic
+                    next_quarter_month = quarter_start_month + 3
+                    if next_quarter_month > 12:
+                        next_q = date(period_start.year + 1, next_quarter_month - 12, 1)
                     else:
-                        next_q = period_start.replace(month=quarter_start_month+3) if quarter_start_month <= 9 else period_start.replace(year=period_start.year+1, month=1)
-                        period_end = next_q - timedelta(days=1)
+                        next_q = date(period_start.year, next_quarter_month, 1)
+                    period_end = next_q - timedelta(days=1)
                     deadline_date = period_end + timedelta(days=90)
                     current = period_end + timedelta(days=1)
 
@@ -470,6 +471,8 @@ class RegulatoryCalendar:
                     break
 
                 # Create deadline datetime
+                # Note: Using UTC for internal consistency; the deadline_config.timezone
+                # is for display purposes. All internal timestamps use UTC per codebase convention.
                 deadline_dt = datetime.combine(
                     deadline_date,
                     datetime.strptime(deadline_config.deadline_time, "%H:%M").time(),

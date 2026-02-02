@@ -12,6 +12,8 @@ Issues Addressed:
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import os
 import json
@@ -924,30 +926,59 @@ def traced(operation_name: str | None = None):
     """
     Decorator for tracing functions (#S12).
 
+    Supports both sync and async functions.
+
     Usage:
         @traced("process_order")
         def process_order(order_id: str):
             ...
+
+        @traced("async_process")
+        async def async_process(order_id: str):
+            ...
     """
     def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            trace = _current_trace.get()
-            op_name = operation_name or func.__name__
+        op_name = operation_name or func.__name__
 
-            if trace:
-                span = trace.start_span(op_name)
-                try:
-                    result = func(*args, **kwargs)
-                    trace.end_span(span, status="ok")
-                    return result
-                except Exception as e:
-                    trace.end_span(span, status="error", error=str(e))
-                    raise
-            else:
-                return func(*args, **kwargs)
+        if inspect.iscoroutinefunction(func):
+            # Async function wrapper
+            @wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                trace = _current_trace.get()
 
-        return wrapper
+                if trace:
+                    span = trace.start_span(op_name)
+                    try:
+                        result = await func(*args, **kwargs)
+                        trace.end_span(span, status="ok")
+                        return result
+                    except Exception as e:
+                        trace.end_span(span, status="error", error=str(e))
+                        raise
+                else:
+                    return await func(*args, **kwargs)
+
+            return async_wrapper
+        else:
+            # Sync function wrapper
+            @wraps(func)
+            def sync_wrapper(*args, **kwargs):
+                trace = _current_trace.get()
+
+                if trace:
+                    span = trace.start_span(op_name)
+                    try:
+                        result = func(*args, **kwargs)
+                        trace.end_span(span, status="ok")
+                        return result
+                    except Exception as e:
+                        trace.end_span(span, status="error", error=str(e))
+                        raise
+                else:
+                    return func(*args, **kwargs)
+
+            return sync_wrapper
+
     return decorator
 
 

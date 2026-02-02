@@ -19,8 +19,27 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-import numpy as np
-from scipy import stats
+# NumPy and SciPy are required for VaR calculations
+# Provide graceful error message if not available
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+    np = None  # type: ignore
+
+try:
+    from scipy import stats
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+    stats = None  # type: ignore
+
+if not HAS_NUMPY or not HAS_SCIPY:
+    logging.getLogger(__name__).error(
+        "NumPy and/or SciPy not available - VaR calculations will be disabled. "
+        "Install with: pip install numpy scipy"
+    )
 
 
 logger = logging.getLogger(__name__)

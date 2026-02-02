@@ -748,6 +748,35 @@ class OptionStrategyBacktester:
         )
 
     def _calculate_position_pnl(self, position: OptionPosition) -> float:
-        """Calculate P&L for a closed position."""
-        # This is simplified - would need full tracking
-        return position.net_premium  # Placeholder
+        """
+        Calculate P&L for a closed position.
+
+        For a closed position:
+        - Entry cost = net_premium (negative for debit, positive for credit)
+        - Exit value = intrinsic value at expiration or mark-to-market at close
+
+        P&L = exit_value - (-net_premium) = exit_value + net_premium
+        For credit positions (net_premium > 0): profit if option expires worthless
+        For debit positions (net_premium < 0): profit if exit_value > abs(net_premium)
+        """
+        if position.exit_underlying_price is None:
+            # Position not closed yet, return unrealized based on premium only
+            return position.net_premium
+
+        # Calculate exit/expiration value based on intrinsic values
+        exit_value = 0.0
+        for leg in position.legs:
+            if leg.option_type == OptionType.CALL:
+                intrinsic = max(0, position.exit_underlying_price - leg.strike)
+            else:  # PUT
+                intrinsic = max(0, leg.strike - position.exit_underlying_price)
+
+            # leg.quantity is positive for long, negative for short
+            exit_value += intrinsic * leg.quantity * leg.multiplier
+
+        # P&L = what we received at exit minus what we paid at entry
+        # net_premium is negative for debit (we paid), positive for credit (we received)
+        # So P&L = exit_value - (-net_premium) = exit_value + net_premium
+        pnl = exit_value + position.net_premium
+
+        return pnl

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from enum import Enum
 from typing import Any
 
@@ -619,7 +619,7 @@ class SeasonalityStrategy:
 
         return SeasonalSignal(
             symbol=symbol,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             direction=direction,
             strength=strength,
             confidence=confidence,
@@ -769,7 +769,10 @@ class SeasonalityStrategy:
                 end_idx = None
 
                 for i, d in enumerate(dates):
-                    dt = np.datetime64(d).astype('datetime64[D]').astype(date)
+                    try:
+                        dt = np.datetime64(d).astype('datetime64[D]').astype(date)
+                    except (ValueError, TypeError, OverflowError):
+                        continue
                     if dt >= start_date and start_idx is None:
                         start_idx = i
                     if dt >= end_date and end_idx is None:

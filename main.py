@@ -30,6 +30,17 @@ from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
 
+# NumPy availability check for graceful degradation
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+    logging.warning(
+        "NumPy not available - some quantitative features will be disabled. "
+        "Install with: pip install numpy"
+    )
+
 import yaml
 
 from core.event_bus import EventBus
@@ -957,7 +968,9 @@ def setup_signal_handlers(orchestrator: TradingFirmOrchestrator) -> None:
         orchestrator.request_shutdown()
 
     signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
+    # SIGTERM is not available on Windows
+    if hasattr(signal, 'SIGTERM'):
+        signal.signal(signal.SIGTERM, handle_signal)
 
 
 async def main():

@@ -333,9 +333,12 @@ class CrossMarginCalculator:
             benefit_type = "diversification"
             hedge_ratio = 0
 
-            # Diversification benefit
-            vol_reduction = math.sqrt(1 + 2 * correlation * (mv1 * mv2) / (mv1 + mv2)**2)
-            combined_cross = combined_standalone * vol_reduction
+            # Diversification benefit - guard against division by zero
+            if (mv1 + mv2) > 0:
+                vol_reduction = math.sqrt(1 + 2 * correlation * (mv1 * mv2) / (mv1 + mv2)**2)
+                combined_cross = combined_standalone * vol_reduction
+            else:
+                combined_cross = combined_standalone
 
         elif not same_direction and correlation < 0:
             # Offsetting with negative correlation = enhanced hedge

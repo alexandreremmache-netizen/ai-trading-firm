@@ -111,7 +111,7 @@ class RegulatoryChange:
 
     def days_until_effective(self) -> int:
         """Calculate days until effective date."""
-        delta = self.effective_date - datetime.now()
+        delta = self.effective_date - datetime.now(timezone.utc)
         return max(0, delta.days)
 
     def is_overdue(self) -> bool:
@@ -119,8 +119,8 @@ class RegulatoryChange:
         if self.status == ChangeStatus.VERIFIED:
             return False
         if self.implementation_deadline:
-            return datetime.now() > self.implementation_deadline
-        return datetime.now() > self.effective_date
+            return datetime.now(timezone.utc) > self.implementation_deadline
+        return datetime.now(timezone.utc) > self.effective_date
 
 
 @dataclass
@@ -268,7 +268,7 @@ class RegulatoryChangeMonitor:
                 ChangeImpact.LOW: 30,
                 ChangeImpact.INFORMATIONAL: 60
             }
-            change.review_deadline = datetime.now() + timedelta(
+            change.review_deadline = datetime.now(timezone.utc) + timedelta(
                 days=review_days.get(change.impact, 30)
             )
 
@@ -293,10 +293,10 @@ class RegulatoryChangeMonitor:
         change = self.changes[change_id]
         old_status = change.status
         change.status = status
-        change.updated_at = datetime.now()
+        change.updated_at = datetime.now(timezone.utc)
 
         if notes:
-            change.implementation_notes += f"\n[{datetime.now().isoformat()}] {notes}"
+            change.implementation_notes += f"\n[{datetime.now(timezone.utc).isoformat()}] {notes}"
 
         logger.info(f"Updated change {change_id} status: {old_status.value} -> {status.value}")
 

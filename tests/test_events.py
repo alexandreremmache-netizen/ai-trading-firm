@@ -76,7 +76,7 @@ class TestEvents:
         assert event.conviction_score == 0.85
 
     def test_event_immutability(self):
-        """Test that events are immutable."""
+        """Test that events are immutable (Issue #18 - verify original value preserved)."""
         event = MarketDataEvent(
             source_agent="test",
             symbol="AAPL",
@@ -84,8 +84,15 @@ class TestEvents:
             ask=100.05,
         )
 
+        # Store original value
+        original_symbol = event.symbol
+
         with pytest.raises(AttributeError):
             event.symbol = "MSFT"
+
+        # Assert original value is preserved after failed mutation attempt
+        assert event.symbol == original_symbol
+        assert event.symbol == "AAPL"
 
     def test_event_audit_dict(self):
         """Test event serialization for audit."""
@@ -157,3 +164,172 @@ class TestOrderTypes:
         assert OrderType.MARKET.value == "market"
         assert OrderType.LIMIT.value == "limit"
         assert OrderType.STOP.value == "stop"
+
+
+class TestMarketDataEdgeCases:
+    """Test edge cases for MarketDataEvent properties."""
+
+    def test_market_data_mid_price_fallback(self):
+        """Test mid price falls back to last when bid/ask are zero."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="AAPL",
+            bid=0.0,
+            ask=0.0,
+            last=175.52
+        )
+        # When bid and ask are both 0, mid should fall back to last price
+        assert event.mid == 175.52
+
+    def test_market_data_spread_zero_bid_ask(self):
+        """Test spread is zero when bid and ask are both zero."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="AAPL",
+            bid=0.0,
+            ask=0.0,
+            last=175.52
+        )
+        # When bid and ask are both 0, spread should be 0
+        assert event.spread == 0.0
+
+    def test_market_data_mid_price_normal(self):
+        """Test mid price calculation with normal bid/ask."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="AAPL",
+            bid=100.0,
+            ask=100.10,
+            last=100.05
+        )
+        assert event.mid == pytest.approx(100.05)
+
+    def test_market_data_spread_normal(self):
+        """Test spread calculation with normal bid/ask."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="AAPL",
+            bid=100.0,
+            ask=100.10,
+            last=100.05
+        )
+        assert event.spread == pytest.approx(0.10)
+
+    def test_market_data_mid_only_bid_zero(self):
+        """Test mid calculation when only bid is zero."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="AAPL",
+            bid=0.0,
+            ask=100.10,
+            last=100.05
+        )
+        # Mid should still calculate from bid/ask even if bid is 0
+        assert event.mid == pytest.approx(50.05)
+
+    def test_market_data_spread_only_bid_zero(self):
+        """Test spread when only bid is zero."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="AAPL",
+            bid=0.0,
+            ask=100.10,
+            last=100.05
+        )
+        assert event.spread == pytest.approx(100.10)
+
+    def test_market_data_mid_only_ask_zero(self):
+        """Test mid calculation when only ask is zero (Issue #26 edge case)."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="AAPL",
+            bid=100.0,
+            ask=0.0,
+            last=100.05
+        )
+        # When ask is 0, mid should fall back to last
+        assert event.mid == 100.05
+
+    def test_market_data_spread_only_ask_zero(self):
+        """Test spread when only ask is zero (Issue #26 edge case)."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="AAPL",
+            bid=100.0,
+            ask=0.0,
+            last=100.05
+        )
+        # When ask is 0, spread should be 0
+        assert event.spread == 0.0
+
+    def test_market_data_mid_equal_bid_ask(self):
+        """Test mid when bid equals ask (locked market, Issue #26 edge case)."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="AAPL",
+            bid=100.0,
+            ask=100.0,
+            last=100.0
+        )
+        assert event.mid == pytest.approx(100.0)
+        assert event.spread == pytest.approx(0.0)
+
+    def test_market_data_mid_wide_spread(self):
+        """Test mid with wide spread (Issue #26 edge case)."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="AAPL",
+            bid=95.0,
+            ask=105.0,
+            last=100.0
+        )
+        assert event.mid == pytest.approx(100.0)
+        assert event.spread == pytest.approx(10.0)
+
+    def test_market_data_mid_negative_bid(self):
+        """Test mid with negative bid (should not happen but edge case)."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="AAPL",
+            bid=-1.0,
+            ask=100.0,
+            last=100.0
+        )
+        # Negative bid is treated as invalid (< 0 check fails)
+        assert event.mid == 100.0  # Falls back to last
+
+    def test_market_data_all_zero_prices(self):
+        """Test when all prices are zero (Issue #26 edge case)."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="AAPL",
+            bid=0.0,
+            ask=0.0,
+            last=0.0
+        )
+        assert event.mid == 0.0
+        assert event.spread == 0.0
+
+    def test_market_data_very_small_spread(self):
+        """Test mid/spread with very small values (penny stocks, Issue #26)."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="PENNY",
+            bid=0.01,
+            ask=0.02,
+            last=0.015
+        )
+        assert event.mid == pytest.approx(0.015)
+        assert event.spread == pytest.approx(0.01)
+
+    def test_market_data_large_values(self):
+        """Test mid/spread with large price values (Issue #26 edge case)."""
+        event = MarketDataEvent(
+            source_agent="test",
+            symbol="BRKA",
+            bid=500000.0,
+            ask=500100.0,
+            last=500050.0
+        )
+        assert event.mid == pytest.approx(500050.0)
+        assert event.spread == pytest.approx(100.0)

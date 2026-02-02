@@ -10,12 +10,8 @@ import asyncio
 from pathlib import Path
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create event loop for async tests."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
+# Note: Session-scoped event_loop fixture removed as deprecated in pytest-asyncio.
+# pytest-asyncio now handles event loop management automatically.
 
 
 @pytest.fixture
@@ -51,9 +47,4 @@ def test_config():
     }
 
 
-@pytest.fixture
-def temp_logs_dir(tmp_path):
-    """Create temporary logs directory."""
-    logs_dir = tmp_path / "logs"
-    logs_dir.mkdir()
-    return logs_dir
+# Issue #20: Removed unused temp_logs_dir fixture

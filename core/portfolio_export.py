@@ -562,14 +562,39 @@ class PortfolioMetricsCache:
         ttl: float | None = None,
         metric_type: str | None = None,
     ) -> Any:
-        """Get from cache or compute."""
+        """
+        Get from cache or compute with double-check pattern.
+
+        Uses double-check locking to prevent deadlock while avoiding
+        duplicate computation by multiple threads.
+        """
+        # First check without holding lock during compute
         value = self.get(key)
         if value is not None:
             return value
 
-        value = compute_fn()
-        self.set(key, value, ttl=ttl, metric_type=metric_type)
-        return value
+        # Compute value outside of lock to prevent deadlock
+        computed_value = compute_fn()
+
+        # Double-check: another thread may have computed and cached
+        with self._lock:
+            # Check again under lock
+            if key in self._cache:
+                existing_value, computed_at, cached_ttl = self._cache[key]
+                # Check if cached value is still valid
+                if time.time() - computed_at <= cached_ttl:
+                    self._hits += 1
+                    return existing_value
+
+            # Store our computed value
+            if ttl is None:
+                if metric_type and metric_type in self.METRIC_TTLS:
+                    ttl = self.METRIC_TTLS[metric_type]
+                else:
+                    ttl = self.default_ttl
+            self._cache[key] = (computed_value, time.time(), ttl)
+
+        return computed_value
 
     def get_stats(self) -> dict:
         """Get cache statistics."""

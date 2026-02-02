@@ -356,7 +356,8 @@ class TargetPortfolioBuilder:
         if total_weight <= 0:
             return []
 
-        targets = []
+        # First pass: calculate weights and clamp
+        clamped_weights = {}
         for symbol, raw_weight in target_weights.items():
             price = self._prices.get(symbol, 0.0)
             if price <= 0:
@@ -364,6 +365,18 @@ class TargetPortfolioBuilder:
 
             weight = raw_weight / total_weight
             weight = max(self.min_weight, min(self.max_weight, weight))
+            clamped_weights[symbol] = weight
+
+        # Re-normalize after clamping to ensure weights sum to 1.0
+        clamped_total = sum(clamped_weights.values())
+        if clamped_total > 0:
+            clamped_weights = {s: w / clamped_total for s, w in clamped_weights.items()}
+
+        # Second pass: build target positions with normalized weights
+        targets = []
+        for symbol, weight in clamped_weights.items():
+            price = self._prices.get(symbol, 0.0)
+            # price > 0 already checked in first pass
 
             target_value = portfolio_value * weight
             target_shares = self._calculate_shares(target_value, price)
@@ -551,14 +564,22 @@ class TradeListGenerator:
         cumulative_tax = 0.0
 
         # Sort: buys first, then sells by gain (losses first)
-        sells = [t for t in targets if t.weight_difference < 0]
-        buys = [t for t in targets if t.weight_difference > 0]
+        # weight_difference = target_weight - current_weight
+        # Positive weight_difference = underweight = need to BUY
+        # Negative weight_difference = overweight = need to SELL
+        sells = [t for t in targets if t.weight_difference < 0]  # overweight, sell to reduce
+        buys = [t for t in targets if t.weight_difference > 0]   # underweight, buy to increase
 
         # Sort sells by gain (realize losses first)
         sells_with_gain = []
         for target in sells:
-            cost_basis = self._cost_basis.get(target.symbol, target.current_value / target.current_shares if target.current_shares > 0 else 0)
-            current_price = target.current_value / target.current_shares if target.current_shares > 0 else 0
+            # Defensive check for zero shares
+            if target.current_shares > 0:
+                cost_basis = self._cost_basis.get(target.symbol, target.current_value / target.current_shares)
+                current_price = target.current_value / target.current_shares
+            else:
+                cost_basis = self._cost_basis.get(target.symbol, 0)
+                current_price = 0
             gain_per_share = current_price - cost_basis
             sells_with_gain.append((target, gain_per_share))
 

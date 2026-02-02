@@ -29,6 +29,13 @@ import math
 logger = logging.getLogger(__name__)
 
 
+# Normalization factor for signal strength calculation in sector rotation.
+# Represents the expected spread range (as a decimal) between top and bottom
+# sectors for strong market regimes. A spread of 20% (0.20) is considered
+# a fully differentiated market, yielding signal_strength of 1.0.
+SIGNAL_STRENGTH_NORMALIZATION_FACTOR = 0.20
+
+
 class CommoditySector(str, Enum):
     """Commodity sectors for rotation analysis."""
     ENERGY = "energy"
@@ -66,7 +73,7 @@ COMMODITY_SECTORS = {
     CommoditySector.BASE_METALS: [
         "HG",  # Copper
         "ALI",  # Aluminum
-        "ZN",  # Zinc
+        "ZINC",  # Zinc (changed from ZN to avoid collision with Treasury Notes)
         "NI",  # Nickel
         "PB",  # Lead
     ],
@@ -217,7 +224,10 @@ class CommoditySectorRotation:
             for period, days in [("1d", 1), ("1w", 5), ("1m", 20), ("3m", 60), ("6m", 120)]:
                 if len(prices) >= days + 1:
                     past_price = prices[-(days + 1)][1]
-                    returns[period] = (current_price - past_price) / past_price
+                    if past_price > 0:
+                        returns[period] = (current_price - past_price) / past_price
+                    else:
+                        returns[period] = 0.0
                 else:
                     returns[period] = 0.0
 
@@ -226,6 +236,7 @@ class CommoditySectorRotation:
                 daily_returns = [
                     (prices[i][1] - prices[i-1][1]) / prices[i-1][1]
                     for i in range(len(prices) - 20, len(prices))
+                    if prices[i-1][1] > 0  # Guard against division by zero
                 ]
                 volatility = statistics.stdev(daily_returns) * math.sqrt(252)
             else:
@@ -242,7 +253,10 @@ class CommoditySectorRotation:
             if len(prices) >= self.lookback_trend:
                 ma_prices = [p for _, p in prices[-self.lookback_trend:]]
                 ma = statistics.mean(ma_prices)
-                trend = (current_price - ma) / ma
+                if ma > 0:
+                    trend = (current_price - ma) / ma
+                else:
+                    trend = 0.0
             else:
                 trend = 0.0
 
@@ -295,7 +309,10 @@ class CommoditySectorRotation:
 
         overweight = [m.sector for m in sorted_metrics[:n_third]]
         underweight = [m.sector for m in sorted_metrics[-n_third:]]
-        neutral = [m.sector for m in sorted_metrics[n_third:-n_third] if n_third < n - n_third]
+        if n_third < n - n_third:
+            neutral = [m.sector for m in sorted_metrics[n_third:-n_third]]
+        else:
+            neutral = []
 
         # Calculate recommended weights
         total_sectors = len(sorted_metrics)
@@ -317,7 +334,7 @@ class CommoditySectorRotation:
         # Signal strength based on spread
         if len(sorted_metrics) >= 2:
             spread = sorted_metrics[0].relative_strength - sorted_metrics[-1].relative_strength
-            signal_strength = min(1.0, abs(spread) / 0.20)  # Normalize to ~20% spread
+            signal_strength = min(1.0, abs(spread) / SIGNAL_STRENGTH_NORMALIZATION_FACTOR)
         else:
             signal_strength = 0.5
 
@@ -465,6 +482,10 @@ class CommodityIndexTracker:
                 price = relevant_prices[-1]
             else:
                 price = prices[-1][1]
+
+            # Validate price before use
+            if price <= 0:
+                continue
 
             total_value += price * weight
             total_weight += weight
