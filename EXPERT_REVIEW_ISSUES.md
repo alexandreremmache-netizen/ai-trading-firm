@@ -221,11 +221,11 @@
 - [x] **#P13** Missing portfolio heat map visualization (FIXED: Added PortfolioHeatMapGenerator for performance, risk, correlation, P&L calendar heatmaps)
 
 ### MEDIUM (6)
-- [ ] **#P14** No target portfolio construction
-- [ ] **#P15** Trade list generation incomplete
+- [x] **#P14** No target portfolio construction (FIXED: Created core/portfolio_construction.py with TargetPortfolioBuilder, equal/market-cap/risk-parity weighting)
+- [x] **#P15** Trade list generation incomplete (FIXED: Added TradeListGenerator in core/portfolio_construction.py with full/threshold/tax-aware rebalancing, cost estimation)
 - [x] **#P16** No what-if analysis support (FIXED: Added WhatIfAnalyzer in core/scenario_analysis.py with position change analysis, risk impact calculation, hedge optimization)
 - [x] **#P17** Historical portfolio snapshots not stored (FIXED: Created core/portfolio_snapshots.py with PortfolioSnapshotStore, SQLite storage, periodic capture, comparison tools)
-- [ ] **#P18** No portfolio comparison tools
+- [x] **#P18** No portfolio comparison tools (FIXED: Added PortfolioComparator in core/portfolio_construction.py with weight diff analysis, sector comparison, drift tracking)
 - [ ] **#P19** Missing custom reporting
 
 ### LOW (2)
@@ -253,8 +253,8 @@
 - [ ] **#S10** Missing dependency injection framework
 - [x] **#S11** Logging not structured (JSON) (FIXED: Created core/structured_logging.py with JsonFormatter, StructuredLogger, correlation ID tracking, async logging, log aggregation, ELK/Splunk compatible output)
 - [ ] **#S12** No distributed tracing support
-- [ ] **#S13** Memory usage not bounded for caches
-- [ ] **#S14** No rate limiting on internal APIs
+- [x] **#S13** Memory usage not bounded for caches (FIXED: Created core/cache_manager.py with BoundedLRUCache, memory limits, TTL expiration, LRU eviction)
+- [x] **#S14** No rate limiting on internal APIs (FIXED: Added TokenBucketRateLimiter, RateLimiterManager in core/cache_manager.py with burst support, decorators)
 
 ### LOW (3)
 - [ ] **#S15** No performance profiling hooks
@@ -395,7 +395,7 @@
 ## Fix Progress Tracking
 
 **Last Updated**: 2026-02-02
-**Total Issues Fixed**: 128 CRITICAL/HIGH issues + 41 MEDIUM priority issues = 169 total
+**Total Issues Fixed**: 128 CRITICAL/HIGH issues + 50 MEDIUM priority issues = 178 total
 
 ### Completed Fixes (CRITICAL)
 - [x] #Q1 - MACD signal line calculation (momentum_strategy.py)
