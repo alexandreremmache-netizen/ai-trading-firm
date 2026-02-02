@@ -78,7 +78,7 @@
 
 ### MEDIUM (14)
 - [x] **#R12** No risk factor decomposition (beta, duration, etc.) (FIXED: Created core/risk_factors.py with FactorModel, multi-factor analysis, systematic vs idiosyncratic decomposition, risk contribution attribution)
-- [ ] **#R13** Missing Conditional VaR (CVaR) threshold alerts
+- [x] **#R13** Missing Conditional VaR (CVaR) threshold alerts (FIXED: Added CVaR alert system in risk_agent.py with warning/critical/halt thresholds, cooldown, trading halt on extreme CVaR)
 - [ ] **#R14** No cross-margin benefit calculation
 - [ ] **#R15** Greeks sensitivity analysis not comprehensive
 - [ ] **#R16** No risk contribution attribution by strategy
@@ -395,7 +395,7 @@
 ## Fix Progress Tracking
 
 **Last Updated**: 2026-02-02
-**Total Issues Fixed**: 128 CRITICAL/HIGH issues + 13 MEDIUM priority issues = 141 total
+**Total Issues Fixed**: 128 CRITICAL/HIGH issues + 14 MEDIUM priority issues = 142 total
 
 ### Completed Fixes (CRITICAL)
 - [x] #Q1 - MACD signal line calculation (momentum_strategy.py)
@@ -520,6 +520,7 @@ All CRITICAL and HIGH priority issues have been addressed! (128 total)
 - [x] #S11 - Structured JSON logging (core/structured_logging.py)
 - [x] #X9 - FX session awareness (core/fx_sessions.py)
 - [x] #E24 - Order timeout handling (agents/execution_agent.py)
+- [x] #R13 - CVaR threshold alerts (agents/risk_agent.py)
 
 ---
 

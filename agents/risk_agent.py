@@ -316,6 +316,16 @@ class RiskAgent(ValidationAgent):
         self._max_daily_loss_pct = limits.get("max_daily_loss_pct", 3.0) / 100
         self._max_drawdown_pct = limits.get("max_drawdown_pct", 10.0) / 100
 
+        # CVaR (Expected Shortfall) threshold alerts (#R13)
+        cvar_config = config.parameters.get("cvar_alerts", {})
+        self._cvar_alerts_enabled = cvar_config.get("enabled", True)
+        self._cvar_warning_pct = cvar_config.get("warning_pct", 2.5) / 100  # Warning at 2.5%
+        self._cvar_critical_pct = cvar_config.get("critical_pct", 4.0) / 100  # Critical at 4%
+        self._cvar_halt_pct = cvar_config.get("halt_pct", 5.0) / 100  # Halt trading at 5%
+        self._last_cvar_alert_level: str | None = None
+        self._cvar_alert_cooldown_seconds = cvar_config.get("cooldown_seconds", 300)  # 5 min between alerts
+        self._last_cvar_alert_time: datetime | None = None
+
         # Tiered drawdown thresholds
         drawdown_config = config.parameters.get("drawdown", {})
         self._drawdown_warning_pct = drawdown_config.get("warning_pct", 5.0) / 100      # 5%: Warning
@@ -1285,6 +1295,135 @@ class RiskAgent(ValidationAgent):
         var_95_threshold = np.percentile(returns, 5)
         tail_returns = returns[returns <= var_95_threshold]
         self._risk_state.expected_shortfall = -np.mean(tail_returns) if len(tail_returns) > 0 else self._risk_state.var_95
+
+        # Check CVaR alerts (#R13) - schedule async check
+        asyncio.create_task(self._check_cvar_alerts())
+
+    # =========================================================================
+    # CVAR THRESHOLD ALERTS (#R13)
+    # =========================================================================
+
+    async def _check_cvar_alerts(self) -> None:
+        """
+        Check CVaR (Expected Shortfall) against thresholds and issue alerts (#R13).
+
+        Three alert levels:
+        - WARNING: CVaR exceeds warning threshold (default 2.5%)
+        - CRITICAL: CVaR exceeds critical threshold (default 4%)
+        - HALT: CVaR exceeds halt threshold (default 5%), triggers trading halt
+        """
+        if not self._cvar_alerts_enabled:
+            return
+
+        cvar = self._risk_state.expected_shortfall
+        if cvar is None or cvar == 0:
+            return
+
+        now = datetime.now(timezone.utc)
+
+        # Check cooldown to avoid alert spam
+        if self._last_cvar_alert_time:
+            elapsed = (now - self._last_cvar_alert_time).total_seconds()
+            if elapsed < self._cvar_alert_cooldown_seconds:
+                return
+
+        # Determine alert level
+        new_alert_level = None
+        halt_trading = False
+
+        if cvar >= self._cvar_halt_pct:
+            new_alert_level = "HALT"
+            halt_trading = True
+        elif cvar >= self._cvar_critical_pct:
+            new_alert_level = "CRITICAL"
+        elif cvar >= self._cvar_warning_pct:
+            new_alert_level = "WARNING"
+        else:
+            # Below all thresholds - clear previous alert
+            if self._last_cvar_alert_level is not None:
+                logger.info(f"CVaR returned to normal ({cvar*100:.2f}%)")
+                self._last_cvar_alert_level = None
+            return
+
+        # Only alert if level changed or is critical/halt
+        if new_alert_level == self._last_cvar_alert_level and new_alert_level == "WARNING":
+            return  # Don't repeat warnings
+
+        self._last_cvar_alert_level = new_alert_level
+        self._last_cvar_alert_time = now
+
+        # Log alert
+        logger.warning(
+            f"CVAR ALERT [{new_alert_level}]: Expected Shortfall = {cvar*100:.2f}% "
+            f"(warning={self._cvar_warning_pct*100:.1f}%, critical={self._cvar_critical_pct*100:.1f}%, "
+            f"halt={self._cvar_halt_pct*100:.1f}%)"
+        )
+
+        # Audit log
+        self._audit_logger.log_risk_alert(
+            agent_name=self.agent_id,
+            alert_type="CVaR_THRESHOLD",
+            severity=new_alert_level,
+            message=f"CVaR of {cvar*100:.2f}% exceeds {new_alert_level.lower()} threshold",
+            current_value=cvar,
+            threshold_value=self._cvar_warning_pct if new_alert_level == "WARNING" else (
+                self._cvar_critical_pct if new_alert_level == "CRITICAL" else self._cvar_halt_pct
+            ),
+            halt_trading=halt_trading,
+        )
+
+        # Publish alert event
+        alert_event = RiskAlertEvent(
+            source_agent=self.agent_id,
+            alert_type=f"CVaR_{new_alert_level}",
+            severity=new_alert_level.lower(),
+            message=f"Expected Shortfall (CVaR) = {cvar*100:.2f}%",
+            current_value=cvar,
+            threshold_value=self._cvar_halt_pct if halt_trading else (
+                self._cvar_critical_pct if new_alert_level == "CRITICAL" else self._cvar_warning_pct
+            ),
+            timestamp=now,
+        )
+        await self._event_bus.publish(alert_event)
+
+        # Trigger halt if necessary
+        if halt_trading:
+            await self._trigger_cvar_halt(cvar)
+
+    async def _trigger_cvar_halt(self, cvar: float) -> None:
+        """
+        Trigger trading halt due to excessive CVaR (#R13).
+
+        This is a severe risk event requiring manual intervention.
+        """
+        reason = f"CVaR ({cvar*100:.2f}%) exceeds halt threshold ({self._cvar_halt_pct*100:.1f}%)"
+        logger.critical(f"TRADING HALT: {reason}")
+
+        self._kill_switch_active = True
+        self._kill_switch_reason = KillSwitchReason.RISK_LIMIT_BREACH
+        self._kill_switch_time = datetime.now(timezone.utc)
+
+        # Publish kill switch event
+        kill_event = KillSwitchEvent(
+            source_agent=self.agent_id,
+            reason=reason,
+            cancel_pending_orders=True,
+            close_positions=False,  # Don't auto-liquidate, but require human review
+        )
+        await self._event_bus.publish(kill_event)
+
+    def get_cvar_alert_status(self) -> dict:
+        """Get current CVaR alert status (#R13)."""
+        return {
+            "enabled": self._cvar_alerts_enabled,
+            "current_cvar": self._risk_state.expected_shortfall,
+            "warning_threshold": self._cvar_warning_pct,
+            "critical_threshold": self._cvar_critical_pct,
+            "halt_threshold": self._cvar_halt_pct,
+            "last_alert_level": self._last_cvar_alert_level,
+            "last_alert_time": self._last_cvar_alert_time.isoformat() if self._last_cvar_alert_time else None,
+            "status": "OK" if self._last_cvar_alert_level is None else self._last_cvar_alert_level,
+        }
 
     # =========================================================================
     # INTRADAY VAR RECALCULATION (#R2)
