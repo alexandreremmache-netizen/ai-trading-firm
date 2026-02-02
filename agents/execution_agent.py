@@ -383,6 +383,13 @@ class ExecutionAgentImpl(ExecutionAgentBase):
         self._stop_check_interval_seconds = config.parameters.get("stop_check_interval_seconds", 0.1)
         self._stop_order_monitor_task: asyncio.Task | None = None
 
+        # Order timeout handling (#E24)
+        self._order_timeout_seconds = config.parameters.get("order_timeout_seconds", 300)  # 5 min default
+        self._algo_timeout_seconds = config.parameters.get("algo_timeout_seconds", 3600)  # 1 hour for TWAP/VWAP
+        self._timeout_check_interval = config.parameters.get("timeout_check_interval_seconds", 10)
+        self._order_timeout_monitor_task: asyncio.Task | None = None
+        self._timed_out_orders: list[str] = []  # Track timed out order IDs
+
         # Kill switch state
         self._kill_switch_active = False
         self._kill_switch_reason = ""
@@ -1534,6 +1541,181 @@ class ExecutionAgentImpl(ExecutionAgentBase):
         # Audit log the trigger
         self._audit_logger.log_event(order)
 
+    # =========================================================================
+    # ORDER TIMEOUT HANDLING (#E24)
+    # =========================================================================
+
+    def start_order_timeout_monitor(self) -> None:
+        """
+        Start background task to monitor order timeouts (#E24).
+
+        Cancels orders that exceed configured timeout thresholds.
+        """
+        if self._order_timeout_monitor_task is not None:
+            logger.warning("Order timeout monitor already running")
+            return
+
+        self._order_timeout_monitor_task = asyncio.create_task(
+            self._order_timeout_monitor_loop()
+        )
+        logger.info(
+            f"Order timeout monitor started (simple={self._order_timeout_seconds}s, "
+            f"algo={self._algo_timeout_seconds}s)"
+        )
+
+    async def stop_order_timeout_monitor(self) -> None:
+        """Stop the order timeout monitor task."""
+        if self._order_timeout_monitor_task is not None:
+            self._order_timeout_monitor_task.cancel()
+            try:
+                await self._order_timeout_monitor_task
+            except asyncio.CancelledError:
+                pass
+            self._order_timeout_monitor_task = None
+            logger.info("Order timeout monitor stopped")
+
+    async def _order_timeout_monitor_loop(self) -> None:
+        """
+        Background loop that checks for timed-out orders (#E24).
+
+        Orders are cancelled if they exceed their timeout threshold:
+        - Simple orders (MARKET/LIMIT): order_timeout_seconds (default 5 min)
+        - Algorithmic orders (TWAP/VWAP): algo_timeout_seconds (default 1 hour)
+        """
+        while True:
+            try:
+                await self._check_and_cancel_timed_out_orders()
+                await asyncio.sleep(self._timeout_check_interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in order timeout monitor: {e}")
+                await asyncio.sleep(5.0)  # Back off on error
+
+    async def _check_and_cancel_timed_out_orders(self) -> None:
+        """
+        Check all pending orders for timeout and cancel expired ones (#E24).
+
+        Timeout thresholds:
+        - MARKET/LIMIT: _order_timeout_seconds
+        - TWAP/VWAP: _algo_timeout_seconds
+        """
+        if self._kill_switch_active:
+            return
+
+        now = datetime.now(timezone.utc)
+        orders_to_cancel = []
+
+        for order_id, pending in self._pending_orders.items():
+            order = pending.order_event
+
+            # Skip already completed/cancelled orders
+            if pending.state in (OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED):
+                continue
+
+            # Determine timeout based on order type
+            if order.algo in ("TWAP", "VWAP"):
+                timeout_seconds = self._algo_timeout_seconds
+            else:
+                timeout_seconds = self._order_timeout_seconds
+
+            # Calculate age
+            order_age = (now - pending.submitted_at).total_seconds()
+
+            # Check for timeout
+            if order_age > timeout_seconds:
+                orders_to_cancel.append((order_id, order_age, timeout_seconds))
+
+        # Cancel timed out orders
+        for order_id, age, timeout in orders_to_cancel:
+            await self._cancel_timed_out_order(order_id, age, timeout)
+
+    async def _cancel_timed_out_order(
+        self,
+        order_id: str,
+        age_seconds: float,
+        timeout_seconds: float,
+    ) -> None:
+        """
+        Cancel a single timed-out order (#E24).
+
+        Args:
+            order_id: Order to cancel
+            age_seconds: How old the order is
+            timeout_seconds: The timeout threshold it exceeded
+        """
+        pending = self._pending_orders.get(order_id)
+        if pending is None:
+            return
+
+        order = pending.order_event
+
+        logger.warning(
+            f"ORDER TIMEOUT: {order.side.value} {order.quantity} {order.symbol} "
+            f"(order_id={order_id}, age={age_seconds:.0f}s, timeout={timeout_seconds}s)"
+        )
+
+        # Track timed out orders
+        self._timed_out_orders.append(order_id)
+
+        # Attempt to cancel any open broker orders
+        for broker_order_id in pending.active_broker_orders:
+            try:
+                self._broker.cancel_order(broker_order_id)
+                logger.info(f"Cancelled broker order {broker_order_id} due to timeout")
+            except Exception as e:
+                logger.error(f"Failed to cancel broker order {broker_order_id}: {e}")
+
+        # Update state
+        pending.transition_state(
+            OrderState.CANCELLED,
+            f"Timed out after {age_seconds:.0f} seconds (limit={timeout_seconds}s)"
+        )
+
+        # Publish state change event
+        state_change = OrderStateChangeEvent(
+            source_agent=self.agent_id,
+            order_id=order_id,
+            symbol=order.symbol,
+            old_state=OrderState.WORKING,
+            new_state=OrderState.CANCELLED,
+            reason=f"Order timeout ({age_seconds:.0f}s)",
+        )
+        await self._event_bus.publish(state_change)
+
+        # Audit log
+        self._audit_logger.log_agent_event(
+            agent_name=self.agent_id,
+            event_type="order_timeout",
+            details={
+                "order_id": order_id,
+                "symbol": order.symbol,
+                "side": order.side.value,
+                "quantity": order.quantity,
+                "filled_quantity": pending.filled_quantity,
+                "age_seconds": age_seconds,
+                "timeout_seconds": timeout_seconds,
+                "algo": order.algo,
+            },
+        )
+
+    def get_timed_out_orders(self) -> list[str]:
+        """Get list of order IDs that have been cancelled due to timeout."""
+        return self._timed_out_orders.copy()
+
+    def get_order_age(self, order_id: str) -> float | None:
+        """
+        Get age of an order in seconds (#E24).
+
+        Returns None if order not found.
+        """
+        pending = self._pending_orders.get(order_id)
+        if pending is None:
+            return None
+
+        now = datetime.now(timezone.utc)
+        return (now - pending.submitted_at).total_seconds()
+
     async def _execute_limit_order(self, pending: PendingOrder) -> None:
         """
         Execute a limit order (used for triggered stop-limit orders).
@@ -1733,6 +1915,8 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             "orders_this_minute": len(self._order_timestamps),
             "max_orders_per_minute": self._max_orders_per_minute,
             "stop_monitor_running": self._stop_order_monitor_task is not None and not self._stop_order_monitor_task.done(),
+            "timeout_monitor_running": self._order_timeout_monitor_task is not None and not self._order_timeout_monitor_task.done(),  # #E24
+            "timed_out_orders": len(self._timed_out_orders),  # #E24
             "symbols_with_prices": len(self._last_prices),
             # Fill quality summary (#E13)
             "fill_quality": self.get_aggregate_fill_metrics(),
