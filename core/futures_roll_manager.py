@@ -513,6 +513,10 @@ class FuturesRollManager:
                             year = (year // 10) * 10 + int(year_part)
                         else:
                             year = (year // 100) * 100 + int(year_part)
+
+            # Raise error if parsing completely failed
+            if not month_code:
+                raise ValueError(f"Could not parse contract code: {contract_code}")
         else:
             _, month_code, year = parsed
 
@@ -1068,6 +1072,167 @@ def get_contract_expiry(symbol: str, month_code: str, year: int) -> date | None:
         return date(year, month, 15) - timedelta(days=1)
 
     return third_friday
+
+
+def estimate_first_notice_date(symbol: str, contract_month: str, contract_year: int) -> date | None:
+    """
+    P2-18: Automatically estimate First Notice Date (FND) for physical delivery contracts.
+
+    FND varies by exchange and commodity type:
+    - CME Energy (CL, NG): Last business day of month prior to delivery month
+    - CME Metals (GC, SI): Last business day of month prior to delivery month
+    - CME Grains (ZC, ZW, ZS): Last business day of month prior to delivery month
+    - COMEX (HG): 2 business days before 1st delivery day
+    - Cash-settled contracts (ES, NQ, etc.): No FND (returns None)
+
+    Args:
+        symbol: Futures symbol (e.g., "CL", "GC")
+        contract_month: Contract month code (F, G, H, J, K, M, N, Q, U, V, X, Z)
+        contract_year: Contract year
+
+    Returns:
+        Estimated FND date, or None for cash-settled contracts
+    """
+    # Month code to month number mapping
+    month_map = {
+        "F": 1, "G": 2, "H": 3, "J": 4, "K": 5, "M": 6,
+        "N": 7, "Q": 8, "U": 9, "V": 10, "X": 11, "Z": 12
+    }
+
+    delivery_month = month_map.get(contract_month.upper())
+    if delivery_month is None:
+        return None
+
+    spec = CONTRACT_SPECS.get(symbol)
+
+    # Cash-settled contracts have no FND
+    CASH_SETTLED = {"ES", "NQ", "RTY", "YM", "EMD", "VIX", "VX"}
+    if symbol.upper() in CASH_SETTLED:
+        return None
+
+    if spec and not spec.is_physical_delivery:
+        return None
+
+    # Get the delivery month's first day
+    delivery_date = date(contract_year, delivery_month, 1)
+
+    # FND rules by asset class
+    ENERGY_SYMBOLS = {"CL", "NG", "RB", "HO", "BZ"}
+    METALS_SYMBOLS = {"GC", "SI", "HG", "PL", "PA"}
+    GRAINS_SYMBOLS = {"ZC", "ZW", "ZS", "ZM", "ZL", "ZO"}
+    SOFTS_SYMBOLS = {"KC", "SB", "CC", "CT", "OJ"}
+    LIVESTOCK_SYMBOLS = {"LE", "HE", "GF"}
+
+    symbol_upper = symbol.upper()
+
+    if symbol_upper in ENERGY_SYMBOLS:
+        # Energy: Last business day of month BEFORE delivery month
+        # If delivery is March, FND is last business day of February
+        prior_month = delivery_month - 1
+        prior_year = contract_year
+        if prior_month == 0:
+            prior_month = 12
+            prior_year -= 1
+
+        # Find last business day of prior month
+        if prior_month in (1, 3, 5, 7, 8, 10, 12):
+            last_day = 31
+        elif prior_month in (4, 6, 9, 11):
+            last_day = 30
+        else:  # February
+            if (prior_year % 4 == 0 and prior_year % 100 != 0) or (prior_year % 400 == 0):
+                last_day = 29
+            else:
+                last_day = 28
+
+        fnd = date(prior_year, prior_month, last_day)
+        # Adjust for weekends (move to Friday)
+        while fnd.weekday() >= 5:
+            fnd -= timedelta(days=1)
+        return fnd
+
+    elif symbol_upper in METALS_SYMBOLS:
+        # Metals: Last business day of month before delivery
+        prior_month = delivery_month - 1
+        prior_year = contract_year
+        if prior_month == 0:
+            prior_month = 12
+            prior_year -= 1
+
+        if prior_month in (1, 3, 5, 7, 8, 10, 12):
+            last_day = 31
+        elif prior_month in (4, 6, 9, 11):
+            last_day = 30
+        else:
+            if (prior_year % 4 == 0 and prior_year % 100 != 0) or (prior_year % 400 == 0):
+                last_day = 29
+            else:
+                last_day = 28
+
+        fnd = date(prior_year, prior_month, last_day)
+        while fnd.weekday() >= 5:
+            fnd -= timedelta(days=1)
+        return fnd
+
+    elif symbol_upper in GRAINS_SYMBOLS:
+        # Grains: Last business day of month before delivery
+        prior_month = delivery_month - 1
+        prior_year = contract_year
+        if prior_month == 0:
+            prior_month = 12
+            prior_year -= 1
+
+        if prior_month in (1, 3, 5, 7, 8, 10, 12):
+            last_day = 31
+        elif prior_month in (4, 6, 9, 11):
+            last_day = 30
+        else:
+            if (prior_year % 4 == 0 and prior_year % 100 != 0) or (prior_year % 400 == 0):
+                last_day = 29
+            else:
+                last_day = 28
+
+        fnd = date(prior_year, prior_month, last_day)
+        while fnd.weekday() >= 5:
+            fnd -= timedelta(days=1)
+        return fnd
+
+    elif symbol_upper in SOFTS_SYMBOLS or symbol_upper in LIVESTOCK_SYMBOLS:
+        # Softs/Livestock: Typically 5 business days before delivery month
+        fnd = delivery_date - timedelta(days=7)
+        while fnd.weekday() >= 5:
+            fnd -= timedelta(days=1)
+        return fnd
+
+    # Default for unknown physical delivery: 3 business days before delivery month
+    fnd = delivery_date - timedelta(days=5)
+    while fnd.weekday() >= 5:
+        fnd -= timedelta(days=1)
+    return fnd
+
+
+def get_fnd_with_auto_estimate(
+    symbol: str,
+    contract_month: str,
+    contract_year: int,
+    manual_fnd: date | None = None
+) -> date | None:
+    """
+    P2-18: Get FND with automatic estimation fallback.
+
+    Args:
+        symbol: Futures symbol
+        contract_month: Contract month code
+        contract_year: Contract year
+        manual_fnd: Manually specified FND (takes precedence if provided)
+
+    Returns:
+        FND date (manual if provided, else estimated, else None for cash-settled)
+    """
+    if manual_fnd is not None:
+        return manual_fnd
+
+    return estimate_first_notice_date(symbol, contract_month, contract_year)
 
 
 # =============================================================================

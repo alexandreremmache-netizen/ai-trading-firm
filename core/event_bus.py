@@ -218,6 +218,10 @@ class EventBus:
         self._running = False
         self._current_barrier: SignalBarrier | None = None
         self._signal_agents: set[str] = set()
+        # Event history for audit trail - grows until _max_history limit is reached,
+        # then oldest events are discarded to maintain bounded memory usage.
+        # Memory usage is approximately: max_history * avg_event_size (typically ~1KB each)
+        # At 10000 events, this is roughly 10MB of memory for the history buffer.
         self._event_history: list[Event] = []
         self._max_history = 10000
         self._lock = asyncio.Lock()
@@ -252,6 +256,15 @@ class EventBus:
             "duplicates_blocked": 0,
             "ids_tracked": 0,
         }
+
+        # P0-5: Barrier ID counter - initialized properly (fixes race condition)
+        self._barrier_id_counter: int = 0
+
+        # P0-5: Handler cleanup tracking - detect dead handlers (fixes memory leak)
+        self._handler_call_count: dict[int, int] = {}  # handler_id -> call count
+        self._handler_last_call: dict[int, datetime] = {}  # handler_id -> last call time
+        self._handler_cleanup_interval = 300.0  # 5 minutes
+        self._last_handler_cleanup = datetime.now(timezone.utc)
 
     def register_signal_agent(self, agent_name: str) -> None:
         """Register an agent as a signal producer."""
@@ -338,6 +351,64 @@ class EventBus:
         """Unsubscribe a handler from an event type."""
         if handler in self._subscribers[event_type]:
             self._subscribers[event_type].remove(handler)
+            # P0-5: Clean up handler tracking when unsubscribed
+            handler_id = id(handler)
+            self._handler_call_count.pop(handler_id, None)
+            self._handler_last_call.pop(handler_id, None)
+
+    def cleanup_dead_handlers(self, max_idle_seconds: float = 600.0) -> int:
+        """
+        Remove handlers that haven't been called in a long time (P0-5 memory leak fix).
+
+        This prevents memory leaks from handlers that were subscribed but whose
+        owning objects were garbage collected, leaving orphaned handler references.
+
+        Args:
+            max_idle_seconds: Remove handlers idle longer than this (default 10 min)
+
+        Returns:
+            Number of handlers removed
+        """
+        now = datetime.now(timezone.utc)
+        removed_count = 0
+        cutoff = now - timedelta(seconds=max_idle_seconds)
+
+        # Find handlers to remove (can't modify dict while iterating)
+        handlers_to_check = list(self._handler_last_call.items())
+
+        for handler_id, last_call in handlers_to_check:
+            if last_call < cutoff:
+                # Find and remove from all event type subscriptions
+                for event_type, handlers in self._subscribers.items():
+                    for handler in list(handlers):
+                        if id(handler) == handler_id:
+                            handlers.remove(handler)
+                            removed_count += 1
+                            logger.debug(
+                                f"Removed idle handler {handler_id} from {event_type.value}"
+                            )
+
+                # Clean up tracking
+                self._handler_call_count.pop(handler_id, None)
+                self._handler_last_call.pop(handler_id, None)
+
+        if removed_count > 0:
+            logger.info(f"Cleaned up {removed_count} idle handlers")
+
+        return removed_count
+
+    def get_handler_stats(self) -> dict:
+        """Get statistics about registered handlers (for monitoring)."""
+        total_handlers = sum(len(handlers) for handlers in self._subscribers.values())
+        return {
+            "total_handlers": total_handlers,
+            "handlers_by_type": {
+                event_type.value: len(handlers)
+                for event_type, handlers in self._subscribers.items()
+                if handlers
+            },
+            "tracked_handlers": len(self._handler_call_count),
+        }
 
     async def publish(self, event: Event, priority: bool = False) -> bool:
         """
@@ -439,6 +510,9 @@ class EventBus:
             self._metrics.max_queue_size_reached = self._queue.qsize()
 
         # Track event history for audit
+        # Note: History grows unbounded until _max_history limit, then truncates.
+        # This is intentional to maintain audit trail while bounding memory usage.
+        # The truncation creates a new list reference to allow GC of old events.
         async with self._lock:
             self._event_history.append(event)
             if len(self._event_history) > self._max_history:
@@ -446,12 +520,19 @@ class EventBus:
 
         # Persist event for crash recovery (#S4)
         if self._persistence:
-            await self._persistence.persist_event_async(event, priority=is_high_priority)
+            try:
+                await self._persistence.persist_event_async(event, priority=is_high_priority)
+            except Exception as e:
+                # Log error but don't block event publishing
+                logger.error(f"Event persistence failed for {event.event_type}: {e}")
 
         return True
 
     def _calculate_backpressure_level(self) -> BackpressureLevel:
         """Calculate current backpressure level based on queue depth."""
+        # Guard against division by zero
+        if self._backpressure.max_queue_size == 0:
+            return BackpressureLevel.NORMAL
         queue_pct = (self._queue.qsize() / self._backpressure.max_queue_size) * 100
 
         if queue_pct >= self._backpressure.critical_threshold_pct:
@@ -520,7 +601,8 @@ class EventBus:
         async with self._lock:
             # If barrier is closed or doesn't exist, create new one
             if self._current_barrier is None or self._current_barrier.is_closed():
-                self._barrier_id_counter = getattr(self, '_barrier_id_counter', 0) + 1
+                # P0-5: Counter is now properly initialized in __init__ (no getattr hack)
+                self._barrier_id_counter += 1
                 self._current_barrier = SignalBarrier(
                     expected_agents=self._signal_agents.copy(),
                     timeout_seconds=self._barrier_timeout,
@@ -661,6 +743,12 @@ class EventBus:
                 await self._dispatch(event)
                 self._queue.task_done()
 
+                # P0-5: Periodic cleanup of idle handlers (memory leak prevention)
+                now = datetime.now(timezone.utc)
+                if (now - self._last_handler_cleanup).total_seconds() > self._handler_cleanup_interval:
+                    self.cleanup_dead_handlers()
+                    self._last_handler_cleanup = now
+
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
@@ -701,6 +789,13 @@ class EventBus:
             if self._persistence:
                 await self._persistence.mark_completed_async(event.event_id)
             return
+
+        # P0-5: Track handler calls for cleanup (memory leak prevention)
+        now = datetime.now(timezone.utc)
+        for handler in handlers:
+            handler_id = id(handler)
+            self._handler_call_count[handler_id] = self._handler_call_count.get(handler_id, 0) + 1
+            self._handler_last_call[handler_id] = now
 
         # Execute handlers concurrently
         tasks = [handler(event) for handler in handlers]

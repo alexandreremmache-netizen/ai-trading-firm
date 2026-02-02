@@ -27,6 +27,9 @@ class MomentumSignal:
     strength: float  # -1 to 1
     confidence: float  # 0 to 1
     indicators: dict[str, float]
+    # P1-13: Stop-loss levels to limit downside risk
+    stop_loss_price: float | None = None  # Absolute price level for stop
+    stop_loss_pct: float | None = None    # Percentage from entry
 
 
 class MomentumStrategy:
@@ -58,6 +61,12 @@ class MomentumStrategy:
         self._macd_fast = config.get("macd_fast_period", 12)
         self._macd_slow = config.get("macd_slow_period", 26)
         self._macd_signal = config.get("macd_signal_period", 9)
+
+        # P1-13: Stop-loss settings
+        self._stop_loss_atr_multiplier = config.get("stop_loss_atr_multiplier", 2.0)
+        self._stop_loss_pct = config.get("stop_loss_pct", 2.0)  # Default 2%
+        self._use_atr_stop = config.get("use_atr_stop", True)  # ATR-based by default
+        self._atr_period = config.get("atr_period", 14)
 
     def calculate_sma(self, prices: np.ndarray, period: int) -> float:
         """Calculate Simple Moving Average."""
@@ -176,7 +185,9 @@ class MomentumStrategy:
         # Calculate signal line (9-period EMA of MACD)
         signal_series = self.calculate_ema_series(valid_macd, self._macd_signal)
 
-        # Get current values
+        # Get current values - check array is not empty before accessing
+        if len(valid_macd) == 0:
+            return 0.0, 0.0, 0.0
         macd = valid_macd[-1]
         signal = signal_series[-1] if not np.isnan(signal_series[-1]) else 0.0
         histogram = macd - signal
@@ -191,6 +202,72 @@ class MomentumStrategy:
             return 0.0
 
         return (prices[-1] - prices[-period - 1]) / prices[-period - 1] * 100
+
+    def calculate_atr(
+        self,
+        prices: np.ndarray,
+        highs: np.ndarray | None = None,
+        lows: np.ndarray | None = None,
+        period: int = 14
+    ) -> float:
+        """
+        P1-13: Calculate Average True Range for stop-loss placement.
+
+        If highs/lows not provided, estimates from price changes.
+        """
+        if len(prices) < period + 1:
+            return 0.0
+
+        if highs is not None and lows is not None and len(highs) >= period:
+            # Use actual high/low/close data
+            true_ranges = []
+            for i in range(1, min(len(prices), len(highs), len(lows))):
+                tr = max(
+                    highs[i] - lows[i],
+                    abs(highs[i] - prices[i-1]),
+                    abs(lows[i] - prices[i-1])
+                )
+                true_ranges.append(tr)
+
+            if len(true_ranges) >= period:
+                return np.mean(true_ranges[-period:])
+
+        # Fallback: estimate from close prices
+        # Use absolute daily changes as proxy for volatility
+        changes = np.abs(np.diff(prices[-period-1:]))
+        return np.mean(changes) * 1.5  # Scale up since we're missing high/low
+
+    def calculate_stop_loss(
+        self,
+        current_price: float,
+        direction: str,
+        atr: float
+    ) -> tuple[float, float]:
+        """
+        P1-13: Calculate stop-loss price and percentage.
+
+        Args:
+            current_price: Entry price
+            direction: "long" or "short"
+            atr: Average True Range
+
+        Returns:
+            (stop_price, stop_pct)
+        """
+        if self._use_atr_stop and atr > 0:
+            stop_distance = atr * self._stop_loss_atr_multiplier
+        else:
+            stop_distance = current_price * (self._stop_loss_pct / 100)
+
+        if direction == "long":
+            stop_price = current_price - stop_distance
+        elif direction == "short":
+            stop_price = current_price + stop_distance
+        else:
+            return None, None
+
+        stop_pct = (stop_distance / current_price) * 100
+        return stop_price, stop_pct
 
     def analyze(self, symbol: str, prices: np.ndarray) -> MomentumSignal:
         """
@@ -274,10 +351,25 @@ class MomentumStrategy:
         agreement = sum(1 for s in scores if s == np.sign(total_score)) / len(scores)
         confidence = agreement
 
+        # P1-13: Calculate stop-loss if we have a directional signal
+        stop_loss_price = None
+        stop_loss_pct = None
+        if direction != "flat":
+            current_price = prices[-1]
+            atr = self.calculate_atr(prices, period=self._atr_period)
+            stop_loss_price, stop_loss_pct = self.calculate_stop_loss(
+                current_price, direction, atr
+            )
+            indicators["atr"] = atr
+            indicators["stop_loss_price"] = stop_loss_price
+            indicators["stop_loss_pct"] = stop_loss_pct
+
         return MomentumSignal(
             symbol=symbol,
             direction=direction,
             strength=strength,
             confidence=confidence,
             indicators=indicators,
+            stop_loss_price=stop_loss_price,
+            stop_loss_pct=stop_loss_pct,
         )

@@ -1274,7 +1274,8 @@ class RiskAgent(ValidationAgent):
             await self.refresh_margin_from_broker()
 
         except Exception as e:
-            logger.error(f"Failed to refresh portfolio state: {e}")
+            # Broad catch - portfolio refresh is periodic, system continues on failure
+            logger.exception(f"Failed to refresh portfolio state: {e}")
 
     def _calculate_var(self) -> None:
         """Calculate Value at Risk (parametric method)."""
@@ -1705,12 +1706,14 @@ class RiskAgent(ValidationAgent):
                     if success:
                         cancelled_count += 1
                 except Exception as e:
-                    logger.error(f"Failed to cancel order {order['order_id']}: {e}")
+                    # Critical path - log full trace for kill switch debugging
+                    logger.exception(f"Failed to cancel order {order['order_id']}: {e}")
 
             logger.info(f"Kill-switch: Cancelled {cancelled_count}/{len(open_orders)} pending orders")
 
         except Exception as e:
-            logger.error(f"Error during order cancellation: {e}")
+            # Kill switch - must log full trace for post-incident analysis
+            logger.exception(f"Error during order cancellation: {e}")
 
     async def _initiate_position_closure(self) -> None:
         """
@@ -2559,7 +2562,8 @@ class RiskAgent(ValidationAgent):
                         available_margin=float(summary.get('AvailableFunds', 0)),
                     )
         except Exception as e:
-            logger.error(f"Failed to refresh margin from broker: {e}")
+            # Broker communication may fail - log trace for debugging
+            logger.exception(f"Failed to refresh margin from broker: {e}")
 
     def get_margin_status(self) -> dict:
         """Get current margin monitoring status (#R10)."""
@@ -2763,7 +2767,8 @@ class RiskAgent(ValidationAgent):
                 logger.info(f"Stress tests completed. Worst case: {worst.scenario.name} ({worst.pnl_impact_pct:.1f}%)")
 
         except Exception as e:
-            logger.error(f"Stress test failed: {e}")
+            # Stress testing failure - log trace for risk model debugging
+            logger.exception(f"Stress test failed: {e}")
 
     def get_status(self) -> dict:
         """Get current risk agent status for monitoring."""

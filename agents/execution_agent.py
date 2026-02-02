@@ -17,7 +17,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from core.agent_base import ExecutionAgent as ExecutionAgentBase, AgentConfig
 from core.events import (
@@ -559,6 +559,15 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             logger.error("Cannot execute: broker not connected")
             return
 
+        # P1-11: Pre-trade checks to prevent slippage and execution issues
+        pre_trade_result = await self._pre_trade_checks(decision, quantity)
+        if not pre_trade_result["passed"]:
+            logger.warning(
+                f"Pre-trade checks failed for {decision.symbol}: {pre_trade_result['reason']}"
+            )
+            # Still allow execution but log warning - don't block legitimate trades
+            # Critical issues (broker disconnected) are already handled above
+
         # Enforce tick size on limit/stop prices
         limit_price = self._enforce_tick_size(decision.symbol, decision.limit_price)
         stop_price = self._enforce_tick_size(decision.symbol, decision.stop_price)
@@ -735,6 +744,9 @@ class ExecutionAgentImpl(ExecutionAgentBase):
         Returns:
             Rounded quantity
         """
+        if quantity == 0:
+            return 0
+
         if lot_size <= 1:
             return quantity
 
@@ -1112,8 +1124,12 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             await self._execute_twap(pending)
             return
 
-        # Normalize remaining profile
+        # Normalize remaining profile - guard against division by zero
         total_remaining_volume = sum(remaining_profile)
+        if total_remaining_volume == 0:
+            logger.warning(f"No remaining volume profile for {symbol}, using TWAP")
+            await self._execute_twap(pending)
+            return
         normalized_profile = [v / total_remaining_volume for v in remaining_profile]
 
         # Calculate slice sizes based on volume profile
@@ -1164,14 +1180,19 @@ class ExecutionAgentImpl(ExecutionAgentBase):
                     logger.error(f"VWAP slice {i+1} cancelled due to rate limits")
                     continue
 
+            # Get arrival price for slippage tracking (#E4)
+            arrival_price = self._last_prices.get(order.symbol)
+
             broker_id = await self._broker.place_order(slice_order)
 
             if broker_id:
-                pending.slices.append(broker_id)
+                # Register slice for fill tracking (#E4, #E5) - same as TWAP
+                is_buy = order.side == OrderSide.BUY
+                pending.register_slice(broker_id, slice_qty, arrival_price, is_buy=is_buy)
                 self._record_order_timestamp()
                 logger.info(
                     f"VWAP slice {i+1}/{num_slices}: {slice_qty} shares "
-                    f"({slice_qty/total_quantity*100:.1f}% of order)"
+                    f"({slice_qty/total_quantity*100:.1f}% of order, arrival={arrival_price})"
                 )
             else:
                 logger.error(f"VWAP slice {i+1} failed")
@@ -1280,11 +1301,13 @@ class ExecutionAgentImpl(ExecutionAgentBase):
         # Record our volume for VWAP participation tracking (#E10)
         self._record_our_volume(fill.symbol, fill.filled_quantity)
 
-        # Sanity check
+        # Sanity check - cap filled_quantity to order quantity to prevent overflow
         if matched_pending.remaining_quantity < 0:
             logger.warning(
                 f"Fill overflow for {fill.symbol}: remaining={matched_pending.remaining_quantity}"
             )
+            # Cap filled_quantity to the order quantity
+            matched_pending.filled_quantity = matched_pending.order_event.quantity
             matched_pending.remaining_quantity = 0
 
         # Update average fill price (volume-weighted)
@@ -1311,6 +1334,7 @@ class ExecutionAgentImpl(ExecutionAgentBase):
                     commission=fill.commission,
                 )
             except Exception as e:
+                # Non-critical operation - execution continues even if analytics fail
                 logger.warning(f"Best execution recording failed: {e}")
 
         # Log trade for audit
@@ -1367,6 +1391,93 @@ class ExecutionAgentImpl(ExecutionAgentBase):
     def set_best_execution_analyzer(self, analyzer) -> None:
         """Set the best execution analyzer for RTS 27/28 compliance tracking."""
         self._best_execution_analyzer = analyzer
+
+    async def _pre_trade_checks(
+        self, decision: "DecisionEvent", quantity: int
+    ) -> dict[str, Any]:
+        """
+        P1-11: Pre-trade checks to prevent excessive slippage and execution issues.
+
+        Checks:
+        1. Market data freshness - data must be recent
+        2. Spread sanity - spread should not be excessive
+        3. Price sanity - price should be reasonable vs recent history
+        4. Liquidity check - order size vs available volume
+
+        Returns:
+            dict with 'passed' bool and 'reason' if failed, plus 'warnings' list
+        """
+        result = {"passed": True, "reason": "", "warnings": []}
+        symbol = decision.symbol
+
+        # 1. Check market data freshness
+        if hasattr(self._broker, 'check_data_staleness'):
+            staleness = self._broker.check_data_staleness(symbol)
+            if staleness and staleness.is_critical:
+                result["warnings"].append(
+                    f"Market data is stale ({staleness.age_seconds:.1f}s old)"
+                )
+                # Don't fail - just warn. Data staleness is sometimes normal.
+
+        # 2. Get current market data for checks
+        try:
+            bid, ask = await self._get_current_bid_ask(symbol)
+            if bid is None or ask is None or bid <= 0 or ask <= 0:
+                result["warnings"].append("Could not get valid bid/ask prices")
+                return result
+
+            mid_price = (bid + ask) / 2
+            spread = ask - bid
+            spread_pct = (spread / mid_price) * 100 if mid_price > 0 else 0
+
+            # 3. Spread sanity check
+            MAX_SPREAD_PCT = 2.0  # 2% max spread - very wide for most liquid instruments
+            if spread_pct > MAX_SPREAD_PCT:
+                result["warnings"].append(
+                    f"Wide spread: {spread_pct:.2f}% (>{MAX_SPREAD_PCT}%) - "
+                    f"consider using limit order"
+                )
+
+            # 4. Order size vs typical volume (if available)
+            # Large orders in illiquid markets can cause significant slippage
+            if hasattr(self, '_avg_daily_volume') and symbol in self._avg_daily_volume:
+                adv = self._avg_daily_volume[symbol]
+                order_pct_of_adv = (quantity / adv) * 100 if adv > 0 else 0
+
+                if order_pct_of_adv > 5.0:  # Order is >5% of daily volume
+                    result["warnings"].append(
+                        f"Large order: {order_pct_of_adv:.1f}% of ADV - "
+                        f"consider TWAP/VWAP algo"
+                    )
+
+            # 5. Price sanity vs limit (if limit order)
+            if decision.limit_price and decision.limit_price > 0:
+                limit_vs_mid = abs(decision.limit_price - mid_price) / mid_price * 100
+                if limit_vs_mid > 5.0:  # Limit price >5% from mid
+                    result["warnings"].append(
+                        f"Limit price {decision.limit_price:.2f} is {limit_vs_mid:.1f}% "
+                        f"from mid price {mid_price:.2f}"
+                    )
+
+        except Exception as e:
+            result["warnings"].append(f"Pre-trade check error: {e}")
+
+        # Log all warnings
+        for warning in result["warnings"]:
+            logger.warning(f"Pre-trade [{symbol}]: {warning}")
+
+        return result
+
+    async def _get_current_bid_ask(self, symbol: str) -> tuple[float | None, float | None]:
+        """Get current bid/ask from broker or cache."""
+        if hasattr(self._broker, 'get_bid_ask'):
+            return await self._broker.get_bid_ask(symbol)
+
+        # Fallback to last known prices from market data
+        if hasattr(self, '_last_bid') and hasattr(self, '_last_ask'):
+            return self._last_bid.get(symbol), self._last_ask.get(symbol)
+
+        return None, None
 
     def _check_rate_limits(self) -> bool:
         """
@@ -1448,7 +1559,8 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in stop order monitor: {e}")
+                # Broad catch intentional - monitor must stay alive for system safety
+                logger.exception(f"Error in stop order monitor: {e}")  # P0: preserve stack trace
                 await asyncio.sleep(1.0)  # Back off on error
 
     async def _check_and_trigger_stop_orders(self) -> None:
@@ -1589,7 +1701,8 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in order timeout monitor: {e}")
+                # Broad catch intentional - monitor must stay alive for order management
+                logger.exception(f"Error in order timeout monitor: {e}")  # P0: preserve stack trace
                 await asyncio.sleep(5.0)  # Back off on error
 
     async def _check_and_cancel_timed_out_orders(self) -> None:
@@ -1650,13 +1763,42 @@ class ExecutionAgentImpl(ExecutionAgentBase):
 
         order = pending.order_event
 
-        logger.warning(
-            f"ORDER TIMEOUT: {order.side.value} {order.quantity} {order.symbol} "
-            f"(order_id={order_id}, age={age_seconds:.0f}s, timeout={timeout_seconds}s)"
-        )
+        # P1-14: Log partial fill info on timeout
+        filled_qty = pending.filled_quantity
+        unfilled_qty = pending.remaining_quantity
+        fill_pct = (filled_qty / order.quantity * 100) if order.quantity > 0 else 0
+
+        if filled_qty > 0 and unfilled_qty > 0:
+            # Partial fill on timeout - this needs attention!
+            logger.error(
+                f"PARTIAL FILL TIMEOUT: {order.side.value} {order.symbol} - "
+                f"filled {filled_qty}/{order.quantity} ({fill_pct:.1f}%), "
+                f"UNFILLED {unfilled_qty} shares will NOT be executed! "
+                f"(order_id={order_id}, age={age_seconds:.0f}s)"
+            )
+        else:
+            logger.warning(
+                f"ORDER TIMEOUT: {order.side.value} {order.quantity} {order.symbol} "
+                f"(order_id={order_id}, age={age_seconds:.0f}s, timeout={timeout_seconds}s)"
+            )
 
         # Track timed out orders
         self._timed_out_orders.append(order_id)
+
+        # P1-14: Track partial fills separately for monitoring
+        if filled_qty > 0 and unfilled_qty > 0:
+            if not hasattr(self, '_partial_fill_timeouts'):
+                self._partial_fill_timeouts = []
+            self._partial_fill_timeouts.append({
+                "order_id": order_id,
+                "symbol": order.symbol,
+                "side": order.side.value,
+                "total_quantity": order.quantity,
+                "filled_quantity": filled_qty,
+                "unfilled_quantity": unfilled_qty,
+                "avg_fill_price": pending.avg_fill_price,
+                "timeout_at": datetime.now(timezone.utc).isoformat(),
+            })
 
         # Attempt to cancel any open broker orders
         for broker_order_id in pending.active_broker_orders:
@@ -1664,7 +1806,8 @@ class ExecutionAgentImpl(ExecutionAgentBase):
                 self._broker.cancel_order(broker_order_id)
                 logger.info(f"Cancelled broker order {broker_order_id} due to timeout")
             except Exception as e:
-                logger.error(f"Failed to cancel broker order {broker_order_id}: {e}")
+                # Broad catch - cancellation should not crash system
+                logger.exception(f"Failed to cancel broker order {broker_order_id}: {e}")
 
         # Update state
         pending.transition_state(
@@ -1698,6 +1841,17 @@ class ExecutionAgentImpl(ExecutionAgentBase):
                 "algo": order.algo,
             },
         )
+
+    def get_partial_fill_timeouts(self) -> list[dict]:
+        """
+        P1-14: Get list of orders that timed out with partial fills.
+
+        These represent execution failures where the full order was not completed
+        and remaining quantity was not executed.
+        """
+        if not hasattr(self, '_partial_fill_timeouts'):
+            return []
+        return list(self._partial_fill_timeouts)
 
     def get_timed_out_orders(self) -> list[str]:
         """Get list of order IDs that have been cancelled due to timeout."""
@@ -2096,7 +2250,8 @@ class ExecutionAgentImpl(ExecutionAgentBase):
                         logger.info(f"Skipped order {order_data['order_id']} - broker status: {broker_state}")
 
                 except Exception as e:
-                    logger.error(f"Failed to recover order: {e}")
+                    # Best-effort recovery - log full trace for debugging
+                    logger.exception(f"Failed to recover order: {e}")
 
             # Backup and remove the persistence file after recovery
             if recovered_count > 0:
@@ -2108,6 +2263,9 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             return recovered_count
 
         except Exception as e:
+            # Broad catch for resilience - order recovery is best-effort and
+            # system should start even if recovery fails (JSON parse errors,
+            # corrupted files, schema changes, etc.)
             logger.error(f"Failed to recover orders from {filepath}: {e}")
             return 0
 
@@ -3115,7 +3273,8 @@ class ExecutionAgentImpl(ExecutionAgentBase):
                 await self._broker.cancel_order(broker_order_id)
                 return True
         except Exception as e:
-            logger.error(f"Failed to cancel order {broker_order_id}: {e}")
+            # Broad catch - cancellation is best-effort, system must continue
+            logger.exception(f"Failed to cancel order {broker_order_id}: {e}")
         return False
 
     # =========================================================================

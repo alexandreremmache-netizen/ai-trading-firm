@@ -190,6 +190,9 @@ class VolSignal:
     iv_percentile: float
     vol_premium: float
     legs: list[dict]  # Option legs for the trade
+    # P1-13: Stop-loss for options strategies (typically % of premium or delta)
+    max_loss_pct: float | None = None  # Max acceptable loss as % of premium
+    stop_loss_underlying_move: float | None = None  # Underlying move that triggers stop
 
 
 class OptionsVolStrategy:
@@ -544,6 +547,19 @@ class OptionsVolStrategy:
         u = np.exp(sigma * np.sqrt(dt))
         d = 1 / u
         p = (np.exp((r - q) * dt) - d) / (u - d)
+
+        # Validate probability bounds - if p is outside [0, 1], model assumptions are violated
+        if p < 0 or p > 1:
+            return {
+                "error": "invalid_probability",
+                "message": f"Risk-neutral probability p={p:.4f} is outside [0,1]. "
+                           "Check model parameters: r-q may be too extreme relative to volatility.",
+                "early_exercise_premium": None,
+                "european_price": None,
+                "american_price": None,
+                "exercise_boundary": None,
+                "optimal_to_exercise": None,
+            }
 
         # Build price tree
         prices = np.zeros((n_steps + 1, n_steps + 1))
@@ -1179,7 +1195,7 @@ class OptionsVolStrategy:
             "profit_range": (short_put.strike, short_call.strike),
             "net_delta": net_delta,
             "net_theta": net_theta,
-            "probability_of_profit": 1 - abs(short_put.delta) - abs(1 - short_call.delta),  # Approximation
+            "probability_of_profit": 1 - abs(short_put.delta) - abs(short_call.delta),  # Approximation using delta as ITM proxy
         }
 
     # =========================================================================
@@ -1388,7 +1404,8 @@ class OptionsVolStrategy:
         # Theta = 0.5 * Gamma * S^2 * sigma^2 * dt
         # Break-even sigma = sqrt(2 * Theta / (Gamma * S^2 * dt))
         dt = 1 / 252  # Daily
-        if position_gamma > 0:
+        # Guard against division by zero when gamma is very small
+        if position_gamma > 1e-8:
             breakeven_vol = np.sqrt(2 * abs(position_theta) / (position_gamma * spot_price ** 2 * dt))
         else:
             breakeven_vol = float('inf')

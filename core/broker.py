@@ -17,7 +17,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from collections import deque
 from typing import Callable, Any
 from enum import Enum
 
@@ -90,6 +91,8 @@ class BrokerConfig:
     staleness_warning_seconds: float = 5.0    # Warn if data older than 5 seconds
     staleness_critical_seconds: float = 30.0  # Reject if data older than 30 seconds
     staleness_check_enabled: bool = True
+    # P0-1/P0-2: Environment safety settings
+    environment: str = "paper"  # "paper" or "live" - MUST match port configuration
 
 
 @dataclass
@@ -142,6 +145,104 @@ class OrderStatus:
     last_update: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class IBRateLimiter:
+    """
+    IB API Rate Limiter (P0-1 fix).
+
+    Interactive Brokers enforces rate limits:
+    - Max 60 requests per 10 minutes (600 seconds) for market data
+    - No duplicate requests within 15 seconds
+    - Exceeding limits causes temporary bans
+
+    This class implements a sliding window rate limiter to prevent
+    hitting IB's rate limits and causing connection issues.
+    """
+
+    # IB rate limit constants
+    MAX_REQUESTS = 60
+    WINDOW_SECONDS = 600  # 10 minutes
+    MIN_REQUEST_INTERVAL = 15.0  # Minimum seconds between identical requests
+
+    def __init__(self):
+        # Sliding window of request timestamps
+        self._request_times: deque[datetime] = deque()
+        # Track last request time per request key (for duplicate detection)
+        self._last_request: dict[str, datetime] = {}
+
+    def _clean_old_requests(self) -> None:
+        """Remove requests older than the window."""
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.WINDOW_SECONDS)
+        while self._request_times and self._request_times[0] < cutoff:
+            self._request_times.popleft()
+
+    def can_make_request(self, request_key: str | None = None) -> tuple[bool, str]:
+        """
+        Check if a request can be made within rate limits.
+
+        Args:
+            request_key: Optional key for duplicate detection (e.g., "mktdata:AAPL")
+
+        Returns:
+            Tuple of (can_request, reason_if_not)
+        """
+        self._clean_old_requests()
+        now = datetime.now(timezone.utc)
+
+        # Check duplicate request interval
+        if request_key and request_key in self._last_request:
+            elapsed = (now - self._last_request[request_key]).total_seconds()
+            if elapsed < self.MIN_REQUEST_INTERVAL:
+                wait_time = self.MIN_REQUEST_INTERVAL - elapsed
+                return False, f"Duplicate request too soon. Wait {wait_time:.1f}s"
+
+        # Check overall rate limit
+        if len(self._request_times) >= self.MAX_REQUESTS:
+            oldest = self._request_times[0]
+            wait_time = (oldest + timedelta(seconds=self.WINDOW_SECONDS) - now).total_seconds()
+            return False, f"Rate limit reached ({self.MAX_REQUESTS}/{self.WINDOW_SECONDS}s). Wait {wait_time:.1f}s"
+
+        return True, ""
+
+    def record_request(self, request_key: str | None = None) -> None:
+        """Record that a request was made."""
+        now = datetime.now(timezone.utc)
+        self._request_times.append(now)
+        if request_key:
+            self._last_request[request_key] = now
+
+    def get_remaining_requests(self) -> int:
+        """Get number of requests remaining in current window."""
+        self._clean_old_requests()
+        return max(0, self.MAX_REQUESTS - len(self._request_times))
+
+    def get_wait_time(self, request_key: str | None = None) -> float:
+        """Get seconds to wait before next request is allowed."""
+        can_request, _ = self.can_make_request(request_key)
+        if can_request:
+            return 0.0
+
+        self._clean_old_requests()
+        now = datetime.now(timezone.utc)
+
+        # Check duplicate interval
+        if request_key and request_key in self._last_request:
+            elapsed = (now - self._last_request[request_key]).total_seconds()
+            if elapsed < self.MIN_REQUEST_INTERVAL:
+                return self.MIN_REQUEST_INTERVAL - elapsed
+
+        # Check rate limit
+        if len(self._request_times) >= self.MAX_REQUESTS:
+            oldest = self._request_times[0]
+            return (oldest + timedelta(seconds=self.WINDOW_SECONDS) - now).total_seconds()
+
+        return 0.0
+
+
+# Paper vs Live port mapping for validation
+PAPER_PORTS = {7497, 4002}  # TWS Paper, Gateway Paper
+LIVE_PORTS = {7496, 4001}   # TWS Live, Gateway Live
+
+
 class IBBroker:
     """
     Interactive Brokers integration using ib_insync.
@@ -190,6 +291,9 @@ class IBBroker:
         self._ib.orderStatusEvent += lambda trade: self._on_order_status(trade)
         self._ib.execDetailsEvent += lambda trade, fill: self._on_exec_details(trade, fill)
 
+        # P0-1: IB API rate limiter to prevent hitting IB's rate limits
+        self._rate_limiter = IBRateLimiter()
+
         # Circuit breaker for broker operations (#S6)
         self._circuit_breaker = CircuitBreaker(
             name="broker",
@@ -231,6 +335,97 @@ class IBBroker:
         """Get the circuit breaker for this broker (#S6)."""
         return self._circuit_breaker
 
+    @property
+    def rate_limiter(self) -> IBRateLimiter:
+        """Get the IB API rate limiter (P0-1)."""
+        return self._rate_limiter
+
+    def _validate_paper_vs_live_config(self) -> None:
+        """
+        Validate that environment setting matches port configuration (P0-2).
+
+        CRITICAL SAFETY CHECK: Prevents accidentally trading live when
+        expecting paper trading, or vice versa.
+
+        Raises:
+            ValueError: If environment doesn't match port
+        """
+        port = self._config.port
+        env = self._config.environment.lower()
+
+        is_paper_port = port in PAPER_PORTS
+        is_live_port = port in LIVE_PORTS
+
+        if env == "paper":
+            if is_live_port:
+                raise ValueError(
+                    f"CRITICAL SAFETY ERROR: Environment is 'paper' but port {port} "
+                    f"is a LIVE trading port! This could result in real trades. "
+                    f"Either change port to {7497} (TWS Paper) or {4002} (Gateway Paper), "
+                    f"or set environment='live' if you truly intend to trade live."
+                )
+            if not is_paper_port:
+                logger.warning(
+                    f"Port {port} is not a standard IB port. "
+                    f"Standard paper ports are: {PAPER_PORTS}"
+                )
+        elif env == "live":
+            if is_paper_port:
+                raise ValueError(
+                    f"CRITICAL CONFIGURATION ERROR: Environment is 'live' but port {port} "
+                    f"is a PAPER trading port. Change port to {7496} (TWS Live) or "
+                    f"{4001} (Gateway Live) for live trading."
+                )
+            if not is_live_port:
+                logger.warning(
+                    f"Port {port} is not a standard IB port. "
+                    f"Standard live ports are: {LIVE_PORTS}"
+                )
+            # Extra warning for live trading
+            logger.warning(
+                "⚠️  LIVE TRADING MODE ENABLED - Real money will be used! ⚠️"
+            )
+        else:
+            raise ValueError(
+                f"Invalid environment: '{env}'. Must be 'paper' or 'live'."
+            )
+
+    def _validate_paper_account(self) -> bool:
+        """
+        Validate that account ID matches expected paper/live configuration (P0-2).
+
+        Returns:
+            True if account appears to match environment, False otherwise.
+            Returns True for live trading (can't distinguish live accounts).
+
+        Note:
+            Paper accounts typically start with 'D' (e.g., 'DU1234567').
+            This is a heuristic check, not guaranteed.
+        """
+        if not self._account_id:
+            return True  # Can't validate without account ID
+
+        is_demo_account = self._account_id.upper().startswith("D")
+        expected_paper = self._config.environment.lower() == "paper"
+
+        if expected_paper and not is_demo_account:
+            logger.critical(
+                f"⚠️  CRITICAL WARNING: Environment is 'paper' but account "
+                f"'{self._account_id}' does not appear to be a demo account! "
+                f"Demo accounts typically start with 'D'. "
+                f"Please verify you are connected to paper trading."
+            )
+            return False
+
+        if not expected_paper and is_demo_account:
+            logger.warning(
+                f"Environment is 'live' but account '{self._account_id}' "
+                f"appears to be a demo account (starts with 'D')."
+            )
+            return False
+
+        return True
+
     def _on_circuit_state_change(
         self, old_state: CircuitState, new_state: CircuitState
     ) -> None:
@@ -261,6 +456,10 @@ class IBBroker:
         - Socket port: 7497 (paper) or 7496 (live)
         - Allow connections from localhost
         """
+        # P0-2: Validate paper/live configuration BEFORE connecting
+        # This prevents accidentally connecting to live trading
+        self._validate_paper_vs_live_config()
+
         if self.is_connected:
             logger.info("Already connected to IB")
             return True
@@ -288,6 +487,9 @@ class IBBroker:
                 self._account_id = self._config.account or accounts[0]
                 logger.info(f"Using account: {self._account_id}")
 
+            # P0-2: Validate account matches expected environment
+            self._validate_paper_account()
+
             self._connection_state = ConnectionState.CONNECTED
             logger.info(
                 f"Connected to Interactive Brokers "
@@ -313,6 +515,10 @@ class IBBroker:
             return False
 
         except Exception as e:
+            # Broad exception catch is intentional here - IB can raise various
+            # undocumented exceptions during connection (socket errors, SSL errors,
+            # protocol errors). We want to gracefully handle any failure and
+            # set the connection state appropriately rather than crash.
             logger.error(f"Failed to connect to IB: {e}")
             self._connection_state = ConnectionState.ERROR
             return False
@@ -377,6 +583,8 @@ class IBBroker:
                     await self._resubscribe_market_data()
                     break
             except Exception as e:
+                # Broad catch for resilience - reconnection should not crash
+                # the system regardless of what error IB/network throws
                 logger.error(f"Reconnection attempt failed: {e}")
 
             # Exponential backoff
@@ -517,6 +725,8 @@ class IBBroker:
             }
 
         except Exception as e:
+            # Broad catch - reconciliation is a best-effort operation that
+            # should not prevent system operation even if it fails
             logger.error(f"Order reconciliation failed: {e}")
 
     def get_reconciliation_status(self) -> dict:
@@ -696,6 +906,17 @@ class IBBroker:
 
             self._contracts[subscription_key] = contract
 
+            # P0-1: Check rate limits before making API request
+            rate_key = f"mktdata:{subscription_key}"
+            can_request, reason = self._rate_limiter.can_make_request(rate_key)
+            if not can_request:
+                logger.warning(f"Rate limit hit for {subscription_key}: {reason}")
+                # Wait for rate limit to clear
+                wait_time = self._rate_limiter.get_wait_time(rate_key)
+                if wait_time > 0:
+                    logger.info(f"Waiting {wait_time:.1f}s for rate limit...")
+                    await asyncio.sleep(wait_time)
+
             # Request market data
             ticker = self._ib.reqMktData(
                 contract,
@@ -703,6 +924,8 @@ class IBBroker:
                 snapshot=False,  # Stream continuously
                 regulatorySnapshot=False,
             )
+            # P0-1: Record the request for rate limiting
+            self._rate_limiter.record_request(rate_key)
 
             # Register update handler
             ticker.updateEvent += lambda t: self._on_ticker_update(t, subscription_key)
@@ -810,7 +1033,8 @@ class IBBroker:
             logger.error("Cannot place order: not connected to IB")
             return None
 
-        try:
+        async def _execute_order() -> int | None:
+            """Inner function for circuit breaker wrapping."""
             # Create contract
             contract = self._create_contract(
                 order_event.symbol,
@@ -872,7 +1096,9 @@ class IBBroker:
                 TimeInForce.OPG: "OPG",
                 TimeInForce.MOC: "MOC",
             }
-            ib_order.tif = tif_map.get(order_event.time_in_force, "DAY")
+            # Use getattr with default to handle missing time_in_force attribute
+            tif = getattr(order_event, 'time_in_force', TimeInForce.DAY)
+            ib_order.tif = tif_map.get(tif, "DAY")
 
             # Log IOC/FOK orders specially as they have specific behavior
             if order_event.time_in_force in [TimeInForce.IOC, TimeInForce.FOK]:
@@ -903,6 +1129,12 @@ class IBBroker:
 
             return trade.order.orderId
 
+        try:
+            # Wrap order execution in circuit breaker (#S6)
+            return await self._circuit_breaker.call_async(_execute_order)
+        except CircuitOpenError:
+            logger.error("Cannot place order: circuit breaker is open")
+            return None
         except Exception as e:
             logger.error(f"Failed to place order: {e}")
             return None

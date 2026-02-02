@@ -29,6 +29,28 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# FX PIP CALCULATION HELPERS (P0-5 Fix)
+# =============================================================================
+
+def get_pip_multiplier(pair: str) -> int:
+    """
+    Get pip multiplier for FX pair.
+
+    For JPY pairs (USDJPY, EURJPY, etc.): 1 pip = 0.01, so multiplier = 100
+    For other pairs (EURUSD, GBPUSD, etc.): 1 pip = 0.0001, so multiplier = 10000
+
+    Args:
+        pair: Currency pair (e.g., "USDJPY", "EURUSD")
+
+    Returns:
+        Pip multiplier (100 for JPY pairs, 10000 for others)
+    """
+    if "JPY" in pair.upper():
+        return 100
+    return 10000
+
+
+# =============================================================================
 # FX VOLATILITY SMILE DATA (#X10)
 # =============================================================================
 
@@ -142,6 +164,8 @@ class FXVolSurface:
         if lower.expiry_days == upper.expiry_days:
             return lower_vol
 
+        # Defensive assertion to guard against division by zero
+        assert upper.expiry_days != lower.expiry_days, "Expiry days should differ for interpolation"
         weight = (expiry_days - lower.expiry_days) / (upper.expiry_days - lower.expiry_days)
         return lower_vol + weight * (upper_vol - lower_vol)
 
@@ -576,7 +600,7 @@ class FXFixingManager:
             return {'error': 'no_fixing_available'}
 
         diff = spot_rate - fixing.rate
-        diff_pips = diff * 10000  # Standard pip calculation
+        diff_pips = diff * get_pip_multiplier(pair)  # P0-5: Use proper multiplier for JPY pairs
 
         # Historical deviation
         history = self.get_fixing_history(pair, fixing_type, 30)

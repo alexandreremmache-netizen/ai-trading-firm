@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Any
 
@@ -171,6 +171,14 @@ class StrategyMetrics:
             return 0.0
 
         returns_array = np.array(self.returns)
+
+        # Filter out NaN and inf values before calculation
+        valid_mask = np.isfinite(returns_array)
+        returns_array = returns_array[valid_mask]
+
+        if len(returns_array) < 2:
+            return 0.0
+
         ann_factor = self.annualization_factor
 
         # Convert annual risk-free rate to per-period rate
@@ -297,6 +305,10 @@ class PerformanceAttribution:
 
         # Trade counter
         self._trade_counter = 0
+
+        # P1-15: TWR/MWR tracking
+        self._portfolio_values: list[tuple[datetime, float]] = []  # (timestamp, NAV)
+        self._cash_flows: list[tuple[datetime, float]] = []  # (timestamp, amount) + for deposits
 
         logger.info("PerformanceAttribution initialized")
 
@@ -473,6 +485,226 @@ class PerformanceAttribution:
         """Get win rate for a strategy."""
         metrics = self._strategy_metrics.get(strategy)
         return metrics.win_rate if metrics else 0.0
+
+    # =========================================================================
+    # P1-15: TWR/MWR CALCULATIONS
+    # =========================================================================
+
+    def record_portfolio_value(self, timestamp: datetime, value: float) -> None:
+        """
+        P1-15: Record portfolio NAV for TWR calculation.
+
+        Should be called daily (or at each valuation point).
+        """
+        self._portfolio_values.append((timestamp, value))
+
+    def record_cash_flow(self, timestamp: datetime, amount: float) -> None:
+        """
+        P1-15: Record external cash flow for MWR calculation.
+
+        Args:
+            timestamp: When the cash flow occurred
+            amount: Positive for deposits, negative for withdrawals
+        """
+        self._cash_flows.append((timestamp, amount))
+
+    def calculate_twr(self, start_date: datetime | None = None) -> float:
+        """
+        P1-15: Calculate Time-Weighted Return (TWR).
+
+        TWR eliminates the effect of cash flows, showing pure investment
+        performance. Used for comparing manager skill regardless of
+        deposit/withdrawal timing.
+
+        Formula: TWR = ((1 + r1) * (1 + r2) * ... * (1 + rn)) - 1
+        where rn is the sub-period return between cash flows.
+
+        Returns:
+            Annualized TWR as decimal (e.g., 0.15 = 15%)
+        """
+        if len(self._portfolio_values) < 2:
+            return 0.0
+
+        # Sort values by timestamp
+        sorted_values = sorted(self._portfolio_values, key=lambda x: x[0])
+
+        if start_date:
+            sorted_values = [(t, v) for t, v in sorted_values if t >= start_date]
+            if len(sorted_values) < 2:
+                return 0.0
+
+        # Calculate sub-period returns
+        # For each period between cash flows, calculate the return
+        cash_flow_dict = {t.date(): amt for t, amt in self._cash_flows}
+
+        cumulative_return = 1.0
+        prev_value = sorted_values[0][1]
+        periods = 0
+
+        for i in range(1, len(sorted_values)):
+            curr_date, curr_value = sorted_values[i]
+            prev_date = sorted_values[i-1][0]
+
+            # Check for cash flow at start of this period
+            cash_flow = cash_flow_dict.get(curr_date.date(), 0)
+
+            # Adjust previous value for cash flow (add at start of period)
+            adjusted_prev = prev_value + cash_flow
+
+            if adjusted_prev > 0:
+                period_return = curr_value / adjusted_prev
+                cumulative_return *= period_return
+                periods += 1
+
+            prev_value = curr_value
+
+        if periods == 0:
+            return 0.0
+
+        # Calculate total return
+        total_return = cumulative_return - 1
+
+        # Annualize if we have date range
+        first_date = sorted_values[0][0]
+        last_date = sorted_values[-1][0]
+        days = (last_date - first_date).days
+
+        if days > 0:
+            years = days / 365.25
+            if years > 0 and cumulative_return > 0:
+                annualized = (cumulative_return ** (1 / years)) - 1
+                return annualized
+
+        return total_return
+
+    def calculate_mwr(self, start_date: datetime | None = None) -> float:
+        """
+        P1-15: Calculate Money-Weighted Return (MWR / IRR).
+
+        MWR reflects actual investor experience including the timing
+        of deposits and withdrawals. Higher weight given to returns
+        when more capital was invested.
+
+        Uses Newton-Raphson iteration to solve for IRR.
+
+        Returns:
+            Annualized MWR as decimal (e.g., 0.12 = 12%)
+        """
+        if len(self._portfolio_values) < 2:
+            return 0.0
+
+        sorted_values = sorted(self._portfolio_values, key=lambda x: x[0])
+        sorted_flows = sorted(self._cash_flows, key=lambda x: x[0])
+
+        if start_date:
+            sorted_values = [(t, v) for t, v in sorted_values if t >= start_date]
+            sorted_flows = [(t, a) for t, a in sorted_flows if t >= start_date]
+            if len(sorted_values) < 2:
+                return 0.0
+
+        first_date = sorted_values[0][0]
+        last_date = sorted_values[-1][0]
+        total_days = (last_date - first_date).days
+
+        if total_days <= 0:
+            return 0.0
+
+        # Build cash flow series: initial investment + flows + final value
+        # CF0 = -initial_value (investment out)
+        # CFi = -cash_flows (deposits negative, withdrawals positive)
+        # CFn = +final_value (proceeds)
+
+        initial_value = sorted_values[0][1]
+        final_value = sorted_values[-1][1]
+
+        cash_flows_with_timing = []
+        # Initial outflow
+        cash_flows_with_timing.append((0, -initial_value))
+
+        # External cash flows
+        for cf_date, cf_amount in sorted_flows:
+            days_from_start = (cf_date - first_date).days
+            # Deposits are cash OUT (negative), withdrawals are cash IN (positive)
+            cash_flows_with_timing.append((days_from_start, -cf_amount))
+
+        # Final value as inflow
+        cash_flows_with_timing.append((total_days, final_value))
+
+        # Solve for IRR using Newton-Raphson
+        def npv(rate: float) -> float:
+            """Calculate NPV at given daily rate."""
+            total = 0.0
+            for days, cf in cash_flows_with_timing:
+                if rate > -1:
+                    total += cf / ((1 + rate) ** days)
+            return total
+
+        def npv_derivative(rate: float) -> float:
+            """Derivative of NPV for Newton-Raphson."""
+            total = 0.0
+            for days, cf in cash_flows_with_timing:
+                if rate > -1 and days > 0:
+                    total -= days * cf / ((1 + rate) ** (days + 1))
+            return total
+
+        # Initial guess - simple return
+        simple_return = (final_value - initial_value) / initial_value if initial_value > 0 else 0
+        daily_rate = simple_return / total_days if total_days > 0 else 0
+
+        # Newton-Raphson iteration
+        max_iterations = 100
+        tolerance = 1e-10
+
+        for _ in range(max_iterations):
+            f_val = npv(daily_rate)
+            f_deriv = npv_derivative(daily_rate)
+
+            if abs(f_deriv) < 1e-15:
+                break
+
+            new_rate = daily_rate - f_val / f_deriv
+
+            if abs(new_rate - daily_rate) < tolerance:
+                daily_rate = new_rate
+                break
+
+            daily_rate = new_rate
+
+        # Annualize the daily rate
+        annualized_mwr = ((1 + daily_rate) ** 365.25) - 1
+
+        return annualized_mwr
+
+    def get_return_comparison(self) -> dict:
+        """
+        P1-15: Get TWR vs MWR comparison.
+
+        A large difference between TWR and MWR indicates poor timing
+        of deposits/withdrawals relative to market performance.
+
+        Returns:
+            Dictionary with TWR, MWR, and difference analysis
+        """
+        twr = self.calculate_twr()
+        mwr = self.calculate_mwr()
+        diff = mwr - twr
+
+        return {
+            "twr": twr,
+            "twr_pct": twr * 100,
+            "mwr": mwr,
+            "mwr_pct": mwr * 100,
+            "difference": diff,
+            "difference_pct": diff * 100,
+            "timing_impact": "positive" if diff > 0.01 else ("negative" if diff < -0.01 else "neutral"),
+            "interpretation": (
+                "Good cash flow timing - deposits before rallies, withdrawals before declines"
+                if diff > 0.01 else (
+                    "Poor cash flow timing - deposits before declines, withdrawals before rallies"
+                    if diff < -0.01 else "Cash flow timing had minimal impact"
+                )
+            ),
+        }
 
     def get_rolling_metrics(
         self,
@@ -1595,6 +1827,14 @@ class TaxLotManager:
             shares_from_lot = min(lot.remaining_quantity, remaining_to_sell)
             selected.append((lot, shares_from_lot))
             remaining_to_sell -= shares_from_lot
+
+        # Warn if insufficient lots to cover requested quantity
+        if remaining_to_sell > 0:
+            logger.warning(
+                f"Insufficient lots for {symbol}: requested {quantity}, "
+                f"can only sell {quantity - remaining_to_sell}, "
+                f"remaining {remaining_to_sell} shares not covered"
+            )
 
         return selected
 

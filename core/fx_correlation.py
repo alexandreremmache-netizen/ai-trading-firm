@@ -27,6 +27,28 @@ import math
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# FX PIP CALCULATION HELPERS (P0-6 Fix)
+# =============================================================================
+
+def get_pip_multiplier(pair: str) -> int:
+    """
+    Get pip multiplier for FX pair.
+
+    For JPY pairs (USDJPY, EURJPY, etc.): 1 pip = 0.01, so multiplier = 100
+    For other pairs (EURUSD, GBPUSD, etc.): 1 pip = 0.0001, so multiplier = 10000
+
+    Args:
+        pair: Currency pair (e.g., "USDJPY", "EURUSD")
+
+    Returns:
+        Pip multiplier (100 for JPY pairs, 10000 for others)
+    """
+    if "JPY" in pair.upper():
+        return 100
+    return 10000
+
+
 class FXCorrelationRegime(str, Enum):
     """FX correlation regime states."""
     RISK_ON = "risk_on"  # USD weak, carry trade dominant
@@ -136,7 +158,7 @@ class FXMarketDepthAnalyzer:
             avg_price = total_cost / filled_size
             best_price = levels[0][0] if levels else 0
 
-            impact_pips = abs(avg_price - best_price) * 10000
+            impact_pips = abs(avg_price - best_price) * get_pip_multiplier(pair)  # P0-6: Use proper multiplier for JPY pairs
 
             return {
                 "pair": pair,
@@ -421,10 +443,13 @@ class FXCorrelationRegimeDetector:
         var2 = sum((r - mean2) ** 2 for r in returns2)
 
         denominator = math.sqrt(var1 * var2)
-        if denominator == 0:
+        # Use threshold instead of exact zero to handle numerical precision
+        if denominator < 1e-12:
             return 0.0
 
-        return numerator / denominator
+        # Clip return value to valid correlation range [-1.0, 1.0]
+        correlation = numerator / denominator
+        return max(-1.0, min(1.0, correlation))
 
     def _calculate_regime_probabilities(
         self,

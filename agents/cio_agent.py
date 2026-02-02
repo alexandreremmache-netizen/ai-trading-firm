@@ -235,7 +235,7 @@ class CIOAgent(DecisionAgent):
         - Process signals together after synchronization
         - Avoid making decisions on partial signals
         """
-        while self._enabled:
+        while self._running:
             try:
                 # Wait for barrier to complete (blocking call with timeout)
                 signals = await self._event_bus.wait_for_signals()
@@ -250,7 +250,8 @@ class CIOAgent(DecisionAgent):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"CIO barrier monitoring error: {e}")
+                # CIO decision loop must stay alive - preserve trace for debugging
+                logger.exception(f"CIO barrier monitoring error: {e}")
                 await asyncio.sleep(1.0)
 
     async def _process_barrier_signals(self, signals: dict[str, SignalEvent]) -> None:
@@ -577,6 +578,8 @@ class CIOAgent(DecisionAgent):
 
         Uses the last N signals where both agents provided signals.
         Returns None if insufficient data.
+
+        P1-12: Now properly aligns signals by timestamp instead of index.
         """
         history1 = self._signal_history.get(agent1, [])
         history2 = self._signal_history.get(agent2, [])
@@ -584,20 +587,42 @@ class CIOAgent(DecisionAgent):
         if len(history1) < 10 or len(history2) < 10:
             return None
 
-        # Create aligned time series (match by timestamp proximity)
+        # P1-12: Create time-aligned series using timestamp matching
+        # Convert to dict by timestamp for efficient lookup
+        MAX_TIME_DIFF_SECONDS = 60  # Signals within 60s are considered simultaneous
+
+        dict1 = {ts: val for ts, val in history1}
+        dict2 = {ts: val for ts, val in history2}
+
         values1 = []
         values2 = []
 
-        # Simple alignment: use most recent N values assuming they're roughly synchronized
-        n = min(len(history1), len(history2), self._correlation_lookback)
-        recent1 = history1[-n:]
-        recent2 = history2[-n:]
+        # Find matching timestamps (within tolerance)
+        for ts1, val1 in sorted(dict1.items(), reverse=True):
+            # Find closest timestamp in history2
+            best_match = None
+            best_diff = float('inf')
 
-        for (_, v1), (_, v2) in zip(recent1, recent2):
-            values1.append(v1)
-            values2.append(v2)
+            for ts2, val2 in dict2.items():
+                diff = abs((ts1 - ts2).total_seconds())
+                if diff < best_diff:
+                    best_diff = diff
+                    best_match = (ts2, val2)
+
+            # Only include if timestamps are close enough
+            if best_match and best_diff <= MAX_TIME_DIFF_SECONDS:
+                values1.append(val1)
+                values2.append(best_match[1])
+
+            # Stop when we have enough samples
+            if len(values1) >= self._correlation_lookback:
+                break
 
         if len(values1) < 10:
+            logger.debug(
+                f"Insufficient aligned signals for correlation: "
+                f"{agent1}-{agent2} only {len(values1)} matches"
+            )
             return None
 
         # Calculate Pearson correlation
@@ -799,14 +824,24 @@ class CIOAgent(DecisionAgent):
             # Fall back to conviction-based sizing
             return self._calculate_conviction_size(agg)
 
-        # Need minimum trades for statistical significance
-        MIN_TRADES_FOR_KELLY = 30
+        # P1-9: Need minimum trades for statistical significance
+        # 30 trades gives ~18% standard error on win rate estimation
+        # 50 trades gives ~14% standard error - more reliable for sizing
+        MIN_TRADES_FOR_KELLY = 50  # Increased from 30 for better reliability
+        WARN_TRADES_THRESHOLD = 100  # Warn if below this - still learning
+
         if perf.total_trades < MIN_TRADES_FOR_KELLY:
-            logger.debug(
+            logger.info(
                 f"Kelly: Insufficient trades for {best_strategy} "
                 f"({perf.total_trades}/{MIN_TRADES_FOR_KELLY}), using conviction sizing"
             )
             return self._calculate_conviction_size(agg)
+
+        if perf.total_trades < WARN_TRADES_THRESHOLD:
+            logger.warning(
+                f"Kelly: Low sample size for {best_strategy} ({perf.total_trades} trades). "
+                f"Position sizing may be unreliable. Consider reducing kelly_fraction."
+            )
 
         # Kelly inputs from actual tracked data
         win_rate = perf.win_rate
@@ -838,6 +873,11 @@ class CIOAgent(DecisionAgent):
 
         # Apply half-Kelly for safety
         kelly_fraction *= self._kelly_fraction
+
+        # P1-9: Apply sample size discount - be more conservative with fewer trades
+        # At 50 trades: 0.7x, at 100 trades: 0.85x, at 200+ trades: 1.0x
+        sample_discount = min(1.0, 0.5 + (perf.total_trades / 400))
+        kelly_fraction *= sample_discount
 
         # Calculate position value
         position_value = self._portfolio_value * kelly_fraction

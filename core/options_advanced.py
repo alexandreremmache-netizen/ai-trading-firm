@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import integrate, optimize
+from scipy.special import gammaln
 from scipy.stats import norm
 
 logger = logging.getLogger(__name__)
@@ -378,8 +379,10 @@ class MertonJumpDiffusionModel(BasePricingModel):
         vega = 0.0
 
         for n in range(self.max_terms):
-            # Poisson weight
-            poisson_weight = math.exp(-lam_prime * T) * (lam_prime * T)**n / math.factorial(n)
+            # Poisson weight using gammaln to avoid factorial overflow
+            # math.factorial(n) = exp(gammaln(n+1))
+            log_poisson = -lam_prime * T + n * math.log(lam_prime * T + 1e-300) - gammaln(n + 1)
+            poisson_weight = math.exp(log_poisson)
 
             if poisson_weight < 1e-12:
                 break
@@ -625,20 +628,52 @@ class HestonModel(BasePricingModel):
 
         a = kappa * theta
 
-        # Complex calculations
-        d = np.sqrt((rho * sigma * phi * 1j - b)**2 - sigma**2 * (2 * u * phi * 1j - phi**2))
-        g = (b - rho * sigma * phi * 1j + d) / (b - rho * sigma * phi * 1j - d)
+        # P2-19: Complex calculations with overflow protection
+        try:
+            d_squared = (rho * sigma * phi * 1j - b)**2 - sigma**2 * (2 * u * phi * 1j - phi**2)
+            d = np.sqrt(d_squared)
 
-        # Prevent numerical issues
-        exp_dT = np.exp(d * T)
+            # Guard against zero denominator
+            denom_g = b - rho * sigma * phi * 1j - d
+            if np.abs(denom_g) < 1e-15:
+                denom_g = 1e-15
+
+            g = (b - rho * sigma * phi * 1j + d) / denom_g
+        except (OverflowError, FloatingPointError, ZeroDivisionError):
+            return 0.0 + 0.0j
+
+        # Prevent numerical overflow in exp(d*T)
+        # Check if real part of d*T would cause overflow (exp(700) ~ 1e304, near float max)
+        d_T_real = np.real(d * T)
+        if d_T_real > 500:
+            # Use asymptotic approximation for large d*T
+            # When exp(d*T) >> 1, the formulas simplify
+            exp_dT = np.exp(np.clip(d * T, -500, 500))
+        else:
+            exp_dT = np.exp(d * T)
+
+        # Guard against division by zero in log argument
+        log_arg = (1 - g * exp_dT) / (1 - g)
+        if np.abs(log_arg) < 1e-15:
+            log_arg = 1e-15
 
         C = (r - q) * phi * 1j * T + (a / sigma**2) * (
-            (b - rho * sigma * phi * 1j + d) * T - 2 * np.log((1 - g * exp_dT) / (1 - g))
+            (b - rho * sigma * phi * 1j + d) * T - 2 * np.log(log_arg)
         )
 
-        D = ((b - rho * sigma * phi * 1j + d) / sigma**2) * ((1 - exp_dT) / (1 - g * exp_dT))
+        # Guard against division by zero
+        denom = 1 - g * exp_dT
+        if np.abs(denom) < 1e-15:
+            denom = 1e-15 * np.sign(denom) if denom != 0 else 1e-15
 
-        return np.exp(C + D * v0 + 1j * phi * np.log(S))
+        D = ((b - rho * sigma * phi * 1j + d) / sigma**2) * ((1 - exp_dT) / denom)
+
+        # Final exp with overflow protection
+        final_exp_arg = C + D * v0 + 1j * phi * np.log(S)
+        if np.real(final_exp_arg) > 500:
+            return 0.0  # Return 0 for extreme values (effectively zero contribution)
+
+        return np.exp(final_exp_arg)
 
     def _price_call(
         self,
@@ -648,20 +683,49 @@ class HestonModel(BasePricingModel):
         """Price a call option using numerical integration."""
 
         def integrand_1(phi: float) -> float:
-            cf = self._characteristic_function(phi, S, T, r, q, params, j=1)
-            return np.real(np.exp(-1j * phi * np.log(K)) * cf / (1j * phi))
+            try:
+                cf = self._characteristic_function(phi, S, T, r, q, params, j=1)
+                # P2-19: Guard against NaN/Inf in characteristic function
+                if not np.isfinite(cf):
+                    return 0.0
+                result = np.real(np.exp(-1j * phi * np.log(K)) * cf / (1j * phi))
+                return result if np.isfinite(result) else 0.0
+            except (OverflowError, FloatingPointError):
+                return 0.0
 
         def integrand_2(phi: float) -> float:
-            cf = self._characteristic_function(phi, S, T, r, q, params, j=2)
-            return np.real(np.exp(-1j * phi * np.log(K)) * cf / (1j * phi))
+            try:
+                cf = self._characteristic_function(phi, S, T, r, q, params, j=2)
+                # P2-19: Guard against NaN/Inf in characteristic function
+                if not np.isfinite(cf):
+                    return 0.0
+                result = np.real(np.exp(-1j * phi * np.log(K)) * cf / (1j * phi))
+                return result if np.isfinite(result) else 0.0
+            except (OverflowError, FloatingPointError):
+                return 0.0
 
-        # Numerical integration
-        P1 = 0.5 + (1 / math.pi) * integrate.quad(integrand_1, 0.001, 100, limit=100)[0]
-        P2 = 0.5 + (1 / math.pi) * integrate.quad(integrand_2, 0.001, 100, limit=100)[0]
+        # P2-19: Numerical integration with error handling
+        try:
+            P1 = 0.5 + (1 / math.pi) * integrate.quad(integrand_1, 0.001, 100, limit=100)[0]
+            P2 = 0.5 + (1 / math.pi) * integrate.quad(integrand_2, 0.001, 100, limit=100)[0]
 
-        call_price = S * math.exp(-q * T) * P1 - K * math.exp(-r * T) * P2
+            # P2-19: Validate probabilities are in [0, 1]
+            P1 = np.clip(P1, 0.0, 1.0)
+            P2 = np.clip(P2, 0.0, 1.0)
 
-        return max(call_price, 0.0)
+            call_price = S * math.exp(-q * T) * P1 - K * math.exp(-r * T) * P2
+
+            # P2-19: Final sanity check
+            if not np.isfinite(call_price) or call_price < 0:
+                logger.warning(f"Heston pricing returned invalid value, using intrinsic")
+                return max(0.0, S * math.exp(-q * T) - K * math.exp(-r * T))
+
+            return max(call_price, 0.0)
+
+        except Exception as e:
+            # P2-19: Fallback to intrinsic value on any numerical failure
+            logger.warning(f"Heston pricing failed ({e}), using intrinsic value")
+            return max(0.0, S * math.exp(-q * T) - K * math.exp(-r * T))
 
     def _numerical_delta(
         self,

@@ -116,10 +116,7 @@ def validate_lei(lei: str, strict: bool = True) -> tuple[bool, str]:
     if strict and lou_prefix not in VALID_LOU_PREFIXES:
         # Check if first 6 characters match (some LOUs have 6-char prefixes)
         if lei[:6] not in VALID_LOU_PREFIXES:
-            logger.warning(
-                f"LEI LOU prefix '{lou_prefix}' not in known valid list - "
-                "may still be valid but recommend GLEIF verification"
-            )
+            return False, f"LEI LOU prefix '{lou_prefix}' not in known valid list - GLEIF verification required"
 
     # Characters 5-6 should be "00" for standard LEIs
     if strict and lei[4:6] != "00":
@@ -130,16 +127,19 @@ def validate_lei(lei: str, strict: bool = True) -> tuple[bool, str]:
 
     # MOD 97-10 checksum validation (ISO 7064)
     # Convert letters to numbers: A=10, B=11, ..., Z=35
-    numeric_lei = ""
-    for char in lei:
-        if char.isdigit():
-            numeric_lei += char
-        else:
-            numeric_lei += str(ord(char) - ord('A') + 10)
-
-    # Check digit validation: number mod 97 should equal 1
+    # Use incremental modulo calculation to avoid creating large integers
+    # and improve performance for the 20+ digit numbers involved
     try:
-        checksum = int(numeric_lei) % 97
+        checksum = 0
+        for char in lei:
+            if char.isdigit():
+                # For single digit, multiply current checksum by 10 and add digit
+                checksum = (checksum * 10 + int(char)) % 97
+            else:
+                # Letters convert to 2-digit numbers (A=10, B=11, ..., Z=35)
+                # so we need to multiply by 100 (shift two decimal places)
+                letter_value = ord(char) - ord('A') + 10
+                checksum = (checksum * 100 + letter_value) % 97
         if checksum != 1:
             return False, f"LEI checksum invalid (got {checksum}, expected 1)"
     except ValueError:
@@ -395,6 +395,29 @@ class ComplianceAgent(ValidationAgent):
     async def initialize(self) -> None:
         """Initialize compliance agent."""
         logger.info(f"ComplianceAgent initializing (jurisdiction={self._jurisdiction})")
+
+        # P0-3: CRITICAL - Validate entity LEI at startup (MiFID II requirement)
+        # LEI is mandatory for transaction reporting and compliance
+        if not self._entity_lei:
+            error_msg = (
+                "Entity LEI is not configured. "
+                "LEI (Legal Entity Identifier) is MANDATORY for MiFID II compliance and transaction reporting. "
+                "Configure 'entity_lei' parameter in ComplianceAgent config."
+            )
+            logger.critical(error_msg)
+            raise ValueError(error_msg)
+
+        # Validate LEI format and authenticity
+        lei_validation_result = self.validate_entity_lei()
+        if not lei_validation_result.passed:
+            error_msg = (
+                f"Entity LEI validation failed: {lei_validation_result.message}. "
+                f"Cannot start ComplianceAgent without valid LEI (MiFID II requirement)."
+            )
+            logger.critical(error_msg)
+            raise ValueError(error_msg)
+
+        logger.info(f"Entity LEI validated successfully: {self._entity_lei[:4]}...{self._entity_lei[-4:]}")
 
         # Load blackout calendar
         await self._load_blackout_calendar()

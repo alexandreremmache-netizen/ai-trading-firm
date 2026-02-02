@@ -282,27 +282,26 @@ class TransactionReportingAgent(BaseAgent):
 
     async def initialize(self) -> None:
         """Initialize the agent."""
-        # Validate firm LEI at startup (Issue #I3)
+        # P0-4: CRITICAL - Validate firm LEI at startup (MiFID II requirement)
+        # Transaction reporting CANNOT be silently disabled - it's a legal requirement
         if self._enabled:
             if not self._firm_lei:
-                logger.critical(
+                error_msg = (
                     "CRITICAL: firm_lei not configured! "
-                    "Transaction reporting will fail. "
-                    "Set transaction_reporting.firm_lei in config.yaml"
+                    "Transaction reporting is MANDATORY under MiFID II. "
+                    "Set transaction_reporting.firm_lei in config.yaml. "
+                    "System cannot start without valid LEI."
                 )
+                logger.critical(error_msg)
+                raise ValueError(error_msg)
             elif not self._validate_lei(self._firm_lei):
-                logger.critical(
+                error_msg = (
                     f"CRITICAL: Invalid or placeholder LEI detected: {self._firm_lei}. "
-                    "Replace with a valid LEI before production! "
-                    "Get your LEI from a Local Operating Unit (LOU) "
-                    "registered with GLEIF: https://www.gleif.org/"
+                    "A valid LEI from GLEIF (https://www.gleif.org/) is REQUIRED for MiFID II compliance. "
+                    "Transaction reporting cannot be disabled. System cannot start without valid LEI."
                 )
-                # Disable reporting if LEI is invalid
-                self._enabled = False
-                logger.warning(
-                    "Transaction reporting DISABLED due to invalid LEI. "
-                    "Reports will not be generated until a valid LEI is configured."
-                )
+                logger.critical(error_msg)
+                raise ValueError(error_msg)
             else:
                 logger.info(f"Firm LEI validated: {self._firm_lei[:4]}...{self._firm_lei[-4:]}")
 
@@ -385,7 +384,7 @@ class TransactionReportingAgent(BaseAgent):
             # Quantity and price
             quantity=float(fill.filled_quantity),
             price=fill.fill_price,
-            price_currency="USD",  # Assuming USD, should come from config
+            price_currency=self._reporting_config.get("default_currency", "USD"),
             net_amount=fill.filled_quantity * fill.fill_price,
 
             # Venue
@@ -494,7 +493,7 @@ class TransactionReportingAgent(BaseAgent):
                 # Don't break - try next report if this one failed
                 self._pending_reports.popleft()
                 self._pending_reports.append(report)  # Move to end
-                break  # Avoid tight loop on repeated failures
+                continue  # Continue to try next report instead of breaking
 
     async def _submit_report(self, report: TransactionReport) -> bool:
         """
