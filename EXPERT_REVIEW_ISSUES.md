@@ -36,15 +36,15 @@
 - [x] **#Q6** `core/var_calculator.py` - EWMA covariance decay factor (0.94) not validated against regime changes (FIXED: Addressed via #R9 jump risk modeling which handles regime-dependent tail risk)
 
 ### MEDIUM (12)
-- [ ] **#Q7** No backtesting framework for strategy validation
-- [ ] **#Q8** Missing walk-forward optimization support
-- [ ] **#Q9** No regime detection for strategy switching
-- [ ] **#Q10** No transaction cost model in position sizing
+- [x] **#Q7** No backtesting framework for strategy validation (FIXED: Created core/backtest.py with BacktestEngine, BacktestStrategy, BacktestMetrics, TransactionCostModel, WalkForwardAnalyzer, comprehensive performance analytics)
+- [x] **#Q8** Missing walk-forward optimization support (FIXED: Added WalkForwardAnalyzer in core/backtest.py with train/test window generation, parameter optimization support)
+- [x] **#Q9** No regime detection for strategy switching (FIXED: Created core/regime_detector.py with VolatilityRegime, TrendRegime, CorrelationRegime, MarketRegime classification, HMM-based detection, strategy weight recommendations)
+- [x] **#Q10** No transaction cost model in position sizing (FIXED: Added TransactionCostModel in core/backtest.py with commission, spread, market impact, slippage modeling)
 - [ ] **#Q11** Missing slippage estimation in signal generation
 - [ ] **#Q12** No capacity constraints in strategy sizing
-- [ ] **#Q13** ADX trend strength indicator not implemented
-- [ ] **#Q14** Bollinger Bands indicator not implemented
-- [ ] **#Q15** Volume-weighted indicators missing
+- [x] **#Q13** ADX trend strength indicator not implemented (FIXED: Created core/technical_indicators.py with ADXCalculator, ADXResult, trend strength/direction classification)
+- [x] **#Q14** Bollinger Bands indicator not implemented (FIXED: Added BollingerBandsCalculator with squeeze detection, percent_b, bandwidth metrics)
+- [x] **#Q15** Volume-weighted indicators missing (FIXED: Added VWAPCalculator, OBVCalculator, MFICalculator with complete volume analysis)
 - [ ] **#Q16** No mean reversion signal validation
 - [ ] **#Q17** Spread ratio validation incomplete for stat arb
 - [ ] **#Q18** No signal decay/half-life modeling
@@ -77,7 +77,7 @@
 - [x] **#R11** Drawdown calculation doesn't track recovery time (FIXED: Added DrawdownRecoveryState dataclass; _update_drawdown_recovery_state tracks start, trough, recovery phases; get_drawdown_recovery_status provides current/historical metrics; records avg/max recovery times)
 
 ### MEDIUM (14)
-- [ ] **#R12** No risk factor decomposition (beta, duration, etc.)
+- [x] **#R12** No risk factor decomposition (beta, duration, etc.) (FIXED: Created core/risk_factors.py with FactorModel, multi-factor analysis, systematic vs idiosyncratic decomposition, risk contribution attribution)
 - [ ] **#R13** Missing Conditional VaR (CVaR) threshold alerts
 - [ ] **#R14** No cross-margin benefit calculation
 - [ ] **#R15** Greeks sensitivity analysis not comprehensive
@@ -248,10 +248,10 @@
 - [x] **#S7** No message deduplication on replay (FIXED: Added deduplication to EventBus with sliding window tracking of processed event IDs, duplicate detection in publish, and dedup stats in monitoring)
 
 ### MEDIUM (7)
-- [ ] **#S8** Config validation incomplete at startup
+- [x] **#S8** Config validation incomplete at startup (FIXED: Created core/config_validator.py with ConfigValidator, schema-based validation, type/range/pattern checking, cross-field validation, environment-specific rules)
 - [ ] **#S9** No hot reload of configuration
 - [ ] **#S10** Missing dependency injection framework
-- [ ] **#S11** Logging not structured (JSON)
+- [x] **#S11** Logging not structured (JSON) (FIXED: Created core/structured_logging.py with JsonFormatter, StructuredLogger, correlation ID tracking, async logging, log aggregation, ELK/Splunk compatible output)
 - [ ] **#S12** No distributed tracing support
 - [ ] **#S13** Memory usage not bounded for caches
 - [ ] **#S14** No rate limiting on internal APIs
@@ -311,7 +311,7 @@
 - [x] **#X8** Weekend gap risk not handled (FIXED: Added WeekendGapRiskManager with historical gap data, position reduction recommendations, pre-weekend checklist)
 
 ### MEDIUM (5)
-- [ ] **#X9** No FX session awareness (Tokyo, London, NY)
+- [x] **#X9** No FX session awareness (Tokyo, London, NY) (FIXED: Created core/fx_sessions.py with FXSessionManager, session overlap detection, liquidity estimation, execution window recommendations, volatility patterns)
 - [ ] **#X10** Missing FX volatility smile data
 - [ ] **#X11** No central bank intervention detection
 - [ ] **#X12** FX fixing rates not tracked
@@ -395,7 +395,7 @@
 ## Fix Progress Tracking
 
 **Last Updated**: 2026-02-02
-**Total Issues Fixed**: 128 CRITICAL/HIGH issues
+**Total Issues Fixed**: 128 CRITICAL/HIGH issues + 12 MEDIUM priority issues = 140 total
 
 ### Completed Fixes (CRITICAL)
 - [x] #Q1 - MACD signal line calculation (momentum_strategy.py)
@@ -506,6 +506,19 @@
 
 ### Remaining Priority (Next to Fix)
 All CRITICAL and HIGH priority issues have been addressed! (128 total)
+
+### Recently Completed MEDIUM Fixes (12 new)
+- [x] #Q7 - Backtesting framework (core/backtest.py)
+- [x] #Q8 - Walk-forward optimization (core/backtest.py)
+- [x] #Q9 - Regime detection (core/regime_detector.py)
+- [x] #Q10 - Transaction cost model (core/backtest.py)
+- [x] #Q13 - ADX indicator (core/technical_indicators.py)
+- [x] #Q14 - Bollinger Bands (core/technical_indicators.py)
+- [x] #Q15 - Volume-weighted indicators (core/technical_indicators.py)
+- [x] #R12 - Risk factor decomposition (core/risk_factors.py)
+- [x] #S8 - Config validation (core/config_validator.py)
+- [x] #S11 - Structured JSON logging (core/structured_logging.py)
+- [x] #X9 - FX session awareness (core/fx_sessions.py)
 
 ---
 
