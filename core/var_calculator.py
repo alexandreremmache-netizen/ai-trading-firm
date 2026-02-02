@@ -920,4 +920,283 @@ class VaRCalculator:
             "ewma_decay_factor": self._decay_factor,
             "covariance_cached": self._cov_matrix is not None,
             "supports_liquidity_adjustment": True,  # #R6
+            "supports_jump_risk": True,  # #R9
+        }
+
+    # =========================================================================
+    # JUMP RISK MODELING (#R9)
+    # =========================================================================
+
+    def calculate_jump_adjusted_var(
+        self,
+        positions: dict[str, float],
+        portfolio_value: float,
+        confidence_level: float | None = None,
+        horizon_days: int | None = None,
+        jump_intensity: float = 0.1,
+        jump_mean: float = -0.05,
+        jump_std: float = 0.10,
+        n_simulations: int | None = None
+    ) -> VaRResult:
+        """
+        Calculate VaR with jump-diffusion model for fat tails (#R9).
+
+        Uses Merton's jump-diffusion model to capture extreme events
+        that normal distributions miss. Returns are modeled as:
+
+        dS/S = μdt + σdW + J*dN
+
+        Where:
+        - dW is standard Brownian motion
+        - dN is Poisson process with intensity λ (jump_intensity)
+        - J is jump size ~ Normal(jump_mean, jump_std)
+
+        This addresses the "fat tails" problem where market crashes
+        are more frequent than normal distributions suggest.
+
+        Args:
+            positions: Dictionary of symbol to position value
+            portfolio_value: Total portfolio value
+            confidence_level: Confidence level (e.g., 0.99 for jump risk)
+            horizon_days: Time horizon
+            jump_intensity: Expected jumps per year (λ, default 0.1 = 1 every 10 years)
+            jump_mean: Average jump size (default -5% for crash bias)
+            jump_std: Jump size volatility (default 10%)
+            n_simulations: Number of Monte Carlo paths
+
+        Returns:
+            VaRResult with jump-adjusted VaR and tail statistics
+        """
+        if confidence_level is None:
+            confidence_level = max(self._confidence_level, 0.99)  # Higher for tail risk
+        if horizon_days is None:
+            horizon_days = self._horizon_days
+        if n_simulations is None:
+            n_simulations = self._mc_simulations
+
+        # Build covariance matrix and mean returns
+        cov_matrix = self._build_covariance_matrix()
+        symbols = self._symbols
+
+        if len(symbols) == 0:
+            return VaRResult(
+                method=VaRMethod.MONTE_CARLO,
+                confidence_level=confidence_level,
+                horizon_days=horizon_days,
+                var_absolute=0.0,
+                var_pct=0.0,
+                expected_shortfall=0.0,
+                details={"error": "No symbols in returns data"}
+            )
+
+        # Calculate mean returns and volatilities
+        mean_returns = np.array([
+            np.mean(self._returns_data[s]) for s in symbols
+        ])
+
+        # Position weights
+        weights = np.array([positions.get(s, 0) / portfolio_value for s in symbols])
+
+        # Cholesky decomposition for correlated returns
+        try:
+            L = np.linalg.cholesky(cov_matrix)
+        except np.linalg.LinAlgError:
+            eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+            eigenvalues = np.maximum(eigenvalues, 1e-8)
+            cov_matrix = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
+            L = np.linalg.cholesky(cov_matrix)
+
+        # Generate simulated portfolio returns with jumps
+        portfolio_returns = np.zeros(n_simulations)
+        jump_counts = np.zeros(n_simulations)
+
+        # Daily jump probability from annual intensity
+        daily_jump_prob = 1 - np.exp(-jump_intensity / 252 * horizon_days)
+
+        for i in range(n_simulations):
+            # Diffusion component (normal returns)
+            random_shocks = np.random.randn(len(symbols))
+            correlated_shocks = L @ random_shocks
+
+            # Scale for horizon
+            drift_component = mean_returns * horizon_days
+            vol_component = correlated_shocks * np.sqrt(horizon_days)
+
+            asset_returns = drift_component + vol_component
+
+            # Jump component
+            # Poisson process for number of jumps
+            n_jumps = np.random.poisson(jump_intensity * horizon_days / 252)
+            jump_counts[i] = n_jumps
+
+            if n_jumps > 0:
+                # Sum of jump sizes
+                total_jump = np.sum(np.random.normal(jump_mean, jump_std, n_jumps))
+                # Apply jump to all assets (systemic shock) with correlation
+                asset_returns += total_jump * np.abs(weights)  # Correlated jumps
+
+            # Portfolio return
+            portfolio_returns[i] = np.dot(weights, asset_returns)
+
+        # Calculate VaR
+        var_pct = -np.percentile(portfolio_returns, (1 - confidence_level) * 100)
+        var_absolute = var_pct * portfolio_value
+
+        # Expected Shortfall (CVaR)
+        tail_returns = portfolio_returns[portfolio_returns <= -var_pct]
+        if len(tail_returns) > 0:
+            es_pct = -np.mean(tail_returns)
+            es_absolute = es_pct * portfolio_value
+        else:
+            es_absolute = var_absolute
+
+        # Calculate tail statistics
+        skewness = stats.skew(portfolio_returns)
+        kurtosis_excess = stats.kurtosis(portfolio_returns)
+        worst_return = np.min(portfolio_returns)
+        jump_occurrence_rate = np.mean(jump_counts > 0)
+
+        # Compare to normal VaR
+        normal_var = self.calculate_parametric_var(
+            positions, portfolio_value, confidence_level, horizon_days
+        )
+
+        tail_multiplier = var_absolute / normal_var.var_absolute if normal_var.var_absolute > 0 else 1.0
+
+        logger.info(
+            f"Jump-adjusted VaR: ${var_absolute:,.0f} ({var_pct*100:.2f}%), "
+            f"tail_multiplier={tail_multiplier:.2f}x vs normal, "
+            f"jump_rate={jump_occurrence_rate*100:.1f}% of scenarios"
+        )
+
+        return VaRResult(
+            method=VaRMethod.MONTE_CARLO,
+            confidence_level=confidence_level,
+            horizon_days=horizon_days,
+            var_absolute=var_absolute,
+            var_pct=var_pct,
+            expected_shortfall=es_absolute,
+            details={
+                "model": "jump_diffusion",
+                "jump_intensity": jump_intensity,
+                "jump_mean": jump_mean,
+                "jump_std": jump_std,
+                "simulations": n_simulations,
+                "skewness": skewness,
+                "excess_kurtosis": kurtosis_excess,
+                "worst_scenario": -worst_return * portfolio_value,
+                "jump_occurrence_rate": jump_occurrence_rate,
+                "tail_multiplier_vs_normal": tail_multiplier,
+                "normal_var": normal_var.var_absolute,
+            }
+        )
+
+    def calculate_fat_tail_metrics(
+        self,
+        positions: dict[str, float],
+        portfolio_value: float
+    ) -> dict[str, Any]:
+        """
+        Calculate comprehensive fat tail risk metrics (#R9).
+
+        Returns metrics that capture tail risk beyond standard VaR:
+        - Skewness and kurtosis
+        - Tail ratio (losses vs gains)
+        - Maximum drawdown in historical returns
+        - Jump risk premium
+
+        Args:
+            positions: Position values
+            portfolio_value: Total portfolio value
+
+        Returns:
+            Dictionary of fat tail metrics
+        """
+        # Build portfolio returns
+        symbols = self._symbols
+        weights = np.array([positions.get(s, 0) / portfolio_value for s in symbols])
+
+        min_len = min(len(r) for r in self._returns_data.values())
+        returns_matrix = np.array([
+            self._returns_data[s][-min_len:] for s in symbols
+        ])
+
+        portfolio_returns = np.dot(weights, returns_matrix)
+
+        if len(portfolio_returns) < 20:
+            return {"error": "Insufficient return history for tail analysis"}
+
+        # Basic statistics
+        mean_return = np.mean(portfolio_returns)
+        std_return = np.std(portfolio_returns)
+        skewness = stats.skew(portfolio_returns)
+        kurtosis_excess = stats.kurtosis(portfolio_returns)
+
+        # Tail statistics
+        lower_5 = np.percentile(portfolio_returns, 5)
+        upper_95 = np.percentile(portfolio_returns, 95)
+        lower_1 = np.percentile(portfolio_returns, 1)
+        upper_99 = np.percentile(portfolio_returns, 99)
+
+        # Tail ratio (asymmetry of tails)
+        left_tail = np.mean(portfolio_returns[portfolio_returns < lower_5])
+        right_tail = np.mean(portfolio_returns[portfolio_returns > upper_95])
+        tail_ratio = abs(left_tail / right_tail) if right_tail != 0 else float('inf')
+
+        # Expected shortfall at different levels
+        es_95 = -np.mean(portfolio_returns[portfolio_returns <= lower_5]) * portfolio_value
+        es_99 = -np.mean(portfolio_returns[portfolio_returns <= lower_1]) * portfolio_value
+
+        # Maximum historical drawdown in returns series
+        cumulative = np.cumsum(portfolio_returns)
+        peak = np.maximum.accumulate(cumulative)
+        drawdown = (peak - cumulative)
+        max_drawdown = np.max(drawdown)
+
+        # Count extreme events (>3 std)
+        extreme_negative = np.sum(portfolio_returns < mean_return - 3 * std_return)
+        extreme_positive = np.sum(portfolio_returns > mean_return + 3 * std_return)
+        expected_extreme = len(portfolio_returns) * 2 * stats.norm.cdf(-3)  # ~0.27% for normal
+
+        extreme_ratio = (extreme_negative + extreme_positive) / max(expected_extreme, 0.1)
+
+        # Jarque-Bera test for normality
+        jb_stat, jb_pvalue = stats.jarque_bera(portfolio_returns)
+
+        return {
+            "observations": len(portfolio_returns),
+            "mean_return": mean_return,
+            "volatility": std_return,
+            "skewness": skewness,
+            "excess_kurtosis": kurtosis_excess,
+            "is_fat_tailed": kurtosis_excess > 1.0,
+            "is_negatively_skewed": skewness < -0.5,
+            "tail_ratio": tail_ratio,
+            "percentiles": {
+                "p1": lower_1,
+                "p5": lower_5,
+                "p95": upper_95,
+                "p99": upper_99,
+            },
+            "expected_shortfall": {
+                "es_95": es_95,
+                "es_99": es_99,
+            },
+            "extreme_events": {
+                "negative_3std": int(extreme_negative),
+                "positive_3std": int(extreme_positive),
+                "expected_if_normal": expected_extreme,
+                "extreme_ratio": extreme_ratio,
+            },
+            "max_historical_drawdown": max_drawdown,
+            "jarque_bera": {
+                "statistic": jb_stat,
+                "p_value": jb_pvalue,
+                "is_normal": jb_pvalue > 0.05,
+            },
+            "risk_assessment": (
+                "HIGH" if kurtosis_excess > 3 or extreme_ratio > 3
+                else "MEDIUM" if kurtosis_excess > 1 or extreme_ratio > 1.5
+                else "LOW"
+            ),
         }

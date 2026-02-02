@@ -137,6 +137,68 @@ class LiquidityMetrics:
 
 
 @dataclass
+class DrawdownRecoveryState:
+    """
+    Tracks drawdown recovery metrics (#R11).
+
+    Monitors:
+    - Current drawdown start time
+    - Historical recovery times
+    - Recovery velocity
+    """
+    drawdown_start_time: datetime | None = None
+    drawdown_start_equity: float = 0.0
+    drawdown_trough_equity: float = 0.0
+    drawdown_trough_time: datetime | None = None
+    recovery_start_time: datetime | None = None  # When we started recovering
+    is_recovering: bool = False  # True when climbing back from trough
+
+    # Historical metrics
+    recovery_times_days: list[float] = field(default_factory=list)  # Days to recover from past drawdowns
+    avg_recovery_time_days: float = 0.0
+    max_recovery_time_days: float = 0.0
+    recovery_count: int = 0  # Number of completed recoveries
+
+
+@dataclass
+class MarginState:
+    """
+    Intraday margin monitoring state (#R10).
+
+    Tracks margin requirements throughout the trading day,
+    not just at EOD.
+    """
+    initial_margin: float = 0.0
+    maintenance_margin: float = 0.0
+    available_margin: float = 0.0
+    margin_utilization_pct: float = 0.0
+    margin_excess: float = 0.0  # Available - Maintenance
+
+    # Intraday tracking
+    last_margin_check: datetime | None = None
+    margin_check_count_today: int = 0
+    intraday_peak_utilization: float = 0.0
+    intraday_margin_calls: int = 0
+
+    # Thresholds
+    warning_utilization_pct: float = 70.0
+    critical_utilization_pct: float = 85.0
+    margin_call_pct: float = 100.0
+
+    def is_warning(self) -> bool:
+        """Check if margin is at warning level."""
+        return self.margin_utilization_pct >= self.warning_utilization_pct
+
+    def is_critical(self) -> bool:
+        """Check if margin is at critical level."""
+        return self.margin_utilization_pct >= self.critical_utilization_pct
+
+    def is_margin_call(self) -> bool:
+        """Check if in margin call territory."""
+        return self.margin_utilization_pct >= self.margin_call_pct
+
+
+@dataclass
 class RiskState:
     """Current risk state of the portfolio."""
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -157,6 +219,12 @@ class RiskState:
     peak_equity: float = 1_000_000.0
     current_drawdown_pct: float = 0.0
     max_drawdown_pct: float = 0.0
+
+    # Drawdown recovery tracking (#R11)
+    drawdown_recovery: DrawdownRecoveryState = field(default_factory=DrawdownRecoveryState)
+
+    # Margin tracking (#R10)
+    margin: MarginState = field(default_factory=MarginState)
 
     # Risk metrics
     var_95: float = 0.0
@@ -1186,8 +1254,14 @@ class RiskAgent(ValidationAgent):
             if portfolio.net_liquidation > 0:
                 self._risk_state.leverage = self._risk_state.gross_exposure / portfolio.net_liquidation
 
+            # Update drawdown recovery tracking (#R11)
+            self._update_drawdown_recovery_state(portfolio.net_liquidation)
+
             # Check for intraday VaR recalculation (#R2)
             await self._maybe_recalculate_var()
+
+            # Check for intraday margin update (#R10)
+            await self.refresh_margin_from_broker()
 
         except Exception as e:
             logger.error(f"Failed to refresh portfolio state: {e}")
@@ -2210,6 +2284,317 @@ class RiskAgent(ValidationAgent):
         """Set correlation manager."""
         self._correlation_manager = correlation_manager
 
+    # =========================================================================
+    # INTRADAY MARGIN MONITORING (#R10)
+    # =========================================================================
+
+    async def update_margin_state(
+        self,
+        initial_margin: float,
+        maintenance_margin: float,
+        available_margin: float | None = None
+    ) -> None:
+        """
+        Update margin state for intraday monitoring (#R10).
+
+        Should be called periodically (e.g., every trade or every minute)
+        to monitor margin utilization throughout the day.
+
+        Args:
+            initial_margin: Required initial margin
+            maintenance_margin: Required maintenance margin
+            available_margin: Available margin (calculated if not provided)
+        """
+        now = datetime.now(timezone.utc)
+        margin = self._risk_state.margin
+
+        # Update margin values
+        margin.initial_margin = initial_margin
+        margin.maintenance_margin = maintenance_margin
+
+        if available_margin is not None:
+            margin.available_margin = available_margin
+        else:
+            # Calculate from net liquidation minus maintenance
+            margin.available_margin = self._risk_state.net_liquidation - maintenance_margin
+
+        margin.margin_excess = margin.available_margin - maintenance_margin
+
+        # Calculate utilization
+        if self._risk_state.net_liquidation > 0:
+            margin.margin_utilization_pct = (initial_margin / self._risk_state.net_liquidation) * 100
+        else:
+            margin.margin_utilization_pct = 100.0
+
+        # Track intraday peak
+        if margin.margin_utilization_pct > margin.intraday_peak_utilization:
+            margin.intraday_peak_utilization = margin.margin_utilization_pct
+
+        margin.last_margin_check = now
+        margin.margin_check_count_today += 1
+
+        # Check for alerts
+        await self._check_margin_alerts(margin)
+
+        logger.debug(
+            f"Margin updated: utilization={margin.margin_utilization_pct:.1f}%, "
+            f"excess=${margin.margin_excess:,.0f}"
+        )
+
+    async def _check_margin_alerts(self, margin: MarginState) -> None:
+        """Check margin levels and publish alerts (#R10)."""
+        if margin.is_margin_call():
+            # Critical - margin call territory
+            margin.intraday_margin_calls += 1
+
+            alert = RiskAlertEvent(
+                source_agent=self.name,
+                severity=RiskAlertSeverity.EMERGENCY,
+                alert_type="margin_call",
+                message=f"MARGIN CALL: Utilization {margin.margin_utilization_pct:.1f}% exceeds {margin.margin_call_pct}%",
+                current_value=margin.margin_utilization_pct,
+                threshold_value=margin.margin_call_pct,
+                halt_trading=True,
+            )
+            await self._event_bus.publish(alert)
+
+            logger.critical(
+                f"MARGIN CALL: Utilization {margin.margin_utilization_pct:.1f}%, "
+                f"excess=${margin.margin_excess:,.0f}"
+            )
+
+            # Consider triggering kill switch on margin call
+            if margin.margin_excess < 0:
+                await self._activate_kill_switch(
+                    KillSwitchReason.ANOMALY_DETECTED,
+                    KillSwitchAction.CANCEL_PENDING,
+                    triggered_by="margin_call"
+                )
+
+        elif margin.is_critical():
+            alert = RiskAlertEvent(
+                source_agent=self.name,
+                severity=RiskAlertSeverity.HIGH,
+                alert_type="margin_critical",
+                message=f"Critical margin: Utilization {margin.margin_utilization_pct:.1f}% approaching call level",
+                current_value=margin.margin_utilization_pct,
+                threshold_value=margin.critical_utilization_pct,
+                halt_trading=False,
+            )
+            await self._event_bus.publish(alert)
+
+            logger.warning(
+                f"Margin CRITICAL: Utilization {margin.margin_utilization_pct:.1f}%"
+            )
+
+        elif margin.is_warning():
+            logger.info(
+                f"Margin WARNING: Utilization {margin.margin_utilization_pct:.1f}% above {margin.warning_utilization_pct}%"
+            )
+
+    async def refresh_margin_from_broker(self) -> None:
+        """
+        Refresh margin state from broker (#R10).
+
+        Should be called periodically for real-time margin monitoring.
+        """
+        if not self._broker:
+            return
+
+        try:
+            # Get margin info from broker
+            if hasattr(self._broker, 'get_margin_state'):
+                broker_margin = await self._broker.get_margin_state()
+                await self.update_margin_state(
+                    initial_margin=broker_margin.initial_margin,
+                    maintenance_margin=broker_margin.maintenance_margin,
+                    available_margin=broker_margin.available_margin,
+                )
+            elif hasattr(self._broker, 'get_account_summary'):
+                # Fallback to account summary
+                summary = await self._broker.get_account_summary()
+                if 'InitMarginReq' in summary and 'MaintMarginReq' in summary:
+                    await self.update_margin_state(
+                        initial_margin=float(summary.get('InitMarginReq', 0)),
+                        maintenance_margin=float(summary.get('MaintMarginReq', 0)),
+                        available_margin=float(summary.get('AvailableFunds', 0)),
+                    )
+        except Exception as e:
+            logger.error(f"Failed to refresh margin from broker: {e}")
+
+    def get_margin_status(self) -> dict:
+        """Get current margin monitoring status (#R10)."""
+        margin = self._risk_state.margin
+        return {
+            "initial_margin": margin.initial_margin,
+            "maintenance_margin": margin.maintenance_margin,
+            "available_margin": margin.available_margin,
+            "margin_excess": margin.margin_excess,
+            "utilization_pct": margin.margin_utilization_pct,
+            "status": (
+                "MARGIN_CALL" if margin.is_margin_call()
+                else "CRITICAL" if margin.is_critical()
+                else "WARNING" if margin.is_warning()
+                else "NORMAL"
+            ),
+            "intraday": {
+                "peak_utilization_pct": margin.intraday_peak_utilization,
+                "margin_calls_today": margin.intraday_margin_calls,
+                "checks_today": margin.margin_check_count_today,
+                "last_check": margin.last_margin_check.isoformat() if margin.last_margin_check else None,
+            },
+            "thresholds": {
+                "warning_pct": margin.warning_utilization_pct,
+                "critical_pct": margin.critical_utilization_pct,
+                "margin_call_pct": margin.margin_call_pct,
+            },
+        }
+
+    def reset_intraday_margin_tracking(self) -> None:
+        """Reset intraday margin tracking (call at start of day)."""
+        margin = self._risk_state.margin
+        margin.intraday_peak_utilization = margin.margin_utilization_pct
+        margin.intraday_margin_calls = 0
+        margin.margin_check_count_today = 0
+
+    # =========================================================================
+    # DRAWDOWN RECOVERY TIME TRACKING (#R11)
+    # =========================================================================
+
+    def _update_drawdown_recovery_state(self, current_equity: float) -> None:
+        """
+        Update drawdown recovery tracking state (#R11).
+
+        Called whenever portfolio equity changes to track:
+        - When drawdowns begin
+        - When troughs are reached
+        - Recovery progress
+        - Time to recover
+
+        Args:
+            current_equity: Current portfolio equity
+        """
+        now = datetime.now(timezone.utc)
+        recovery = self._risk_state.drawdown_recovery
+        peak_equity = self._risk_state.peak_equity
+        current_dd = self._risk_state.current_drawdown_pct
+
+        # Case 1: New drawdown starting (equity dropped below previous peak)
+        if current_equity < peak_equity and recovery.drawdown_start_time is None:
+            recovery.drawdown_start_time = now
+            recovery.drawdown_start_equity = peak_equity
+            recovery.drawdown_trough_equity = current_equity
+            recovery.drawdown_trough_time = now
+            recovery.is_recovering = False
+            logger.info(
+                f"Drawdown started: peak=${peak_equity:,.0f}, "
+                f"current=${current_equity:,.0f} ({current_dd*100:.2f}%)"
+            )
+
+        # Case 2: In drawdown, equity still falling
+        elif recovery.drawdown_start_time and current_equity < recovery.drawdown_trough_equity:
+            recovery.drawdown_trough_equity = current_equity
+            recovery.drawdown_trough_time = now
+            recovery.is_recovering = False
+            logger.debug(f"Drawdown deepening: trough=${current_equity:,.0f}")
+
+        # Case 3: In drawdown, equity recovering
+        elif recovery.drawdown_start_time and current_equity > recovery.drawdown_trough_equity:
+            if not recovery.is_recovering:
+                recovery.recovery_start_time = now
+                recovery.is_recovering = True
+                logger.info(
+                    f"Recovery started from trough ${recovery.drawdown_trough_equity:,.0f}"
+                )
+
+        # Case 4: Full recovery (equity back to or above peak)
+        if recovery.drawdown_start_time and current_equity >= recovery.drawdown_start_equity:
+            # Calculate recovery time
+            recovery_time_days = (now - recovery.drawdown_start_time).total_seconds() / 86400
+            trough_to_recovery_days = (
+                (now - recovery.drawdown_trough_time).total_seconds() / 86400
+                if recovery.drawdown_trough_time else recovery_time_days
+            )
+
+            # Record historical recovery
+            recovery.recovery_times_days.append(recovery_time_days)
+            recovery.recovery_count += 1
+
+            # Update averages
+            if recovery.recovery_times_days:
+                recovery.avg_recovery_time_days = sum(recovery.recovery_times_days) / len(recovery.recovery_times_days)
+                recovery.max_recovery_time_days = max(recovery.max_recovery_time_days, recovery_time_days)
+
+            logger.info(
+                f"DRAWDOWN RECOVERED: Total time {recovery_time_days:.1f} days, "
+                f"recovery phase {trough_to_recovery_days:.1f} days, "
+                f"trough=${recovery.drawdown_trough_equity:,.0f}, "
+                f"max_dd={((recovery.drawdown_start_equity - recovery.drawdown_trough_equity) / recovery.drawdown_start_equity * 100):.2f}%"
+            )
+
+            # Reset state for next drawdown
+            recovery.drawdown_start_time = None
+            recovery.drawdown_start_equity = 0.0
+            recovery.drawdown_trough_equity = 0.0
+            recovery.drawdown_trough_time = None
+            recovery.recovery_start_time = None
+            recovery.is_recovering = False
+
+    def get_drawdown_recovery_status(self) -> dict:
+        """
+        Get current drawdown recovery status (#R11).
+
+        Returns detailed metrics about current and historical drawdowns.
+        """
+        recovery = self._risk_state.drawdown_recovery
+        now = datetime.now(timezone.utc)
+
+        # Calculate current drawdown duration if in drawdown
+        current_duration_days = None
+        time_since_trough_days = None
+        recovery_progress_pct = None
+
+        if recovery.drawdown_start_time:
+            current_duration_days = (now - recovery.drawdown_start_time).total_seconds() / 86400
+
+            if recovery.drawdown_trough_time:
+                time_since_trough_days = (now - recovery.drawdown_trough_time).total_seconds() / 86400
+
+            if recovery.is_recovering and recovery.drawdown_start_equity > recovery.drawdown_trough_equity:
+                # Progress from trough back to peak
+                total_to_recover = recovery.drawdown_start_equity - recovery.drawdown_trough_equity
+                recovered_so_far = self._risk_state.net_liquidation - recovery.drawdown_trough_equity
+                recovery_progress_pct = max(0, min(100, (recovered_so_far / total_to_recover) * 100))
+
+        # Estimate time to recovery based on historical data
+        estimated_recovery_days = None
+        if recovery.avg_recovery_time_days > 0 and recovery_progress_pct is not None and recovery_progress_pct > 0:
+            # Simple linear extrapolation
+            estimated_recovery_days = (100 - recovery_progress_pct) / recovery_progress_pct * (time_since_trough_days or 0)
+
+        return {
+            "in_drawdown": recovery.drawdown_start_time is not None,
+            "is_recovering": recovery.is_recovering,
+            "current": {
+                "duration_days": current_duration_days,
+                "start_equity": recovery.drawdown_start_equity,
+                "trough_equity": recovery.drawdown_trough_equity,
+                "trough_drawdown_pct": (
+                    (recovery.drawdown_start_equity - recovery.drawdown_trough_equity) / recovery.drawdown_start_equity * 100
+                    if recovery.drawdown_start_equity > 0 else 0
+                ),
+                "time_since_trough_days": time_since_trough_days,
+                "recovery_progress_pct": recovery_progress_pct,
+                "estimated_remaining_days": estimated_recovery_days,
+            } if recovery.drawdown_start_time else None,
+            "historical": {
+                "total_recoveries": recovery.recovery_count,
+                "avg_recovery_time_days": recovery.avg_recovery_time_days,
+                "max_recovery_time_days": recovery.max_recovery_time_days,
+                "recovery_times": recovery.recovery_times_days[-10:],  # Last 10
+            },
+        }
+
     async def run_stress_tests(self) -> None:
         """Run all stress tests and update state."""
         if not self._stress_tester:
@@ -2262,6 +2647,10 @@ class RiskAgent(ValidationAgent):
                 "position_size_multiplier": self.get_position_size_multiplier(),
                 "level_since": self._drawdown_level_time.isoformat() if self._drawdown_level_time else None,
             },
+            # Drawdown recovery tracking (#R11)
+            "drawdown_recovery": self.get_drawdown_recovery_status(),
+            # Intraday margin monitoring (#R10)
+            "margin": self.get_margin_status(),
             "greeks": {
                 "delta": self._risk_state.greeks.delta,
                 "gamma": self._risk_state.greeks.gamma,

@@ -1599,4 +1599,395 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             "max_orders_per_minute": self._max_orders_per_minute,
             "stop_monitor_running": self._stop_order_monitor_task is not None and not self._stop_order_monitor_task.done(),
             "symbols_with_prices": len(self._last_prices),
+            # Fill quality summary (#E13)
+            "fill_quality": self.get_aggregate_fill_metrics(),
+            # Implementation shortfall summary (#E14)
+            "implementation_shortfall": self.get_implementation_shortfall_summary(),
+        }
+
+    # =========================================================================
+    # ORDER PERSISTENCE ACROSS RESTARTS (#E12)
+    # =========================================================================
+
+    def persist_orders_to_file(self, filepath: str = "data/pending_orders.json") -> int:
+        """
+        Persist pending orders to file for recovery after restart (#E12).
+
+        Saves all non-terminal pending orders to JSON for later recovery.
+
+        Args:
+            filepath: Path to save orders
+
+        Returns:
+            Number of orders persisted
+        """
+        import json
+        import os
+
+        # Create directory if needed
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+
+        orders_to_persist = []
+        for order_id, pending in self._pending_orders.items():
+            if pending.is_terminal():
+                continue
+
+            order = pending.order_event
+            orders_to_persist.append({
+                "order_id": order_id,
+                "broker_order_id": pending.broker_order_id,
+                "symbol": order.symbol,
+                "side": order.side.value,
+                "quantity": order.quantity,
+                "order_type": order.order_type.value,
+                "limit_price": order.limit_price,
+                "stop_price": order.stop_price,
+                "algo": order.algo,
+                "filled_quantity": pending.filled_quantity,
+                "remaining_quantity": pending.remaining_quantity,
+                "avg_fill_price": pending.avg_fill_price,
+                "status": pending.status,
+                "state": pending.state.value,
+                "arrival_price": pending.arrival_price,
+                "created_at": pending.created_at.isoformat() if pending.created_at else None,
+                "decision_id": order.decision_id,
+                "slices": pending.slices,
+            })
+
+        # Also persist stop orders
+        for order_id, pending in self._stop_orders.items():
+            order = pending.order_event
+            orders_to_persist.append({
+                "order_id": order_id,
+                "broker_order_id": pending.broker_order_id,
+                "symbol": order.symbol,
+                "side": order.side.value,
+                "quantity": order.quantity,
+                "order_type": order.order_type.value,
+                "limit_price": order.limit_price,
+                "stop_price": order.stop_price,
+                "algo": order.algo,
+                "filled_quantity": 0,
+                "remaining_quantity": order.quantity,
+                "avg_fill_price": 0.0,
+                "status": "stop_pending",
+                "state": OrderState.CREATED.value,
+                "arrival_price": None,
+                "created_at": pending.created_at.isoformat() if pending.created_at else None,
+                "decision_id": order.decision_id,
+                "slices": [],
+                "is_stop_order": True,
+            })
+
+        with open(filepath, 'w') as f:
+            json.dump({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "orders": orders_to_persist,
+            }, f, indent=2)
+
+        logger.info(f"Persisted {len(orders_to_persist)} orders to {filepath}")
+        return len(orders_to_persist)
+
+    async def recover_orders_from_file(self, filepath: str = "data/pending_orders.json") -> int:
+        """
+        Recover pending orders from file after restart (#E12).
+
+        Loads persisted orders and attempts to reconcile with broker state.
+
+        Args:
+            filepath: Path to load orders from
+
+        Returns:
+            Number of orders recovered
+        """
+        import json
+        import os
+
+        if not os.path.exists(filepath):
+            logger.info(f"No persisted orders file found at {filepath}")
+            return 0
+
+        try:
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+
+            orders_data = data.get("orders", [])
+            recovered_count = 0
+
+            for order_data in orders_data:
+                try:
+                    # Recreate order event
+                    order = OrderEvent(
+                        source_agent=self.name,
+                        decision_id=order_data.get("decision_id", ""),
+                        validation_id="",
+                        symbol=order_data["symbol"],
+                        side=OrderSide(order_data["side"]),
+                        quantity=order_data["quantity"],
+                        order_type=OrderType(order_data["order_type"]),
+                        limit_price=order_data.get("limit_price"),
+                        stop_price=order_data.get("stop_price"),
+                        algo=order_data.get("algo", "MARKET"),
+                    )
+
+                    # Try to get state from broker if we have broker_order_id
+                    broker_order_id = order_data.get("broker_order_id")
+                    broker_state = None
+
+                    if broker_order_id and self._broker:
+                        try:
+                            broker_state = await self._broker.get_order_status(broker_order_id)
+                        except Exception as e:
+                            logger.warning(f"Could not get broker state for {broker_order_id}: {e}")
+
+                    # If broker says order is still active, recreate tracking
+                    if broker_state and broker_state.get("status") not in ["Filled", "Cancelled", "Error"]:
+                        # Create a minimal DecisionEvent for tracking
+                        from core.events import DecisionEvent
+                        decision = DecisionEvent(
+                            source_agent="recovery",
+                            symbol=order_data["symbol"],
+                            action=OrderSide(order_data["side"]),
+                            quantity=order_data["quantity"],
+                            order_type=OrderType(order_data["order_type"]),
+                            limit_price=order_data.get("limit_price"),
+                            stop_price=order_data.get("stop_price"),
+                        )
+
+                        pending = PendingOrder(
+                            order_event=order,
+                            decision_event=decision,
+                            broker_order_id=broker_order_id,
+                            filled_quantity=broker_state.get("filled", order_data.get("filled_quantity", 0)),
+                            remaining_quantity=broker_state.get("remaining", order_data.get("remaining_quantity", order_data["quantity"])),
+                            avg_fill_price=order_data.get("avg_fill_price", 0.0),
+                            status=broker_state.get("status", order_data.get("status", "pending")),
+                            arrival_price=order_data.get("arrival_price"),
+                        )
+
+                        if order_data.get("is_stop_order"):
+                            self._stop_orders[order_data["order_id"]] = pending
+                        else:
+                            self._pending_orders[order_data["order_id"]] = pending
+
+                        recovered_count += 1
+                        logger.info(f"Recovered order {order_data['order_id']}: {order_data['symbol']} {order_data['side']} {order_data['quantity']}")
+
+                    else:
+                        logger.info(f"Skipped order {order_data['order_id']} - broker status: {broker_state}")
+
+                except Exception as e:
+                    logger.error(f"Failed to recover order: {e}")
+
+            # Backup and remove the persistence file after recovery
+            if recovered_count > 0:
+                backup_path = filepath + f".recovered.{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+                os.rename(filepath, backup_path)
+                logger.info(f"Moved persistence file to {backup_path}")
+
+            logger.info(f"Recovered {recovered_count}/{len(orders_data)} orders from persistence file")
+            return recovered_count
+
+        except Exception as e:
+            logger.error(f"Failed to recover orders from {filepath}: {e}")
+            return 0
+
+    # =========================================================================
+    # FILL QUALITY METRICS (#E13)
+    # =========================================================================
+
+    def get_aggregate_fill_metrics(self) -> dict:
+        """
+        Get aggregate fill quality metrics across all orders (#E13).
+
+        Returns summary statistics for execution quality monitoring.
+        """
+        total_orders = 0
+        total_filled = 0
+        total_slippage_bps = []
+        total_improvement_bps = []
+        orders_with_improvement = 0
+        orders_with_slippage = 0
+
+        for pending in self._pending_orders.values():
+            if pending.filled_quantity == 0:
+                continue
+
+            total_orders += 1
+            total_filled += pending.filled_quantity
+
+            # Aggregate slice metrics
+            for sf in pending.slice_fills.values():
+                if sf.slippage_bps is not None:
+                    total_slippage_bps.append(sf.slippage_bps)
+                    if sf.slippage_bps > 0:
+                        orders_with_slippage += 1
+                if sf.price_improvement_bps is not None and sf.price_improvement_bps > 0:
+                    total_improvement_bps.append(sf.price_improvement_bps)
+                    orders_with_improvement += 1
+
+        avg_slippage = sum(total_slippage_bps) / len(total_slippage_bps) if total_slippage_bps else 0
+        avg_improvement = sum(total_improvement_bps) / len(total_improvement_bps) if total_improvement_bps else 0
+
+        return {
+            "total_orders": total_orders,
+            "total_shares_filled": total_filled,
+            "slippage": {
+                "avg_bps": avg_slippage,
+                "max_bps": max(total_slippage_bps) if total_slippage_bps else 0,
+                "min_bps": min(total_slippage_bps) if total_slippage_bps else 0,
+                "orders_with_slippage": orders_with_slippage,
+            },
+            "price_improvement": {
+                "avg_bps": avg_improvement,
+                "max_bps": max(total_improvement_bps) if total_improvement_bps else 0,
+                "orders_with_improvement": orders_with_improvement,
+                "improvement_rate": orders_with_improvement / max(len(total_slippage_bps), 1),
+            },
+        }
+
+    # =========================================================================
+    # IMPLEMENTATION SHORTFALL TRACKING (#E14)
+    # =========================================================================
+
+    def calculate_implementation_shortfall(self, order_id: str) -> dict | None:
+        """
+        Calculate implementation shortfall for an order (#E14).
+
+        Implementation shortfall = (Actual Execution Cost) - (Paper Portfolio Cost)
+        Components:
+        1. Delay cost: Price movement from decision to execution start
+        2. Trading impact: Price movement during execution
+        3. Opportunity cost: Unfilled portion
+
+        Args:
+            order_id: Order ID to analyze
+
+        Returns:
+            Implementation shortfall breakdown, or None if order not found
+        """
+        pending = self._pending_orders.get(order_id)
+        if pending is None:
+            return None
+
+        order = pending.order_event
+        decision = pending.decision_event
+
+        # Get decision price (benchmark)
+        decision_price = decision.limit_price or pending.arrival_price
+        if decision_price is None or decision_price <= 0:
+            return {"error": "No decision price available"}
+
+        # Calculate total shares and value
+        total_shares = order.quantity
+        filled_shares = pending.filled_quantity
+        unfilled_shares = pending.remaining_quantity
+        avg_fill_price = pending.avg_fill_price if pending.avg_fill_price > 0 else decision_price
+
+        is_buy = order.side == OrderSide.BUY
+        sign = 1 if is_buy else -1
+
+        # Paper portfolio cost (what we would have paid at decision price)
+        paper_cost = decision_price * total_shares
+
+        # Actual execution cost
+        actual_cost = avg_fill_price * filled_shares
+
+        # Current price for opportunity cost (unfilled portion)
+        current_price = self._last_prices.get(order.symbol, decision_price)
+        opportunity_cost_value = unfilled_shares * current_price
+
+        # Component breakdown
+
+        # 1. Delay cost: Price movement from decision to first fill
+        # (Approximated by arrival_price vs decision_price)
+        arrival_price = pending.arrival_price or decision_price
+        delay_cost_per_share = sign * (arrival_price - decision_price)
+        total_delay_cost = delay_cost_per_share * filled_shares
+
+        # 2. Trading impact: Movement during execution
+        # (Difference between avg_fill and arrival)
+        impact_per_share = sign * (avg_fill_price - arrival_price)
+        total_impact_cost = impact_per_share * filled_shares
+
+        # 3. Opportunity cost: Price movement on unfilled portion
+        # (Current price vs decision price on unfilled shares)
+        if unfilled_shares > 0:
+            opp_cost_per_share = sign * (current_price - decision_price)
+            total_opportunity_cost = opp_cost_per_share * unfilled_shares
+        else:
+            total_opportunity_cost = 0
+
+        # Total implementation shortfall
+        total_shortfall = total_delay_cost + total_impact_cost + total_opportunity_cost
+
+        # As percentage of paper cost
+        shortfall_bps = (total_shortfall / paper_cost * 10000) if paper_cost > 0 else 0
+
+        return {
+            "order_id": order_id,
+            "symbol": order.symbol,
+            "side": order.side.value,
+            "total_shares": total_shares,
+            "filled_shares": filled_shares,
+            "unfilled_shares": unfilled_shares,
+            "benchmark": {
+                "decision_price": decision_price,
+                "arrival_price": arrival_price,
+                "avg_fill_price": avg_fill_price,
+                "current_price": current_price,
+            },
+            "costs": {
+                "paper_cost": paper_cost,
+                "actual_cost": actual_cost,
+                "delay_cost": total_delay_cost,
+                "impact_cost": total_impact_cost,
+                "opportunity_cost": total_opportunity_cost,
+                "total_shortfall": total_shortfall,
+            },
+            "metrics": {
+                "shortfall_bps": shortfall_bps,
+                "delay_bps": (delay_cost_per_share / decision_price * 10000) if decision_price > 0 else 0,
+                "impact_bps": (impact_per_share / arrival_price * 10000) if arrival_price > 0 else 0,
+                "fill_rate": filled_shares / total_shares if total_shares > 0 else 0,
+            },
+        }
+
+    def get_implementation_shortfall_summary(self) -> dict:
+        """
+        Get aggregate implementation shortfall metrics (#E14).
+
+        Returns summary across all completed orders.
+        """
+        shortfalls = []
+        delay_costs = []
+        impact_costs = []
+        opp_costs = []
+
+        for order_id, pending in self._pending_orders.items():
+            if pending.filled_quantity == 0:
+                continue
+
+            is_data = self.calculate_implementation_shortfall(order_id)
+            if is_data and "error" not in is_data:
+                shortfalls.append(is_data["metrics"]["shortfall_bps"])
+                delay_costs.append(is_data["metrics"]["delay_bps"])
+                impact_costs.append(is_data["metrics"]["impact_bps"])
+                if is_data["unfilled_shares"] > 0:
+                    opp_costs.append(is_data["costs"]["opportunity_cost"])
+
+        if not shortfalls:
+            return {"orders_analyzed": 0}
+
+        return {
+            "orders_analyzed": len(shortfalls),
+            "avg_shortfall_bps": sum(shortfalls) / len(shortfalls),
+            "total_shortfall_bps": sum(shortfalls),
+            "max_shortfall_bps": max(shortfalls),
+            "min_shortfall_bps": min(shortfalls),
+            "components": {
+                "avg_delay_bps": sum(delay_costs) / len(delay_costs) if delay_costs else 0,
+                "avg_impact_bps": sum(impact_costs) / len(impact_costs) if impact_costs else 0,
+                "total_opportunity_cost": sum(opp_costs),
+            },
         }
