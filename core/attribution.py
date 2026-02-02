@@ -705,3 +705,1444 @@ class PerformanceAttribution:
 
         data = [trade.to_dict() for trade in self._trades.values()]
         return pd.DataFrame(data)
+
+
+# =============================================================================
+# SECTOR/FACTOR EXPOSURE CONSTRAINTS (#P6)
+# =============================================================================
+
+@dataclass
+class ExposureLimit:
+    """Limit definition for a sector or factor (#P6)."""
+    name: str
+    limit_type: str  # "absolute", "percentage"
+    max_long: float
+    max_short: float
+    max_gross: float
+    max_net: float | None = None
+
+
+class SectorFactorExposureManager:
+    """
+    Manages sector and factor exposure constraints (#P6).
+
+    Tracks and enforces limits on:
+    - Sector exposures (Technology, Healthcare, etc.)
+    - Factor exposures (Value, Momentum, Size, etc.)
+    - Geographic exposures
+    """
+
+    # Default sector classification (simplified)
+    DEFAULT_SECTOR_MAP: dict[str, str] = {
+        "AAPL": "Technology", "MSFT": "Technology", "GOOGL": "Technology",
+        "AMZN": "Consumer Discretionary", "TSLA": "Consumer Discretionary",
+        "JPM": "Financials", "BAC": "Financials", "GS": "Financials",
+        "JNJ": "Healthcare", "UNH": "Healthcare", "PFE": "Healthcare",
+        "XOM": "Energy", "CVX": "Energy", "COP": "Energy",
+        "ES": "Index", "NQ": "Index", "YM": "Index",
+        "CL": "Commodities", "GC": "Commodities", "NG": "Commodities",
+    }
+
+    def __init__(self, portfolio_value: float = 1_000_000):
+        self._portfolio_value = portfolio_value
+        self._sector_map = dict(self.DEFAULT_SECTOR_MAP)
+        self._limits: dict[str, ExposureLimit] = {}
+        self._current_exposures: dict[str, dict[str, float]] = {}  # type -> {name: exposure}
+
+        # Default sector limits (as % of portfolio)
+        self._initialize_default_limits()
+
+    def _initialize_default_limits(self):
+        """Set up default exposure limits."""
+        default_sectors = ["Technology", "Financials", "Healthcare", "Energy",
+                         "Consumer Discretionary", "Industrials", "Materials",
+                         "Utilities", "Real Estate", "Communications", "Staples"]
+
+        for sector in default_sectors:
+            self._limits[f"sector:{sector}"] = ExposureLimit(
+                name=sector,
+                limit_type="percentage",
+                max_long=25.0,  # 25% max long
+                max_short=15.0,  # 15% max short
+                max_gross=30.0,  # 30% max gross
+                max_net=20.0,   # 20% max net
+            )
+
+        # Factor limits
+        for factor in ["Value", "Momentum", "Size", "Quality", "Volatility"]:
+            self._limits[f"factor:{factor}"] = ExposureLimit(
+                name=factor,
+                limit_type="absolute",
+                max_long=1.5,   # 1.5 beta max long
+                max_short=0.5,  # 0.5 beta max short
+                max_gross=2.0,  # 2.0 beta gross
+            )
+
+    def set_sector(self, symbol: str, sector: str) -> None:
+        """Set sector classification for a symbol."""
+        self._sector_map[symbol] = sector
+
+    def set_limit(self, limit: ExposureLimit, limit_type: str = "sector") -> None:
+        """Set an exposure limit."""
+        key = f"{limit_type}:{limit.name}"
+        self._limits[key] = limit
+
+    def update_portfolio_value(self, value: float) -> None:
+        """Update portfolio value for percentage calculations."""
+        self._portfolio_value = value
+
+    def calculate_sector_exposures(
+        self,
+        positions: dict[str, float]  # symbol -> notional value
+    ) -> dict[str, dict]:
+        """
+        Calculate current sector exposures (#P6).
+
+        Args:
+            positions: Map of symbols to notional positions
+
+        Returns:
+            Exposure by sector
+        """
+        exposures: dict[str, dict] = {}
+
+        for symbol, notional in positions.items():
+            sector = self._sector_map.get(symbol, "Other")
+
+            if sector not in exposures:
+                exposures[sector] = {
+                    "long": 0.0,
+                    "short": 0.0,
+                    "gross": 0.0,
+                    "net": 0.0,
+                    "symbols": [],
+                }
+
+            if notional > 0:
+                exposures[sector]["long"] += notional
+            else:
+                exposures[sector]["short"] += abs(notional)
+
+            exposures[sector]["gross"] += abs(notional)
+            exposures[sector]["net"] += notional
+            exposures[sector]["symbols"].append(symbol)
+
+        # Convert to percentages
+        for sector, exp in exposures.items():
+            if self._portfolio_value > 0:
+                exp["long_pct"] = exp["long"] / self._portfolio_value * 100
+                exp["short_pct"] = exp["short"] / self._portfolio_value * 100
+                exp["gross_pct"] = exp["gross"] / self._portfolio_value * 100
+                exp["net_pct"] = exp["net"] / self._portfolio_value * 100
+
+        self._current_exposures["sector"] = exposures
+        return exposures
+
+    def check_exposure_limits(
+        self,
+        positions: dict[str, float]
+    ) -> list[dict]:
+        """
+        Check all exposure limits and return violations (#P6).
+
+        Args:
+            positions: Map of symbols to notional positions
+
+        Returns:
+            List of limit violations
+        """
+        violations = []
+        sector_exposures = self.calculate_sector_exposures(positions)
+
+        for sector, exp in sector_exposures.items():
+            limit_key = f"sector:{sector}"
+            limit = self._limits.get(limit_key)
+
+            if limit is None:
+                continue
+
+            # Check each limit type
+            if exp.get("long_pct", 0) > limit.max_long:
+                violations.append({
+                    "type": "sector",
+                    "name": sector,
+                    "limit": "max_long",
+                    "current": exp["long_pct"],
+                    "limit_value": limit.max_long,
+                    "breach": exp["long_pct"] - limit.max_long,
+                })
+
+            if exp.get("short_pct", 0) > limit.max_short:
+                violations.append({
+                    "type": "sector",
+                    "name": sector,
+                    "limit": "max_short",
+                    "current": exp["short_pct"],
+                    "limit_value": limit.max_short,
+                    "breach": exp["short_pct"] - limit.max_short,
+                })
+
+            if exp.get("gross_pct", 0) > limit.max_gross:
+                violations.append({
+                    "type": "sector",
+                    "name": sector,
+                    "limit": "max_gross",
+                    "current": exp["gross_pct"],
+                    "limit_value": limit.max_gross,
+                    "breach": exp["gross_pct"] - limit.max_gross,
+                })
+
+        return violations
+
+    def get_exposure_summary(self) -> dict:
+        """Get summary of all exposures for monitoring."""
+        return {
+            "portfolio_value": self._portfolio_value,
+            "sector_exposures": self._current_exposures.get("sector", {}),
+            "limits_defined": len(self._limits),
+        }
+
+
+# =============================================================================
+# CASH MANAGEMENT (#P7)
+# =============================================================================
+
+class CashManager:
+    """
+    Manages portfolio cash and liquidity (#P7).
+
+    Handles:
+    - Cash balance tracking
+    - Minimum cash reserves
+    - Cash sweep logic
+    - T+2 settlement tracking
+    """
+
+    def __init__(
+        self,
+        initial_cash: float = 0.0,
+        min_cash_reserve_pct: float = 5.0,
+        target_cash_pct: float = 10.0
+    ):
+        self._cash_balance = initial_cash
+        self._min_reserve_pct = min_cash_reserve_pct
+        self._target_cash_pct = target_cash_pct
+        self._pending_settlements: list[dict] = []
+        self._cash_history: list[tuple[datetime, float, str]] = []
+
+    def update_cash(self, amount: float, reason: str) -> float:
+        """
+        Update cash balance (#P7).
+
+        Args:
+            amount: Cash change (positive = inflow, negative = outflow)
+            reason: Reason for cash change
+
+        Returns:
+            New cash balance
+        """
+        self._cash_balance += amount
+        self._cash_history.append((datetime.now(timezone.utc), amount, reason))
+        return self._cash_balance
+
+    def get_available_cash(self, portfolio_value: float) -> float:
+        """
+        Get cash available for trading (#P7).
+
+        Subtracts minimum reserve and pending settlements.
+
+        Args:
+            portfolio_value: Total portfolio value
+
+        Returns:
+            Available cash for new positions
+        """
+        min_reserve = portfolio_value * (self._min_reserve_pct / 100)
+        pending_outflows = sum(
+            s["amount"] for s in self._pending_settlements
+            if s["amount"] < 0
+        )
+        return max(0, self._cash_balance - min_reserve + pending_outflows)
+
+    def add_pending_settlement(
+        self,
+        amount: float,
+        settlement_date: datetime,
+        trade_id: str
+    ) -> None:
+        """
+        Add pending settlement (#P7).
+
+        Args:
+            amount: Settlement amount (positive = receive, negative = pay)
+            settlement_date: Expected settlement date
+            trade_id: Associated trade ID
+        """
+        self._pending_settlements.append({
+            "amount": amount,
+            "settlement_date": settlement_date,
+            "trade_id": trade_id,
+            "added": datetime.now(timezone.utc),
+        })
+
+    def process_settlements(self) -> list[dict]:
+        """
+        Process due settlements (#P7).
+
+        Returns:
+            List of processed settlements
+        """
+        now = datetime.now(timezone.utc)
+        processed = []
+        remaining = []
+
+        for settlement in self._pending_settlements:
+            if settlement["settlement_date"] <= now:
+                self.update_cash(settlement["amount"], f"settlement:{settlement['trade_id']}")
+                processed.append(settlement)
+            else:
+                remaining.append(settlement)
+
+        self._pending_settlements = remaining
+        return processed
+
+    def calculate_cash_sweep(self, portfolio_value: float) -> dict:
+        """
+        Calculate cash sweep to maintain target allocation (#P7).
+
+        Args:
+            portfolio_value: Total portfolio value
+
+        Returns:
+            Sweep recommendation
+        """
+        target_cash = portfolio_value * (self._target_cash_pct / 100)
+        current_cash = self._cash_balance
+        excess = current_cash - target_cash
+
+        if excess > 0:
+            return {
+                "action": "invest",
+                "amount": excess,
+                "reason": "excess_cash",
+                "current_cash_pct": (current_cash / portfolio_value * 100) if portfolio_value > 0 else 0,
+                "target_cash_pct": self._target_cash_pct,
+            }
+        elif excess < -portfolio_value * 0.02:  # More than 2% below target
+            return {
+                "action": "raise_cash",
+                "amount": abs(excess),
+                "reason": "below_target",
+                "current_cash_pct": (current_cash / portfolio_value * 100) if portfolio_value > 0 else 0,
+                "target_cash_pct": self._target_cash_pct,
+            }
+        else:
+            return {
+                "action": "none",
+                "current_cash_pct": (current_cash / portfolio_value * 100) if portfolio_value > 0 else 0,
+                "target_cash_pct": self._target_cash_pct,
+            }
+
+    def get_cash_status(self) -> dict:
+        """Get cash management status."""
+        return {
+            "cash_balance": self._cash_balance,
+            "pending_settlements": len(self._pending_settlements),
+            "pending_inflows": sum(s["amount"] for s in self._pending_settlements if s["amount"] > 0),
+            "pending_outflows": sum(s["amount"] for s in self._pending_settlements if s["amount"] < 0),
+            "min_reserve_pct": self._min_reserve_pct,
+            "target_cash_pct": self._target_cash_pct,
+        }
+
+
+# =============================================================================
+# DIVIDEND HANDLING (#P8)
+# =============================================================================
+
+@dataclass
+class DividendRecord:
+    """Record of a dividend event (#P8)."""
+    symbol: str
+    ex_date: datetime
+    record_date: datetime
+    pay_date: datetime
+    amount_per_share: float
+    dividend_type: str  # "regular", "special", "return_of_capital"
+    shares_held: int
+    total_amount: float = field(init=False)
+    currency: str = "USD"
+    withheld_tax: float = 0.0
+
+    def __post_init__(self):
+        self.total_amount = self.amount_per_share * self.shares_held
+
+
+class DividendManager:
+    """
+    Manages dividend tracking and processing (#P8).
+
+    Handles:
+    - Ex-date tracking
+    - Dividend accrual
+    - Tax withholding
+    - DRIP (dividend reinvestment)
+    """
+
+    def __init__(self, enable_drip: bool = False, default_tax_rate: float = 0.0):
+        self._enable_drip = enable_drip
+        self._default_tax_rate = default_tax_rate
+        self._upcoming_dividends: list[DividendRecord] = []
+        self._received_dividends: list[DividendRecord] = []
+        self._accrued_dividends: float = 0.0
+
+    def add_upcoming_dividend(
+        self,
+        symbol: str,
+        ex_date: datetime,
+        record_date: datetime,
+        pay_date: datetime,
+        amount_per_share: float,
+        shares_held: int,
+        dividend_type: str = "regular"
+    ) -> DividendRecord:
+        """
+        Register an upcoming dividend (#P8).
+
+        Args:
+            symbol: Stock symbol
+            ex_date: Ex-dividend date
+            record_date: Record date
+            pay_date: Payment date
+            amount_per_share: Dividend per share
+            shares_held: Number of shares held
+            dividend_type: Type of dividend
+
+        Returns:
+            Dividend record
+        """
+        record = DividendRecord(
+            symbol=symbol,
+            ex_date=ex_date,
+            record_date=record_date,
+            pay_date=pay_date,
+            amount_per_share=amount_per_share,
+            dividend_type=dividend_type,
+            shares_held=shares_held,
+            withheld_tax=amount_per_share * shares_held * self._default_tax_rate,
+        )
+
+        self._upcoming_dividends.append(record)
+        return record
+
+    def process_ex_dates(
+        self,
+        current_positions: dict[str, int],
+        as_of: datetime | None = None
+    ) -> list[DividendRecord]:
+        """
+        Process dividends going ex (#P8).
+
+        Args:
+            current_positions: Current share positions
+            as_of: Processing date (default: now)
+
+        Returns:
+            Dividends going ex
+        """
+        if as_of is None:
+            as_of = datetime.now(timezone.utc)
+
+        going_ex = []
+        remaining = []
+
+        for div in self._upcoming_dividends:
+            if div.ex_date <= as_of:
+                # Update shares based on current position
+                current_shares = current_positions.get(div.symbol, 0)
+                if current_shares > 0:
+                    div.shares_held = current_shares
+                    div.total_amount = div.amount_per_share * current_shares
+                    div.withheld_tax = div.total_amount * self._default_tax_rate
+                    self._accrued_dividends += div.total_amount - div.withheld_tax
+                    going_ex.append(div)
+            else:
+                remaining.append(div)
+
+        self._upcoming_dividends = remaining
+        return going_ex
+
+    def process_payments(self, as_of: datetime | None = None) -> list[dict]:
+        """
+        Process dividend payments (#P8).
+
+        Args:
+            as_of: Processing date (default: now)
+
+        Returns:
+            Processed payments
+        """
+        if as_of is None:
+            as_of = datetime.now(timezone.utc)
+
+        payments = []
+        remaining = []
+
+        for div in self._received_dividends:
+            if div.pay_date <= as_of:
+                net_amount = div.total_amount - div.withheld_tax
+                payments.append({
+                    "symbol": div.symbol,
+                    "gross_amount": div.total_amount,
+                    "tax_withheld": div.withheld_tax,
+                    "net_amount": net_amount,
+                    "shares": div.shares_held,
+                    "type": div.dividend_type,
+                    "drip": self._enable_drip,
+                })
+                self._accrued_dividends -= net_amount
+            else:
+                remaining.append(div)
+
+        self._received_dividends = remaining
+        return payments
+
+    def get_dividend_forecast(self, days: int = 90) -> dict:
+        """Get forecast of upcoming dividends."""
+        cutoff = datetime.now(timezone.utc) + timedelta(days=days)
+        upcoming = [d for d in self._upcoming_dividends if d.pay_date <= cutoff]
+
+        return {
+            "count": len(upcoming),
+            "total_gross": sum(d.total_amount for d in upcoming),
+            "total_tax": sum(d.withheld_tax for d in upcoming),
+            "total_net": sum(d.total_amount - d.withheld_tax for d in upcoming),
+            "by_symbol": {
+                d.symbol: d.total_amount - d.withheld_tax for d in upcoming
+            },
+        }
+
+    def get_ytd_dividends(self) -> dict:
+        """Get year-to-date dividend summary."""
+        current_year = datetime.now(timezone.utc).year
+        ytd = [d for d in self._received_dividends if d.pay_date.year == current_year]
+
+        return {
+            "total_gross": sum(d.total_amount for d in ytd),
+            "total_tax": sum(d.withheld_tax for d in ytd),
+            "total_net": sum(d.total_amount - d.withheld_tax for d in ytd),
+            "dividend_count": len(ytd),
+        }
+
+
+# =============================================================================
+# CORPORATE ACTION PROCESSING (#P9)
+# =============================================================================
+
+class CorporateActionType(Enum):
+    """Types of corporate actions (#P9)."""
+    STOCK_SPLIT = "stock_split"
+    REVERSE_SPLIT = "reverse_split"
+    SPIN_OFF = "spin_off"
+    MERGER = "merger"
+    ACQUISITION = "acquisition"
+    NAME_CHANGE = "name_change"
+    SYMBOL_CHANGE = "symbol_change"
+    RIGHTS_ISSUE = "rights_issue"
+    TENDER_OFFER = "tender_offer"
+    DELISTING = "delisting"
+
+
+@dataclass
+class CorporateAction:
+    """Corporate action record (#P9)."""
+    action_type: CorporateActionType
+    symbol: str
+    effective_date: datetime
+    details: dict  # Action-specific details
+    processed: bool = False
+    processed_date: datetime | None = None
+
+
+class CorporateActionProcessor:
+    """
+    Processes corporate actions (#P9).
+
+    Handles:
+    - Stock splits and reverse splits
+    - Mergers and acquisitions
+    - Spin-offs
+    - Symbol changes
+    """
+
+    def __init__(self):
+        self._pending_actions: list[CorporateAction] = []
+        self._processed_actions: list[CorporateAction] = []
+
+    def add_corporate_action(self, action: CorporateAction) -> None:
+        """Add a corporate action to process."""
+        self._pending_actions.append(action)
+
+    def process_split(
+        self,
+        action: CorporateAction,
+        current_shares: int,
+        cost_basis: float
+    ) -> dict:
+        """
+        Process stock split (#P9).
+
+        Args:
+            action: Split action
+            current_shares: Current share count
+            cost_basis: Current cost basis
+
+        Returns:
+            Adjusted position details
+        """
+        ratio = action.details.get("ratio", 1.0)  # e.g., 4.0 for 4:1 split
+
+        if action.action_type == CorporateActionType.REVERSE_SPLIT:
+            # Reverse split: fewer shares, higher price
+            new_shares = int(current_shares / ratio)
+            new_cost_per_share = cost_basis / current_shares * ratio if current_shares > 0 else 0
+        else:
+            # Forward split: more shares, lower price
+            new_shares = int(current_shares * ratio)
+            new_cost_per_share = cost_basis / current_shares / ratio if current_shares > 0 else 0
+
+        return {
+            "action_type": action.action_type.value,
+            "symbol": action.symbol,
+            "ratio": ratio,
+            "old_shares": current_shares,
+            "new_shares": new_shares,
+            "old_cost_basis": cost_basis,
+            "new_cost_basis": cost_basis,  # Total basis unchanged
+            "new_cost_per_share": new_cost_per_share,
+        }
+
+    def process_spinoff(
+        self,
+        action: CorporateAction,
+        parent_shares: int,
+        parent_cost_basis: float
+    ) -> dict:
+        """
+        Process spin-off (#P9).
+
+        Args:
+            action: Spin-off action
+            parent_shares: Parent company shares held
+            parent_cost_basis: Parent cost basis
+
+        Returns:
+            New position and adjusted basis
+        """
+        ratio = action.details.get("ratio", 0.1)  # e.g., 0.1 = 1 spinoff share per 10 parent
+        new_symbol = action.details.get("new_symbol", "SPINOFF")
+        basis_allocation = action.details.get("basis_allocation", 0.1)  # % of basis to spinoff
+
+        spinoff_shares = int(parent_shares * ratio)
+        spinoff_basis = parent_cost_basis * basis_allocation
+        parent_new_basis = parent_cost_basis * (1 - basis_allocation)
+
+        return {
+            "action_type": "spin_off",
+            "parent_symbol": action.symbol,
+            "spinoff_symbol": new_symbol,
+            "parent_shares": parent_shares,
+            "spinoff_shares": spinoff_shares,
+            "parent_old_basis": parent_cost_basis,
+            "parent_new_basis": parent_new_basis,
+            "spinoff_basis": spinoff_basis,
+        }
+
+    def process_merger(
+        self,
+        action: CorporateAction,
+        target_shares: int,
+        target_cost_basis: float
+    ) -> dict:
+        """
+        Process merger/acquisition (#P9).
+
+        Args:
+            action: Merger action
+            target_shares: Target company shares held
+            target_cost_basis: Target cost basis
+
+        Returns:
+            Conversion details
+        """
+        acquirer = action.details.get("acquirer", "ACQUIRER")
+        exchange_ratio = action.details.get("exchange_ratio", 1.0)
+        cash_per_share = action.details.get("cash_per_share", 0.0)
+
+        new_shares = int(target_shares * exchange_ratio)
+        cash_received = target_shares * cash_per_share
+
+        # Simplified basis calculation (actual may involve gain recognition)
+        if new_shares > 0:
+            new_cost_per_share = (target_cost_basis - cash_received) / new_shares
+        else:
+            new_cost_per_share = 0
+
+        return {
+            "action_type": "merger",
+            "target_symbol": action.symbol,
+            "acquirer_symbol": acquirer,
+            "target_shares": target_shares,
+            "new_shares": new_shares,
+            "exchange_ratio": exchange_ratio,
+            "cash_per_share": cash_per_share,
+            "total_cash": cash_received,
+            "new_cost_basis": target_cost_basis - cash_received,
+            "new_cost_per_share": new_cost_per_share,
+        }
+
+    def process_pending_actions(
+        self,
+        positions: dict[str, tuple[int, float]],  # symbol -> (shares, cost_basis)
+        as_of: datetime | None = None
+    ) -> list[dict]:
+        """
+        Process all pending corporate actions (#P9).
+
+        Args:
+            positions: Current positions
+            as_of: Processing date
+
+        Returns:
+            List of processed action results
+        """
+        if as_of is None:
+            as_of = datetime.now(timezone.utc)
+
+        results = []
+        remaining = []
+
+        for action in self._pending_actions:
+            if action.effective_date <= as_of:
+                position = positions.get(action.symbol)
+                if position is None:
+                    remaining.append(action)
+                    continue
+
+                shares, cost_basis = position
+
+                if action.action_type in (CorporateActionType.STOCK_SPLIT, CorporateActionType.REVERSE_SPLIT):
+                    result = self.process_split(action, shares, cost_basis)
+                elif action.action_type == CorporateActionType.SPIN_OFF:
+                    result = self.process_spinoff(action, shares, cost_basis)
+                elif action.action_type in (CorporateActionType.MERGER, CorporateActionType.ACQUISITION):
+                    result = self.process_merger(action, shares, cost_basis)
+                else:
+                    result = {"action_type": action.action_type.value, "symbol": action.symbol, "status": "manual_review"}
+
+                action.processed = True
+                action.processed_date = as_of
+                self._processed_actions.append(action)
+                results.append(result)
+            else:
+                remaining.append(action)
+
+        self._pending_actions = remaining
+        return results
+
+    def get_pending_actions(self) -> list[dict]:
+        """Get list of pending corporate actions."""
+        return [
+            {
+                "type": a.action_type.value,
+                "symbol": a.symbol,
+                "effective_date": a.effective_date.isoformat(),
+                "details": a.details,
+            }
+            for a in self._pending_actions
+        ]
+
+
+# =============================================================================
+# TAX LOT MANAGEMENT (#P10)
+# =============================================================================
+
+@dataclass
+class TaxLot:
+    """Individual tax lot for a position (#P10)."""
+    lot_id: str
+    symbol: str
+    purchase_date: datetime
+    quantity: int
+    cost_per_share: float
+    total_cost: float = field(init=False)
+    remaining_quantity: int = field(init=False)
+    wash_sale_disallowed: float = 0.0
+    holding_period_days: int = field(init=False)
+
+    def __post_init__(self):
+        self.total_cost = self.quantity * self.cost_per_share
+        self.remaining_quantity = self.quantity
+        self.holding_period_days = (datetime.now(timezone.utc) - self.purchase_date).days
+
+    @property
+    def is_long_term(self) -> bool:
+        """Check if lot qualifies for long-term capital gains (>1 year)."""
+        return self.holding_period_days > 365
+
+    @property
+    def adjusted_cost_basis(self) -> float:
+        """Get cost basis adjusted for wash sale disallowance."""
+        return self.total_cost + self.wash_sale_disallowed
+
+
+class TaxLotManager:
+    """
+    Manages tax lots for cost basis tracking (#P10).
+
+    Supports:
+    - FIFO (First In First Out)
+    - LIFO (Last In First Out)
+    - Specific identification
+    - Average cost
+    - Highest cost
+    - Lowest cost
+    """
+
+    def __init__(self, default_method: str = "fifo"):
+        self._default_method = default_method
+        self._lots: dict[str, list[TaxLot]] = {}  # symbol -> lots
+        self._lot_counter = 0
+
+    def add_lot(
+        self,
+        symbol: str,
+        purchase_date: datetime,
+        quantity: int,
+        cost_per_share: float
+    ) -> TaxLot:
+        """
+        Add a new tax lot (#P10).
+
+        Args:
+            symbol: Stock symbol
+            purchase_date: Purchase date
+            quantity: Number of shares
+            cost_per_share: Cost per share
+
+        Returns:
+            Created tax lot
+        """
+        self._lot_counter += 1
+        lot = TaxLot(
+            lot_id=f"LOT-{self._lot_counter:06d}",
+            symbol=symbol,
+            purchase_date=purchase_date,
+            quantity=quantity,
+            cost_per_share=cost_per_share,
+        )
+
+        if symbol not in self._lots:
+            self._lots[symbol] = []
+        self._lots[symbol].append(lot)
+
+        return lot
+
+    def select_lots_for_sale(
+        self,
+        symbol: str,
+        quantity: int,
+        method: str | None = None
+    ) -> list[tuple[TaxLot, int]]:
+        """
+        Select lots for a sale using specified method (#P10).
+
+        Args:
+            symbol: Stock symbol
+            quantity: Shares to sell
+            method: Selection method (fifo, lifo, hifo, lofo, specific)
+
+        Returns:
+            List of (lot, shares_to_sell) tuples
+        """
+        if method is None:
+            method = self._default_method
+
+        lots = self._lots.get(symbol, [])
+        available_lots = [lot for lot in lots if lot.remaining_quantity > 0]
+
+        if not available_lots:
+            return []
+
+        # Sort based on method
+        if method == "fifo":
+            available_lots.sort(key=lambda l: l.purchase_date)
+        elif method == "lifo":
+            available_lots.sort(key=lambda l: l.purchase_date, reverse=True)
+        elif method == "hifo":  # Highest cost first
+            available_lots.sort(key=lambda l: l.cost_per_share, reverse=True)
+        elif method == "lofo":  # Lowest cost first
+            available_lots.sort(key=lambda l: l.cost_per_share)
+        elif method == "ltfo":  # Long-term first
+            available_lots.sort(key=lambda l: (not l.is_long_term, l.purchase_date))
+
+        selected = []
+        remaining_to_sell = quantity
+
+        for lot in available_lots:
+            if remaining_to_sell <= 0:
+                break
+
+            shares_from_lot = min(lot.remaining_quantity, remaining_to_sell)
+            selected.append((lot, shares_from_lot))
+            remaining_to_sell -= shares_from_lot
+
+        return selected
+
+    def execute_sale(
+        self,
+        symbol: str,
+        quantity: int,
+        sale_price: float,
+        sale_date: datetime,
+        method: str | None = None
+    ) -> dict:
+        """
+        Execute a sale and calculate gain/loss (#P10).
+
+        Args:
+            symbol: Stock symbol
+            quantity: Shares to sell
+            sale_price: Sale price per share
+            sale_date: Sale date
+            method: Lot selection method
+
+        Returns:
+            Sale details with gain/loss
+        """
+        lots_to_sell = self.select_lots_for_sale(symbol, quantity, method)
+
+        if not lots_to_sell:
+            return {"error": "no_lots_available"}
+
+        total_proceeds = quantity * sale_price
+        total_cost = 0
+        short_term_gain = 0
+        long_term_gain = 0
+        lots_used = []
+
+        for lot, shares in lots_to_sell:
+            cost = shares * lot.cost_per_share
+            total_cost += cost
+            gain = (shares * sale_price) - cost
+
+            if lot.is_long_term:
+                long_term_gain += gain
+            else:
+                short_term_gain += gain
+
+            lot.remaining_quantity -= shares
+            lots_used.append({
+                "lot_id": lot.lot_id,
+                "shares_sold": shares,
+                "cost_per_share": lot.cost_per_share,
+                "holding_days": lot.holding_period_days,
+                "is_long_term": lot.is_long_term,
+                "gain_loss": gain,
+            })
+
+        return {
+            "symbol": symbol,
+            "shares_sold": quantity,
+            "sale_price": sale_price,
+            "proceeds": total_proceeds,
+            "cost_basis": total_cost,
+            "total_gain_loss": total_proceeds - total_cost,
+            "short_term_gain": short_term_gain,
+            "long_term_gain": long_term_gain,
+            "lots_used": lots_used,
+            "method": method or self._default_method,
+        }
+
+    def get_lots_summary(self, symbol: str) -> dict:
+        """Get summary of lots for a symbol."""
+        lots = self._lots.get(symbol, [])
+        active_lots = [l for l in lots if l.remaining_quantity > 0]
+
+        if not active_lots:
+            return {"symbol": symbol, "total_shares": 0, "lots": []}
+
+        return {
+            "symbol": symbol,
+            "total_shares": sum(l.remaining_quantity for l in active_lots),
+            "total_cost_basis": sum(l.remaining_quantity * l.cost_per_share for l in active_lots),
+            "avg_cost": sum(l.remaining_quantity * l.cost_per_share for l in active_lots) / sum(l.remaining_quantity for l in active_lots),
+            "oldest_lot_date": min(l.purchase_date for l in active_lots).isoformat(),
+            "long_term_shares": sum(l.remaining_quantity for l in active_lots if l.is_long_term),
+            "short_term_shares": sum(l.remaining_quantity for l in active_lots if not l.is_long_term),
+            "lot_count": len(active_lots),
+        }
+
+
+# =============================================================================
+# BRINSON PERFORMANCE ATTRIBUTION (#P11)
+# =============================================================================
+
+class BrinsonAttributor:
+    """
+    Brinson performance attribution model (#P11).
+
+    Decomposes portfolio return into:
+    - Allocation effect (sector weight decisions)
+    - Selection effect (security selection within sectors)
+    - Interaction effect (combined effect)
+    """
+
+    def __init__(self):
+        self._attribution_history: list[dict] = []
+
+    def calculate_attribution(
+        self,
+        portfolio_weights: dict[str, float],  # sector -> weight
+        portfolio_returns: dict[str, float],  # sector -> return
+        benchmark_weights: dict[str, float],  # sector -> weight
+        benchmark_returns: dict[str, float],  # sector -> return
+    ) -> dict:
+        """
+        Calculate Brinson attribution (#P11).
+
+        Args:
+            portfolio_weights: Portfolio sector weights
+            portfolio_returns: Portfolio sector returns
+            benchmark_weights: Benchmark sector weights
+            benchmark_returns: Benchmark sector returns
+
+        Returns:
+            Attribution breakdown
+        """
+        sectors = set(portfolio_weights.keys()) | set(benchmark_weights.keys())
+
+        allocation_effects = {}
+        selection_effects = {}
+        interaction_effects = {}
+
+        total_portfolio_return = sum(
+            portfolio_weights.get(s, 0) * portfolio_returns.get(s, 0)
+            for s in sectors
+        )
+        total_benchmark_return = sum(
+            benchmark_weights.get(s, 0) * benchmark_returns.get(s, 0)
+            for s in sectors
+        )
+
+        for sector in sectors:
+            wp = portfolio_weights.get(sector, 0)
+            wb = benchmark_weights.get(sector, 0)
+            rp = portfolio_returns.get(sector, 0)
+            rb = benchmark_returns.get(sector, 0)
+
+            # Allocation effect: (wp - wb) * rb
+            allocation_effects[sector] = (wp - wb) * rb
+
+            # Selection effect: wb * (rp - rb)
+            selection_effects[sector] = wb * (rp - rb)
+
+            # Interaction effect: (wp - wb) * (rp - rb)
+            interaction_effects[sector] = (wp - wb) * (rp - rb)
+
+        # Sum up effects
+        total_allocation = sum(allocation_effects.values())
+        total_selection = sum(selection_effects.values())
+        total_interaction = sum(interaction_effects.values())
+
+        # Active return = allocation + selection + interaction
+        active_return = total_portfolio_return - total_benchmark_return
+
+        result = {
+            "portfolio_return": total_portfolio_return,
+            "benchmark_return": total_benchmark_return,
+            "active_return": active_return,
+            "allocation_effect": total_allocation,
+            "selection_effect": total_selection,
+            "interaction_effect": total_interaction,
+            "sum_of_effects": total_allocation + total_selection + total_interaction,
+            "by_sector": {
+                sector: {
+                    "portfolio_weight": portfolio_weights.get(sector, 0),
+                    "benchmark_weight": benchmark_weights.get(sector, 0),
+                    "portfolio_return": portfolio_returns.get(sector, 0),
+                    "benchmark_return": benchmark_returns.get(sector, 0),
+                    "allocation": allocation_effects.get(sector, 0),
+                    "selection": selection_effects.get(sector, 0),
+                    "interaction": interaction_effects.get(sector, 0),
+                }
+                for sector in sectors
+            },
+        }
+
+        self._attribution_history.append(result)
+        return result
+
+    def get_cumulative_attribution(self, periods: int = 30) -> dict:
+        """Get cumulative attribution over multiple periods."""
+        recent = self._attribution_history[-periods:]
+        if not recent:
+            return {"error": "no_attribution_data"}
+
+        return {
+            "periods": len(recent),
+            "cumulative_active_return": sum(a["active_return"] for a in recent),
+            "cumulative_allocation": sum(a["allocation_effect"] for a in recent),
+            "cumulative_selection": sum(a["selection_effect"] for a in recent),
+            "cumulative_interaction": sum(a["interaction_effect"] for a in recent),
+        }
+
+
+# =============================================================================
+# BENCHMARK TRACKING (#P12)
+# =============================================================================
+
+@dataclass
+class BenchmarkData:
+    """Benchmark data point (#P12)."""
+    timestamp: datetime
+    value: float
+    return_pct: float | None = None
+
+
+class BenchmarkTracker:
+    """
+    Tracks portfolio performance against benchmarks (#P12).
+
+    Supports multiple benchmarks and calculates:
+    - Tracking error
+    - Information ratio
+    - Active return
+    - Beta and alpha
+    """
+
+    def __init__(self):
+        self._benchmarks: dict[str, list[BenchmarkData]] = {}
+        self._portfolio_values: list[tuple[datetime, float]] = []
+        self._active_benchmark: str | None = None
+
+    def add_benchmark(self, name: str) -> None:
+        """Add a benchmark to track."""
+        if name not in self._benchmarks:
+            self._benchmarks[name] = []
+
+    def set_active_benchmark(self, name: str) -> None:
+        """Set the primary benchmark for comparison."""
+        self._active_benchmark = name
+
+    def record_benchmark_value(self, benchmark: str, timestamp: datetime, value: float) -> None:
+        """Record benchmark value."""
+        if benchmark not in self._benchmarks:
+            self.add_benchmark(benchmark)
+
+        data = self._benchmarks[benchmark]
+        if data:
+            prev_value = data[-1].value
+            return_pct = (value - prev_value) / prev_value if prev_value > 0 else 0
+        else:
+            return_pct = None
+
+        data.append(BenchmarkData(timestamp=timestamp, value=value, return_pct=return_pct))
+
+    def record_portfolio_value(self, timestamp: datetime, value: float) -> None:
+        """Record portfolio value."""
+        self._portfolio_values.append((timestamp, value))
+
+    def calculate_tracking_error(
+        self,
+        benchmark: str | None = None,
+        lookback_days: int = 30
+    ) -> float | None:
+        """
+        Calculate tracking error vs benchmark (#P12).
+
+        Tracking error = std dev of (portfolio return - benchmark return)
+
+        Args:
+            benchmark: Benchmark name (uses active if None)
+            lookback_days: Days of history to use
+
+        Returns:
+            Annualized tracking error
+        """
+        benchmark = benchmark or self._active_benchmark
+        if benchmark is None or benchmark not in self._benchmarks:
+            return None
+
+        benchmark_data = self._benchmarks[benchmark][-lookback_days:]
+        portfolio_data = self._portfolio_values[-lookback_days:]
+
+        if len(benchmark_data) < 2 or len(portfolio_data) < 2:
+            return None
+
+        # Calculate returns
+        benchmark_returns = [d.return_pct for d in benchmark_data if d.return_pct is not None]
+        portfolio_returns = []
+        for i in range(1, len(portfolio_data)):
+            prev_val = portfolio_data[i-1][1]
+            curr_val = portfolio_data[i][1]
+            if prev_val > 0:
+                portfolio_returns.append((curr_val - prev_val) / prev_val)
+
+        # Match lengths
+        n = min(len(benchmark_returns), len(portfolio_returns))
+        if n < 2:
+            return None
+
+        benchmark_returns = benchmark_returns[-n:]
+        portfolio_returns = portfolio_returns[-n:]
+
+        # Calculate active returns
+        active_returns = [p - b for p, b in zip(portfolio_returns, benchmark_returns)]
+
+        # Tracking error (annualized)
+        if len(active_returns) > 1:
+            variance = sum((r - sum(active_returns)/len(active_returns))**2 for r in active_returns) / (len(active_returns) - 1)
+            daily_te = variance ** 0.5
+            annualized_te = daily_te * (252 ** 0.5)  # Annualize
+            return annualized_te
+
+        return None
+
+    def calculate_information_ratio(
+        self,
+        benchmark: str | None = None,
+        lookback_days: int = 252
+    ) -> float | None:
+        """
+        Calculate information ratio (#P12).
+
+        IR = Active Return / Tracking Error
+
+        Args:
+            benchmark: Benchmark name
+            lookback_days: Days of history
+
+        Returns:
+            Information ratio
+        """
+        tracking_error = self.calculate_tracking_error(benchmark, lookback_days)
+        if tracking_error is None or tracking_error == 0:
+            return None
+
+        benchmark = benchmark or self._active_benchmark
+        benchmark_data = self._benchmarks.get(benchmark, [])[-lookback_days:]
+        portfolio_data = self._portfolio_values[-lookback_days:]
+
+        if len(benchmark_data) < 2 or len(portfolio_data) < 2:
+            return None
+
+        # Total returns
+        benchmark_total = (benchmark_data[-1].value / benchmark_data[0].value - 1) if benchmark_data[0].value > 0 else 0
+        portfolio_total = (portfolio_data[-1][1] / portfolio_data[0][1] - 1) if portfolio_data[0][1] > 0 else 0
+
+        active_return = portfolio_total - benchmark_total
+
+        return active_return / tracking_error
+
+    def get_benchmark_comparison(self, benchmark: str | None = None) -> dict:
+        """Get comparison of portfolio vs benchmark."""
+        benchmark = benchmark or self._active_benchmark
+        if benchmark is None:
+            return {"error": "no_benchmark_set"}
+
+        benchmark_data = self._benchmarks.get(benchmark, [])
+        portfolio_data = self._portfolio_values
+
+        if not benchmark_data or not portfolio_data:
+            return {"error": "insufficient_data"}
+
+        # Calculate metrics
+        tracking_error = self.calculate_tracking_error(benchmark)
+        info_ratio = self.calculate_information_ratio(benchmark)
+
+        return {
+            "benchmark": benchmark,
+            "portfolio_current": portfolio_data[-1][1] if portfolio_data else None,
+            "benchmark_current": benchmark_data[-1].value if benchmark_data else None,
+            "tracking_error_annualized": tracking_error,
+            "information_ratio": info_ratio,
+            "data_points_portfolio": len(portfolio_data),
+            "data_points_benchmark": len(benchmark_data),
+        }
+
+
+# =============================================================================
+# PORTFOLIO HEAT MAP VISUALIZATION (#P13)
+# =============================================================================
+
+class PortfolioHeatMapGenerator:
+    """
+    Generates heat map data for portfolio visualization (#P13).
+
+    Creates visualizations for:
+    - Sector/asset performance
+    - Risk contribution
+    - Correlation matrix
+    - P&L by position
+    """
+
+    @staticmethod
+    def generate_performance_heatmap(
+        positions: dict[str, dict],  # symbol -> {return_pct, weight, ...}
+        group_by: str = "sector"
+    ) -> dict:
+        """
+        Generate performance heat map data (#P13).
+
+        Args:
+            positions: Position data with returns
+            group_by: Grouping field (sector, asset_class, etc.)
+
+        Returns:
+            Heat map data structure
+        """
+        # Group positions
+        groups: dict[str, list] = {}
+        for symbol, data in positions.items():
+            group = data.get(group_by, "Other")
+            if group not in groups:
+                groups[group] = []
+            groups[group].append({
+                "symbol": symbol,
+                "return_pct": data.get("return_pct", 0),
+                "weight": data.get("weight", 0),
+                "pnl": data.get("pnl", 0),
+            })
+
+        # Calculate group-level metrics
+        heatmap = []
+        for group, items in groups.items():
+            total_weight = sum(i["weight"] for i in items)
+            weighted_return = sum(i["return_pct"] * i["weight"] for i in items) / total_weight if total_weight > 0 else 0
+
+            heatmap.append({
+                "name": group,
+                "value": weighted_return,  # Return for color scaling
+                "weight": total_weight,
+                "count": len(items),
+                "items": sorted(items, key=lambda x: x["return_pct"], reverse=True),
+            })
+
+        return {
+            "type": "performance",
+            "group_by": group_by,
+            "data": sorted(heatmap, key=lambda x: x["value"], reverse=True),
+            "min_value": min(h["value"] for h in heatmap) if heatmap else 0,
+            "max_value": max(h["value"] for h in heatmap) if heatmap else 0,
+        }
+
+    @staticmethod
+    def generate_risk_contribution_heatmap(
+        risk_contributions: dict[str, float],  # symbol -> risk contribution %
+        positions: dict[str, dict]
+    ) -> dict:
+        """
+        Generate risk contribution heat map (#P13).
+
+        Args:
+            risk_contributions: Risk contribution by symbol
+            positions: Position data for grouping
+
+        Returns:
+            Heat map data structure
+        """
+        heatmap = []
+        total_risk = sum(abs(v) for v in risk_contributions.values())
+
+        for symbol, contribution in risk_contributions.items():
+            pos_data = positions.get(symbol, {})
+            heatmap.append({
+                "symbol": symbol,
+                "risk_contribution": contribution,
+                "risk_contribution_pct": contribution / total_risk * 100 if total_risk > 0 else 0,
+                "weight": pos_data.get("weight", 0),
+                "sector": pos_data.get("sector", "Other"),
+            })
+
+        return {
+            "type": "risk_contribution",
+            "total_risk": total_risk,
+            "data": sorted(heatmap, key=lambda x: abs(x["risk_contribution"]), reverse=True),
+        }
+
+    @staticmethod
+    def generate_correlation_heatmap(
+        correlation_matrix: dict[str, dict[str, float]]  # symbol -> {symbol -> corr}
+    ) -> dict:
+        """
+        Generate correlation matrix heat map (#P13).
+
+        Args:
+            correlation_matrix: Pairwise correlations
+
+        Returns:
+            Heat map data structure
+        """
+        symbols = list(correlation_matrix.keys())
+        n = len(symbols)
+
+        # Build matrix for visualization
+        matrix = []
+        for i, sym1 in enumerate(symbols):
+            row = []
+            for j, sym2 in enumerate(symbols):
+                corr = correlation_matrix.get(sym1, {}).get(sym2, 0)
+                row.append({
+                    "row": i,
+                    "col": j,
+                    "row_symbol": sym1,
+                    "col_symbol": sym2,
+                    "correlation": corr,
+                })
+            matrix.append(row)
+
+        return {
+            "type": "correlation",
+            "symbols": symbols,
+            "size": n,
+            "matrix": matrix,
+            "min_correlation": -1,
+            "max_correlation": 1,
+        }
+
+    @staticmethod
+    def generate_pnl_heatmap(
+        daily_pnl: dict[str, list[float]],  # symbol -> [daily pnl values]
+        dates: list[str]
+    ) -> dict:
+        """
+        Generate P&L calendar heat map (#P13).
+
+        Args:
+            daily_pnl: Daily P&L by symbol
+            dates: List of date strings
+
+        Returns:
+            Heat map data structure for calendar view
+        """
+        # Aggregate daily P&L across symbols
+        total_daily = [0.0] * len(dates)
+        for symbol, pnl_list in daily_pnl.items():
+            for i, pnl in enumerate(pnl_list[:len(dates)]):
+                total_daily[i] += pnl
+
+        calendar_data = [
+            {"date": d, "pnl": p, "is_positive": p >= 0}
+            for d, p in zip(dates, total_daily)
+        ]
+
+        return {
+            "type": "pnl_calendar",
+            "dates": dates,
+            "data": calendar_data,
+            "total_pnl": sum(total_daily),
+            "positive_days": sum(1 for p in total_daily if p >= 0),
+            "negative_days": sum(1 for p in total_daily if p < 0),
+            "max_gain": max(total_daily) if total_daily else 0,
+            "max_loss": min(total_daily) if total_daily else 0,
+        }
