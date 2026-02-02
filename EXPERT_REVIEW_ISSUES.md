@@ -305,10 +305,10 @@
 - [x] **#X4** Cross-currency margin calculation incorrect (FIXED: Added currency conversion in calculate_margin and calculate_portfolio_margin)
 
 ### HIGH (4)
-- [ ] **#X5** No FX spot vs forward distinction
-- [ ] **#X6** Missing pip value currency conversion
-- [ ] **#X7** No triangular arbitrage detection
-- [ ] **#X8** Weekend gap risk not handled
+- [x] **#X5** No FX spot vs forward distinction (FIXED: Added FXProductType enum, FXForwardRate dataclass, FXProductManager with tenor mapping, forward curve, interest rate parity calculation)
+- [x] **#X6** Missing pip value currency conversion (FIXED: Added PipValueCalculator with account currency conversion, cross-rate handling, position P&L calculation)
+- [x] **#X7** No triangular arbitrage detection (FIXED: Added TriangularArbitrageDetector with bid/ask spreads, triangle scanning, opportunity logging)
+- [x] **#X8** Weekend gap risk not handled (FIXED: Added WeekendGapRiskManager with historical gap data, position reduction recommendations, pre-weekend checklist)
 
 ### MEDIUM (5)
 - [ ] **#X9** No FX session awareness (Tokyo, London, NY)
@@ -395,7 +395,7 @@
 ## Fix Progress Tracking
 
 **Last Updated**: 2026-02-02
-**Total Issues Fixed**: 88 CRITICAL/HIGH issues
+**Total Issues Fixed**: 92 CRITICAL/HIGH issues
 
 ### Completed Fixes (CRITICAL)
 - [x] #Q1 - MACD signal line calculation (momentum_strategy.py)
@@ -484,9 +484,13 @@
 - [x] #F6 - Delivery month validation (futures_roll_manager.py)
 - [x] #F7 - Expiration warning system (futures_roll_manager.py)
 - [x] #F8 - Settlement price handling (futures_roll_manager.py)
+- [x] #X5 - FX spot vs forward distinction (contract_specs.py)
+- [x] #X6 - Pip value currency conversion (contract_specs.py)
+- [x] #X7 - Triangular arbitrage detection (contract_specs.py)
+- [x] #X8 - Weekend gap risk handling (contract_specs.py)
 
 ### Remaining Priority (Next to Fix)
-Compliance (#C5-C32), FX (#X5-X8), Portfolio (#P6-P13)
+Compliance (#C5-C32), Portfolio (#P6-P13)
 
 ---
 

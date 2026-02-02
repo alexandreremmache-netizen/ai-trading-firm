@@ -1862,3 +1862,783 @@ class ContractSpecsManager:
             })
 
         return pd.DataFrame(data)
+
+
+# =============================================================================
+# FX SPOT VS FORWARD DISTINCTION (#X5)
+# =============================================================================
+
+class FXProductType(Enum):
+    """Type of FX product (#X5)."""
+    SPOT = "spot"  # T+2 settlement
+    FORWARD = "forward"  # Future dated settlement
+    NDF = "ndf"  # Non-deliverable forward
+    SWAP = "swap"  # FX swap (spot + forward)
+
+
+@dataclass
+class FXForwardRate:
+    """FX forward rate with forward points (#X5)."""
+    pair: str
+    spot_rate: float
+    forward_points: float  # In pips
+    settlement_date: datetime
+    tenor: str  # "1W", "1M", "3M", etc.
+    bid_rate: float | None = None
+    ask_rate: float | None = None
+
+    @property
+    def forward_rate(self) -> float:
+        """Calculate outright forward rate."""
+        pip_factor = 0.0001 if "JPY" not in self.pair else 0.01
+        return self.spot_rate + (self.forward_points * pip_factor)
+
+    @property
+    def annualized_forward_premium(self) -> float:
+        """Calculate annualized forward premium/discount."""
+        days_to_settlement = (self.settlement_date - datetime.now(timezone.utc)).days
+        if days_to_settlement <= 0:
+            return 0.0
+        premium_pct = (self.forward_rate - self.spot_rate) / self.spot_rate
+        return premium_pct * (365 / days_to_settlement)
+
+
+class FXProductManager:
+    """
+    Manages FX spot vs forward distinction (#X5).
+
+    Handles:
+    - Spot trade identification (T+2)
+    - Forward contract pricing
+    - Forward points calculation
+    - Tenor mapping
+    """
+
+    # Standard FX tenors with business days
+    TENORS: dict[str, int] = {
+        "ON": 1,  # Overnight
+        "TN": 2,  # Tom/Next
+        "SN": 2,  # Spot/Next (same as spot)
+        "1W": 7,
+        "2W": 14,
+        "1M": 30,
+        "2M": 60,
+        "3M": 90,
+        "6M": 180,
+        "9M": 270,
+        "1Y": 365,
+    }
+
+    def __init__(self):
+        self._forward_curves: dict[str, list[FXForwardRate]] = {}
+        self._spot_rates: dict[str, float] = {}
+
+    def is_spot_trade(self, settlement_days: int) -> bool:
+        """
+        Check if trade settles as spot (#X5).
+
+        Args:
+            settlement_days: Days to settlement
+
+        Returns:
+            True if spot (T+2 or less)
+        """
+        return settlement_days <= 2
+
+    def get_product_type(self, settlement_days: int) -> FXProductType:
+        """
+        Determine FX product type based on settlement (#X5).
+
+        Args:
+            settlement_days: Days to settlement
+
+        Returns:
+            FX product type
+        """
+        if settlement_days <= 2:
+            return FXProductType.SPOT
+        else:
+            return FXProductType.FORWARD
+
+    def update_spot_rate(self, pair: str, rate: float) -> None:
+        """Update spot rate for a currency pair."""
+        self._spot_rates[pair] = rate
+
+    def calculate_forward_rate(
+        self,
+        pair: str,
+        spot_rate: float,
+        base_rate: float,
+        quote_rate: float,
+        days: int
+    ) -> FXForwardRate:
+        """
+        Calculate forward rate from interest rate differential (#X5).
+
+        Forward rate = Spot * (1 + r_quote * t) / (1 + r_base * t)
+
+        Args:
+            pair: Currency pair (e.g., "EURUSD")
+            spot_rate: Current spot rate
+            base_rate: Base currency interest rate (annualized)
+            quote_rate: Quote currency interest rate (annualized)
+            days: Days to settlement
+
+        Returns:
+            Forward rate calculation
+        """
+        t = days / 365
+
+        # Interest rate parity forward formula
+        forward_rate = spot_rate * ((1 + quote_rate * t) / (1 + base_rate * t))
+
+        # Calculate forward points (in pips)
+        pip_factor = 0.0001 if "JPY" not in pair else 0.01
+        forward_points = (forward_rate - spot_rate) / pip_factor
+
+        # Determine tenor
+        tenor = self._days_to_tenor(days)
+
+        settlement_date = datetime.now(timezone.utc) + timedelta(days=days)
+
+        return FXForwardRate(
+            pair=pair,
+            spot_rate=spot_rate,
+            forward_points=forward_points,
+            settlement_date=settlement_date,
+            tenor=tenor,
+        )
+
+    def _days_to_tenor(self, days: int) -> str:
+        """Convert days to standard tenor string."""
+        for tenor, tenor_days in self.TENORS.items():
+            if abs(days - tenor_days) <= 2:
+                return tenor
+        if days > 365:
+            return f"{days // 365}Y"
+        return f"{days}D"
+
+    def get_forward_curve(self, pair: str) -> list[dict]:
+        """Get forward curve for a currency pair."""
+        rates = self._forward_curves.get(pair, [])
+        return [
+            {
+                "tenor": r.tenor,
+                "spot": r.spot_rate,
+                "forward_points": r.forward_points,
+                "forward_rate": r.forward_rate,
+                "settlement": r.settlement_date.isoformat(),
+                "annualized_premium": r.annualized_forward_premium,
+            }
+            for r in rates
+        ]
+
+    def store_forward_curve(self, pair: str, rates: list[FXForwardRate]) -> None:
+        """Store forward curve for a currency pair."""
+        self._forward_curves[pair] = rates
+
+
+# =============================================================================
+# PIP VALUE CURRENCY CONVERSION (#X6)
+# =============================================================================
+
+class PipValueCalculator:
+    """
+    Calculates pip values with proper currency conversion (#X6).
+
+    Handles:
+    - Standard and JPY pairs
+    - Cross-rate pip values
+    - Account currency conversion
+    """
+
+    # Standard lot sizes
+    STANDARD_LOT = 100_000
+    MINI_LOT = 10_000
+    MICRO_LOT = 1_000
+
+    def __init__(self, account_currency: str = "USD"):
+        self._account_currency = account_currency
+        self._rates: dict[str, float] = {}  # pair -> rate
+
+    def update_rate(self, pair: str, rate: float) -> None:
+        """Update exchange rate."""
+        self._rates[pair] = rate
+
+    def get_pip_size(self, pair: str) -> float:
+        """Get pip size for a currency pair (#X6)."""
+        if "JPY" in pair:
+            return 0.01
+        return 0.0001
+
+    def calculate_pip_value(
+        self,
+        pair: str,
+        lot_size: int = None,
+        account_currency: str = None
+    ) -> dict:
+        """
+        Calculate pip value in account currency (#X6).
+
+        For a standard lot:
+        - If quote currency = account currency: pip_value = pip_size * lot_size
+        - If quote currency != account currency: need conversion
+
+        Args:
+            pair: Currency pair (e.g., "EURUSD", "USDJPY")
+            lot_size: Position size (default: standard lot)
+            account_currency: Account currency (default: instance currency)
+
+        Returns:
+            Pip value calculation details
+        """
+        if lot_size is None:
+            lot_size = self.STANDARD_LOT
+        if account_currency is None:
+            account_currency = self._account_currency
+
+        # Parse pair
+        base = pair[:3]
+        quote = pair[3:]
+
+        pip_size = self.get_pip_size(pair)
+
+        # Pip value in quote currency
+        pip_value_quote = pip_size * lot_size
+
+        # Convert to account currency
+        if quote == account_currency:
+            # Direct quote (e.g., EURUSD for USD account)
+            pip_value_account = pip_value_quote
+            conversion_rate = 1.0
+        elif base == account_currency:
+            # Indirect quote (e.g., USDJPY for USD account)
+            # Need the pair rate to convert
+            pair_rate = self._rates.get(pair, 1.0)
+            pip_value_account = pip_value_quote / pair_rate
+            conversion_rate = 1 / pair_rate
+        else:
+            # Cross rate (e.g., EURGBP for USD account)
+            # Need to convert through USD
+            # pip value in GBP -> convert GBP to USD
+            conversion_pair = f"{quote}USD"
+            conversion_rate = self._rates.get(conversion_pair)
+            if conversion_rate is None:
+                # Try inverse
+                inverse_pair = f"USD{quote}"
+                inverse_rate = self._rates.get(inverse_pair)
+                if inverse_rate:
+                    conversion_rate = 1 / inverse_rate
+                else:
+                    conversion_rate = 1.0  # Fallback
+
+            pip_value_account = pip_value_quote * conversion_rate
+
+        return {
+            "pair": pair,
+            "base_currency": base,
+            "quote_currency": quote,
+            "account_currency": account_currency,
+            "lot_size": lot_size,
+            "pip_size": pip_size,
+            "pip_value_quote_currency": pip_value_quote,
+            "conversion_rate": conversion_rate,
+            "pip_value_account_currency": pip_value_account,
+            "pip_value_per_mini_lot": pip_value_account * (self.MINI_LOT / lot_size),
+            "pip_value_per_micro_lot": pip_value_account * (self.MICRO_LOT / lot_size),
+        }
+
+    def calculate_position_pnl(
+        self,
+        pair: str,
+        entry_rate: float,
+        current_rate: float,
+        lot_size: int,
+        is_long: bool
+    ) -> dict:
+        """
+        Calculate P&L for a position in account currency (#X6).
+
+        Args:
+            pair: Currency pair
+            entry_rate: Entry exchange rate
+            current_rate: Current exchange rate
+            lot_size: Position size
+            is_long: True for long, False for short
+
+        Returns:
+            P&L calculation
+        """
+        pip_size = self.get_pip_size(pair)
+        rate_change = current_rate - entry_rate
+
+        if not is_long:
+            rate_change = -rate_change
+
+        pips_change = rate_change / pip_size
+        pip_value = self.calculate_pip_value(pair, lot_size)
+
+        pnl_account = pips_change * pip_value["pip_value_account_currency"]
+
+        return {
+            "pair": pair,
+            "entry_rate": entry_rate,
+            "current_rate": current_rate,
+            "rate_change": rate_change,
+            "pips_change": pips_change,
+            "pip_value": pip_value["pip_value_account_currency"],
+            "pnl_account_currency": pnl_account,
+            "is_long": is_long,
+            "lot_size": lot_size,
+        }
+
+
+# =============================================================================
+# TRIANGULAR ARBITRAGE DETECTION (#X7)
+# =============================================================================
+
+@dataclass
+class TriangularArbitrageOpportunity:
+    """Detected triangular arbitrage opportunity (#X7)."""
+    leg1: tuple[str, str, float]  # (pair, direction, rate)
+    leg2: tuple[str, str, float]
+    leg3: tuple[str, str, float]
+    profit_pct: float
+    synthetic_rate: float
+    market_rate: float
+    timestamp: datetime
+
+
+class TriangularArbitrageDetector:
+    """
+    Detects triangular arbitrage opportunities (#X7).
+
+    For currencies A, B, C:
+    If (A/B) * (B/C) != (A/C), arbitrage exists.
+
+    Common triangles:
+    - EUR/USD, USD/JPY, EUR/JPY
+    - GBP/USD, USD/CHF, GBP/CHF
+    """
+
+    def __init__(self, threshold_bps: float = 5.0):
+        self._threshold_bps = threshold_bps
+        self._rates: dict[str, dict[str, float]] = {}  # {pair: {bid: x, ask: y}}
+        self._opportunities: list[TriangularArbitrageOpportunity] = []
+
+    def update_rate(self, pair: str, bid: float, ask: float) -> None:
+        """Update bid/ask for a currency pair."""
+        self._rates[pair] = {"bid": bid, "ask": ask}
+
+    def get_rate(self, pair: str, side: str = "mid") -> float | None:
+        """Get rate for pair (bid, ask, or mid)."""
+        rates = self._rates.get(pair)
+        if rates is None:
+            return None
+        if side == "bid":
+            return rates["bid"]
+        elif side == "ask":
+            return rates["ask"]
+        else:
+            return (rates["bid"] + rates["ask"]) / 2
+
+    def check_triangle(
+        self,
+        currency_a: str,
+        currency_b: str,
+        currency_c: str
+    ) -> TriangularArbitrageOpportunity | None:
+        """
+        Check for arbitrage in a currency triangle (#X7).
+
+        Path 1: A -> B -> C -> A
+        Path 2: A -> C -> B -> A
+
+        Args:
+            currency_a: First currency (e.g., "EUR")
+            currency_b: Second currency (e.g., "USD")
+            currency_c: Third currency (e.g., "JPY")
+
+        Returns:
+            Arbitrage opportunity if found
+        """
+        # Build pair names
+        pair_ab = f"{currency_a}{currency_b}"
+        pair_bc = f"{currency_b}{currency_c}"
+        pair_ac = f"{currency_a}{currency_c}"
+
+        # Get rates (try both directions)
+        rate_ab = self._get_effective_rate(currency_a, currency_b)
+        rate_bc = self._get_effective_rate(currency_b, currency_c)
+        rate_ac = self._get_effective_rate(currency_a, currency_c)
+
+        if any(r is None for r in [rate_ab, rate_bc, rate_ac]):
+            return None
+
+        # Calculate synthetic rate: A -> B -> C should equal A -> C
+        synthetic_ac = rate_ab * rate_bc
+
+        # Check for discrepancy
+        if rate_ac == 0:
+            return None
+
+        discrepancy_pct = abs(synthetic_ac - rate_ac) / rate_ac * 100
+
+        if discrepancy_pct > self._threshold_bps / 100:
+            # Determine profitable direction
+            if synthetic_ac > rate_ac:
+                # Sell synthetic (A->B->C), buy direct (A->C)
+                profit_direction = "sell_synthetic"
+            else:
+                # Buy synthetic, sell direct
+                profit_direction = "buy_synthetic"
+
+            opp = TriangularArbitrageOpportunity(
+                leg1=(f"{currency_a}{currency_b}", "buy" if profit_direction == "buy_synthetic" else "sell", rate_ab),
+                leg2=(f"{currency_b}{currency_c}", "buy" if profit_direction == "buy_synthetic" else "sell", rate_bc),
+                leg3=(f"{currency_a}{currency_c}", "sell" if profit_direction == "buy_synthetic" else "buy", rate_ac),
+                profit_pct=discrepancy_pct,
+                synthetic_rate=synthetic_ac,
+                market_rate=rate_ac,
+                timestamp=datetime.now(timezone.utc),
+            )
+
+            self._opportunities.append(opp)
+            return opp
+
+        return None
+
+    def _get_effective_rate(self, base: str, quote: str) -> float | None:
+        """Get rate, handling inverse pairs."""
+        direct_pair = f"{base}{quote}"
+        inverse_pair = f"{quote}{base}"
+
+        direct_rate = self.get_rate(direct_pair)
+        if direct_rate is not None:
+            return direct_rate
+
+        inverse_rate = self.get_rate(inverse_pair)
+        if inverse_rate is not None and inverse_rate != 0:
+            return 1 / inverse_rate
+
+        return None
+
+    def scan_all_triangles(
+        self,
+        currencies: list[str] | None = None
+    ) -> list[TriangularArbitrageOpportunity]:
+        """
+        Scan all possible currency triangles (#X7).
+
+        Args:
+            currencies: List of currencies to check (default: major)
+
+        Returns:
+            List of arbitrage opportunities
+        """
+        if currencies is None:
+            currencies = ["EUR", "USD", "GBP", "JPY", "CHF", "AUD", "CAD", "NZD"]
+
+        opportunities = []
+
+        # Generate all unique triangles
+        from itertools import combinations
+        for combo in combinations(currencies, 3):
+            opp = self.check_triangle(*combo)
+            if opp:
+                opportunities.append(opp)
+
+        return opportunities
+
+    def get_recent_opportunities(self, lookback_seconds: int = 60) -> list[dict]:
+        """Get recent arbitrage opportunities."""
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=lookback_seconds)
+        return [
+            {
+                "legs": [opp.leg1, opp.leg2, opp.leg3],
+                "profit_pct": opp.profit_pct,
+                "synthetic_rate": opp.synthetic_rate,
+                "market_rate": opp.market_rate,
+                "timestamp": opp.timestamp.isoformat(),
+            }
+            for opp in self._opportunities
+            if opp.timestamp > cutoff
+        ]
+
+
+# =============================================================================
+# WEEKEND GAP RISK HANDLING (#X8)
+# =============================================================================
+
+class WeekendGapRiskManager:
+    """
+    Manages weekend gap risk for FX positions (#X8).
+
+    Weekend gaps occur because FX markets close Friday 5 PM ET
+    and reopen Sunday 5 PM ET, but news can move prices.
+
+    Handles:
+    - Gap risk estimation
+    - Position reduction recommendations
+    - Historical gap analysis
+    """
+
+    # Historical average weekend gaps (in pips) by pair
+    HISTORICAL_AVG_GAPS: dict[str, float] = {
+        "EURUSD": 15,
+        "GBPUSD": 25,
+        "USDJPY": 20,
+        "USDCHF": 18,
+        "AUDUSD": 20,
+        "USDCAD": 15,
+        "NZDUSD": 22,
+        "EURJPY": 25,
+        "GBPJPY": 35,
+        "EURGBP": 12,
+    }
+
+    # Historical max weekend gaps (for stress scenarios)
+    HISTORICAL_MAX_GAPS: dict[str, float] = {
+        "EURUSD": 200,  # Major news events
+        "GBPUSD": 350,  # Brexit referendum
+        "USDJPY": 400,  # BOJ intervention
+        "USDCHF": 2000,  # SNB peg removal (Jan 2015)
+        "AUDUSD": 150,
+        "USDCAD": 100,
+        "NZDUSD": 120,
+        "EURJPY": 300,
+        "GBPJPY": 450,
+        "EURGBP": 250,  # Brexit
+    }
+
+    def __init__(self, risk_tolerance: str = "moderate"):
+        """
+        Initialize weekend gap risk manager.
+
+        Args:
+            risk_tolerance: "conservative", "moderate", or "aggressive"
+        """
+        self._risk_tolerance = risk_tolerance
+        self._multipliers = {
+            "conservative": 3.0,
+            "moderate": 2.0,
+            "aggressive": 1.5,
+        }
+        self._recorded_gaps: list[dict] = []
+
+    def is_weekend_approaching(self, hours_to_close: float = 4) -> bool:
+        """
+        Check if FX weekend close is approaching (#X8).
+
+        FX closes Friday 5 PM ET.
+
+        Args:
+            hours_to_close: Hours before close to flag
+
+        Returns:
+            True if within hours_to_close of weekend
+        """
+        now = datetime.now(timezone.utc)
+
+        # Check if Friday
+        if now.weekday() != 4:  # Not Friday
+            return False
+
+        # FX closes at 22:00 UTC (5 PM ET)
+        close_hour = 22
+        hours_until_close = close_hour - now.hour
+
+        return 0 < hours_until_close <= hours_to_close
+
+    def estimate_gap_risk(
+        self,
+        pair: str,
+        position_size: float,
+        pip_value: float,
+        use_historical_max: bool = False
+    ) -> dict:
+        """
+        Estimate potential weekend gap risk (#X8).
+
+        Args:
+            pair: Currency pair
+            position_size: Position size in lots
+            pip_value: Pip value in account currency
+            use_historical_max: Use max gap instead of average
+
+        Returns:
+            Gap risk analysis
+        """
+        if use_historical_max:
+            expected_gap = self.HISTORICAL_MAX_GAPS.get(pair, 100)
+            gap_type = "historical_max"
+        else:
+            base_gap = self.HISTORICAL_AVG_GAPS.get(pair, 20)
+            multiplier = self._multipliers.get(self._risk_tolerance, 2.0)
+            expected_gap = base_gap * multiplier
+            gap_type = f"avg_x{multiplier}"
+
+        # Calculate potential loss
+        potential_loss = expected_gap * pip_value * position_size
+
+        # Risk level assessment
+        if expected_gap > 100:
+            risk_level = "HIGH"
+        elif expected_gap > 50:
+            risk_level = "MEDIUM"
+        else:
+            risk_level = "LOW"
+
+        return {
+            "pair": pair,
+            "position_size": position_size,
+            "expected_gap_pips": expected_gap,
+            "gap_type": gap_type,
+            "pip_value": pip_value,
+            "potential_loss": potential_loss,
+            "risk_level": risk_level,
+            "risk_tolerance": self._risk_tolerance,
+        }
+
+    def recommend_position_reduction(
+        self,
+        pair: str,
+        current_position: float,
+        max_weekend_risk: float,
+        pip_value: float
+    ) -> dict:
+        """
+        Recommend position reduction for weekend (#X8).
+
+        Args:
+            pair: Currency pair
+            current_position: Current position size (lots)
+            max_weekend_risk: Maximum acceptable weekend risk (in account currency)
+            pip_value: Pip value in account currency
+
+        Returns:
+            Reduction recommendation
+        """
+        gap_risk = self.estimate_gap_risk(pair, current_position, pip_value)
+        potential_loss = gap_risk["potential_loss"]
+
+        if potential_loss <= max_weekend_risk:
+            return {
+                "action": "no_reduction_needed",
+                "current_position": current_position,
+                "recommended_position": current_position,
+                "reduction": 0,
+                "current_risk": potential_loss,
+                "max_allowed_risk": max_weekend_risk,
+            }
+
+        # Calculate acceptable position size
+        expected_gap = gap_risk["expected_gap_pips"]
+        max_position = max_weekend_risk / (expected_gap * pip_value) if expected_gap * pip_value > 0 else 0
+        reduction = current_position - max_position
+
+        return {
+            "action": "reduce_position",
+            "current_position": current_position,
+            "recommended_position": max_position,
+            "reduction": reduction,
+            "reduction_pct": (reduction / current_position * 100) if current_position > 0 else 0,
+            "current_risk": potential_loss,
+            "max_allowed_risk": max_weekend_risk,
+            "risk_after_reduction": max_weekend_risk,
+        }
+
+    def record_actual_gap(
+        self,
+        pair: str,
+        friday_close: float,
+        sunday_open: float,
+        gap_date: datetime
+    ) -> dict:
+        """
+        Record actual weekend gap for analysis (#X8).
+
+        Args:
+            pair: Currency pair
+            friday_close: Friday closing price
+            sunday_open: Sunday opening price
+            gap_date: Date of the gap (Sunday)
+
+        Returns:
+            Gap analysis
+        """
+        pip_size = 0.01 if "JPY" in pair else 0.0001
+        gap = sunday_open - friday_close
+        gap_pips = gap / pip_size
+        gap_pct = abs(gap / friday_close * 100)
+
+        record = {
+            "pair": pair,
+            "date": gap_date.isoformat(),
+            "friday_close": friday_close,
+            "sunday_open": sunday_open,
+            "gap": gap,
+            "gap_pips": gap_pips,
+            "gap_pct": gap_pct,
+            "direction": "up" if gap > 0 else "down",
+        }
+
+        self._recorded_gaps.append(record)
+        return record
+
+    def get_gap_statistics(self, pair: str | None = None) -> dict:
+        """Get statistics on recorded gaps."""
+        gaps = self._recorded_gaps
+        if pair:
+            gaps = [g for g in gaps if g["pair"] == pair]
+
+        if not gaps:
+            return {"error": "no_gap_data"}
+
+        gap_pips = [abs(g["gap_pips"]) for g in gaps]
+
+        return {
+            "pair": pair or "all",
+            "count": len(gaps),
+            "avg_gap_pips": sum(gap_pips) / len(gap_pips),
+            "max_gap_pips": max(gap_pips),
+            "min_gap_pips": min(gap_pips),
+            "up_gaps": len([g for g in gaps if g["direction"] == "up"]),
+            "down_gaps": len([g for g in gaps if g["direction"] == "down"]),
+        }
+
+    def get_pre_weekend_checklist(self, positions: dict[str, float], pip_values: dict[str, float]) -> list[dict]:
+        """
+        Generate pre-weekend risk checklist (#X8).
+
+        Args:
+            positions: {pair: position_size} for all positions
+            pip_values: {pair: pip_value} for all pairs
+
+        Returns:
+            List of risk items to review
+        """
+        checklist = []
+
+        for pair, position in positions.items():
+            if position == 0:
+                continue
+
+            pip_value = pip_values.get(pair, 10)  # Default pip value
+            risk = self.estimate_gap_risk(pair, abs(position), pip_value)
+
+            checklist.append({
+                "pair": pair,
+                "position": position,
+                "direction": "long" if position > 0 else "short",
+                "expected_gap_pips": risk["expected_gap_pips"],
+                "potential_loss": risk["potential_loss"],
+                "risk_level": risk["risk_level"],
+                "recommendation": "reduce" if risk["risk_level"] == "HIGH" else "monitor",
+            })
+
+        # Sort by risk level
+        risk_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+        checklist.sort(key=lambda x: risk_order.get(x["risk_level"], 3))
+
+        return checklist
