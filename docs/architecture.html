@@ -1005,11 +1005,192 @@
             </div>
         </section>
 
+        <!-- SECTION 8: Core Modules -->
+        <section id="modules">
+            <h2>Modules du Core</h2>
+
+            <h3>Event System</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Module</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>event_bus.py</code></td><td>Bus d'événements async pub/sub avec routage par topic</td></tr>
+                    <tr><td><code>events.py</code></td><td>Définitions des types d'événements (MarketData, Signal, Decision, Order, Fill)</td></tr>
+                    <tr><td><code>event_persistence.py</code></td><td>Persistance et replay des événements pour audit</td></tr>
+                </tbody>
+            </table>
+
+            <h3>Risk Management</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Module</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>var_calculator.py</code></td><td>Calcul VaR (Parametric, Historical, Monte Carlo)</td></tr>
+                    <tr><td><code>risk_factors.py</code></td><td>Modèles de facteurs de risque et calcul d'expositions</td></tr>
+                    <tr><td><code>risk_budget.py</code></td><td>Allocation du budget de risque cross-stratégies</td></tr>
+                    <tr><td><code>stress_tester.py</code></td><td>Tests de stress avec scénarios historiques (2008, COVID)</td></tr>
+                    <tr><td><code>correlation_manager.py</code></td><td>Suivi des corrélations et détection de régimes</td></tr>
+                    <tr><td><code>greeks_analytics.py</code></td><td>Calcul des Greeks options et limites</td></tr>
+                    <tr><td><code>scenario_analysis.py</code></td><td>Analyse what-if pour les trades proposés</td></tr>
+                    <tr><td><code>time_based_risk.py</code></td><td>Ajustements de risque intraday et calendaires</td></tr>
+                    <tr><td><code>circuit_breaker.py</code></td><td>Disjoncteur d'urgence (kill-switch)</td></tr>
+                </tbody>
+            </table>
+
+            <h3>Market Analysis</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Module</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>regime_detector.py</code></td><td>Détection de régimes (volatilité, tendance, corrélation)</td></tr>
+                    <tr><td><code>technical_indicators.py</code></td><td>Indicateurs techniques (SMA, EMA, RSI, MACD, Bollinger)</td></tr>
+                    <tr><td><code>signal_decay.py</code></td><td>Décroissance temporelle de la force des signaux</td></tr>
+                    <tr><td><code>signal_validation.py</code></td><td>Vérifications de qualité et cohérence des signaux</td></tr>
+                    <tr><td><code>fx_sessions.py</code></td><td>Sessions Forex et fenêtres de liquidité</td></tr>
+                </tbody>
+            </table>
+
+            <h3>Position Management</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Module</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>position_sizing.py</code></td><td>Dimensionnement (Kelly, Vol Target, Fixed Fractional)</td></tr>
+                    <tr><td><code>position_netting.py</code></td><td>Agrégation et netting des positions</td></tr>
+                    <tr><td><code>portfolio_snapshots.py</code></td><td>Capture périodique de l'état du portefeuille</td></tr>
+                    <tr><td><code>portfolio_construction.py</code></td><td>Optimisation et construction de portefeuille</td></tr>
+                    <tr><td><code>margin_optimizer.py</code></td><td>Optimisation de l'efficacité des marges</td></tr>
+                </tbody>
+            </table>
+
+            <h3>Order Management</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Module</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>order_management.py</code></td><td>Amendement, parsing des rejets, suivi de latence</td></tr>
+                    <tr><td><code>order_throttling.py</code></td><td>Rate limiting et contrôles anti-HFT</td></tr>
+                    <tr><td><code>smart_order_router.py</code></td><td>Logique de routage intelligent des ordres</td></tr>
+                    <tr><td><code>slippage_estimator.py</code></td><td>Estimation du slippage pour planification d'exécution</td></tr>
+                    <tr><td><code>best_execution.py</code></td><td>Analyse best execution (RTS 27/28)</td></tr>
+                </tbody>
+            </table>
+
+            <h3>Compliance & Regulatory</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Module</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>regulatory_compliance.py</code></td><td>Moteur de règles EU/AMF compliance</td></tr>
+                    <tr><td><code>regulatory_calendar.py</code></td><td>Calendrier des deadlines réglementaires</td></tr>
+                    <tr><td><code>compliance_control.py</code></td><td>Vérifications de conformité pré-trade</td></tr>
+                </tbody>
+            </table>
+
+            <h3>Infrastructure</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Module</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>backtest.py</code></td><td>Framework de backtesting complet</td></tr>
+                    <tr><td><code>notifications.py</code></td><td>Alertes multi-canal (email, webhook, file)</td></tr>
+                    <tr><td><code>monitoring.py</code></td><td>Monitoring système et métriques temps réel</td></tr>
+                    <tr><td><code>health_check.py</code></td><td>Endpoints de health check HTTP</td></tr>
+                    <tr><td><code>metrics_export.py</code></td><td>Export des métriques (format Prometheus)</td></tr>
+                    <tr><td><code>cache_manager.py</code></td><td>Système de cache en mémoire</td></tr>
+                    <tr><td><code>config_validator.py</code></td><td>Validation de la configuration au démarrage</td></tr>
+                    <tr><td><code>attribution.py</code></td><td>Attribution de performance</td></tr>
+                    <tr><td><code>custom_reports.py</code></td><td>Génération de rapports configurables</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- SECTION 9: Surveillance -->
+        <section id="surveillance">
+            <h2>Surveillance & MAR Compliance</h2>
+
+            <p>Le système inclut un agent de surveillance pour la détection d'abus de marché conformément au règlement MAR 2014/596/EU:</p>
+
+            <div class="agents-grid">
+                <div class="agent-card validation">
+                    <h4>Wash Trading Detection</h4>
+                    <ul>
+                        <li>Détection d'ordres self-matching</li>
+                        <li>Fenêtre configurable (60s défaut)</li>
+                        <li>Blocage automatique</li>
+                    </ul>
+                </div>
+
+                <div class="agent-card validation">
+                    <h4>Spoofing Detection</h4>
+                    <ul>
+                        <li>Ratio d'annulation > 80%</li>
+                        <li>Analyse des patterns d'ordres</li>
+                        <li>Alertes en temps réel</li>
+                    </ul>
+                </div>
+
+                <div class="agent-card validation">
+                    <h4>Quote Stuffing Detection</h4>
+                    <ul>
+                        <li>Seuil de 10 ordres/seconde</li>
+                        <li>Anti-HFT compliance</li>
+                        <li>Throttling automatique</li>
+                    </ul>
+                </div>
+
+                <div class="agent-card validation">
+                    <h4>Layering Detection</h4>
+                    <ul>
+                        <li>Détection de manipulation bid/ask</li>
+                        <li>Analyse de profondeur de carnet</li>
+                        <li>Alertes réglementaires</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
         <footer>
             <p>AI Trading Firm - Architecture Documentation</p>
-            <p>Généré automatiquement | <a href="claude.md">Voir CLAUDE.md</a> | Python 3.11 | Interactive Brokers</p>
+            <p>Version 1.0.0 | <a href="CLAUDE.md">Voir CLAUDE.md</a> | Python 3.11 | Interactive Brokers</p>
+            <p style="margin-top: 0.5rem;">
+                <a href="concurrency.html">Concurrence</a> |
+                <a href="cio-agent.html">CIO Agent</a> |
+                <a href="risk-agent.html">Risk Agent</a> |
+                <a href="compliance-agent.html">Compliance</a> |
+                <a href="ib-integration.html">IB Integration</a> |
+                <a href="backtest-paper.html">Backtest</a>
+            </p>
             <p style="margin-top: 1rem; font-size: 0.8rem;">
-                ⚠️ Paper Trading par défaut | Conformité EU/AMF | Pas de HFT
+                Paper Trading par defaut | Conformite EU/AMF | Pas de HFT
             </p>
         </footer>
     </div>
