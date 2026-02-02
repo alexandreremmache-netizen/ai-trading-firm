@@ -28,6 +28,9 @@ class SizingMethod(Enum):
     VOL_TARGET = "vol_target"
     FIXED_FRACTIONAL = "fixed_fractional"
     EQUAL_WEIGHT = "equal_weight"
+    MEAN_VARIANCE = "mean_variance"  # #P5
+    RISK_PARITY = "risk_parity"  # #P5
+    MIN_VARIANCE = "min_variance"  # #P5
 
 
 @dataclass
@@ -617,4 +620,429 @@ class PositionSizer:
             "correlation_discount": self._correlation_discount,
             "strategies_tracked": len(self._strategy_stats),
             "correlation_pairs": len(self._correlations),
+            "supports_portfolio_optimization": True,  # #P5
         }
+
+    # =========================================================================
+    # PORTFOLIO OPTIMIZATION (#P5)
+    # =========================================================================
+
+    def optimize_portfolio_mean_variance(
+        self,
+        symbols: list[str],
+        expected_returns: dict[str, float],
+        covariance_matrix: np.ndarray,
+        portfolio_value: float,
+        target_return: float | None = None,
+        risk_free_rate: float = 0.02
+    ) -> dict[str, PositionSizeResult]:
+        """
+        Mean-variance portfolio optimization (Markowitz) (#P5).
+
+        Finds the optimal portfolio weights that maximize the Sharpe ratio
+        (or minimize variance for a target return).
+
+        Uses quadratic programming to solve:
+        - Max: (w'μ - rf) / sqrt(w'Σw)  [max Sharpe]
+        - Or: Min: w'Σw  s.t. w'μ = target  [min var for target return]
+
+        Args:
+            symbols: List of asset symbols
+            expected_returns: Expected returns by symbol (annual)
+            covariance_matrix: Covariance matrix (NxN numpy array)
+            portfolio_value: Total portfolio value
+            target_return: Target portfolio return (None = max Sharpe)
+            risk_free_rate: Risk-free rate for Sharpe calculation
+
+        Returns:
+            Dictionary of symbol to PositionSizeResult with optimal weights
+        """
+        n = len(symbols)
+        if n == 0:
+            return {}
+
+        # Convert expected returns to array
+        mu = np.array([expected_returns.get(s, 0.0) for s in symbols])
+
+        # Ensure covariance matrix is positive semi-definite
+        try:
+            # Add small regularization for numerical stability
+            cov = covariance_matrix + np.eye(n) * 1e-8
+            np.linalg.cholesky(cov)
+        except np.linalg.LinAlgError:
+            logger.warning("Covariance matrix not positive definite, applying fix")
+            eigenvalues, eigenvectors = np.linalg.eigh(covariance_matrix)
+            eigenvalues = np.maximum(eigenvalues, 1e-8)
+            cov = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
+
+        if target_return is not None:
+            # Minimize variance for target return
+            weights = self._solve_min_variance(mu, cov, target_return)
+            method_name = "mean_variance_target"
+        else:
+            # Maximize Sharpe ratio
+            weights = self._solve_max_sharpe(mu, cov, risk_free_rate)
+            method_name = "mean_variance_sharpe"
+
+        # Apply constraints
+        weights = self._apply_weight_constraints(weights)
+
+        # Calculate portfolio metrics
+        portfolio_return = np.dot(weights, mu)
+        portfolio_vol = np.sqrt(np.dot(weights, np.dot(cov, weights)))
+        sharpe = (portfolio_return - risk_free_rate) / portfolio_vol if portfolio_vol > 0 else 0
+
+        logger.info(
+            f"Mean-variance optimization: return={portfolio_return:.2%}, "
+            f"vol={portfolio_vol:.2%}, sharpe={sharpe:.2f}"
+        )
+
+        # Create results
+        results = {}
+        for i, symbol in enumerate(symbols):
+            w = weights[i]
+            results[symbol] = PositionSizeResult(
+                symbol=symbol,
+                method=SizingMethod.MEAN_VARIANCE,
+                raw_fraction=w,
+                adjusted_fraction=w,
+                position_size_pct=w * 100,
+                position_value=portfolio_value * w,
+                rationale=f"MV optimization: E[r]={expected_returns.get(symbol, 0):.2%}, Sharpe={sharpe:.2f}",
+                adjustments=[method_name],
+            )
+
+        return results
+
+    def _solve_max_sharpe(
+        self,
+        mu: np.ndarray,
+        cov: np.ndarray,
+        rf: float
+    ) -> np.ndarray:
+        """
+        Solve for maximum Sharpe ratio portfolio.
+
+        Uses the analytical solution for the tangency portfolio:
+        w = (Σ^-1)(μ - rf) / 1'(Σ^-1)(μ - rf)
+        """
+        n = len(mu)
+
+        try:
+            # Compute inverse of covariance
+            cov_inv = np.linalg.inv(cov)
+
+            # Excess returns
+            excess_returns = mu - rf
+
+            # Tangency portfolio weights (before normalization)
+            raw_weights = cov_inv @ excess_returns
+
+            # Normalize to sum to 1
+            if np.sum(raw_weights) != 0:
+                weights = raw_weights / np.sum(raw_weights)
+            else:
+                weights = np.ones(n) / n
+
+            return weights
+
+        except np.linalg.LinAlgError:
+            logger.warning("Could not invert covariance matrix, using equal weights")
+            return np.ones(n) / n
+
+    def _solve_min_variance(
+        self,
+        mu: np.ndarray,
+        cov: np.ndarray,
+        target_return: float
+    ) -> np.ndarray:
+        """
+        Solve for minimum variance portfolio with target return.
+
+        Uses Lagrange multipliers for constrained optimization.
+        """
+        n = len(mu)
+
+        try:
+            cov_inv = np.linalg.inv(cov)
+
+            # Calculate A, B, C, D for the efficient frontier
+            ones = np.ones(n)
+            A = ones @ cov_inv @ ones
+            B = ones @ cov_inv @ mu
+            C = mu @ cov_inv @ mu
+            D = A * C - B * B
+
+            if D == 0:
+                return np.ones(n) / n
+
+            # Optimal weights
+            lambda1 = (C - B * target_return) / D
+            lambda2 = (A * target_return - B) / D
+
+            weights = lambda1 * (cov_inv @ ones) + lambda2 * (cov_inv @ mu)
+
+            return weights
+
+        except np.linalg.LinAlgError:
+            logger.warning("Could not solve min variance, using equal weights")
+            return np.ones(n) / n
+
+    def optimize_portfolio_risk_parity(
+        self,
+        symbols: list[str],
+        covariance_matrix: np.ndarray,
+        portfolio_value: float,
+        risk_budgets: dict[str, float] | None = None
+    ) -> dict[str, PositionSizeResult]:
+        """
+        Risk parity portfolio optimization (#P5).
+
+        Allocates positions so each contributes equally to portfolio risk.
+        Risk contribution_i = w_i * (Σw)_i / σ_p
+
+        If risk_budgets provided, allocates according to those proportions
+        instead of equal risk.
+
+        Args:
+            symbols: List of asset symbols
+            covariance_matrix: Covariance matrix (NxN numpy array)
+            portfolio_value: Total portfolio value
+            risk_budgets: Optional risk budget allocation (sums to 1)
+
+        Returns:
+            Dictionary of symbol to PositionSizeResult
+        """
+        n = len(symbols)
+        if n == 0:
+            return {}
+
+        # Default to equal risk budgets
+        if risk_budgets is None:
+            budgets = np.ones(n) / n
+        else:
+            budgets = np.array([risk_budgets.get(s, 1.0 / n) for s in symbols])
+            budgets = budgets / np.sum(budgets)  # Normalize
+
+        # Iterative algorithm to find risk parity weights
+        weights = self._solve_risk_parity(covariance_matrix, budgets)
+
+        # Apply constraints
+        weights = self._apply_weight_constraints(weights)
+
+        # Calculate risk contributions
+        cov = covariance_matrix
+        port_vol = np.sqrt(np.dot(weights, np.dot(cov, weights)))
+        marginal_risk = np.dot(cov, weights)
+        risk_contributions = weights * marginal_risk / port_vol if port_vol > 0 else np.zeros(n)
+
+        logger.info(
+            f"Risk parity optimization: portfolio_vol={port_vol:.2%}, "
+            f"n_assets={n}"
+        )
+
+        # Create results
+        results = {}
+        for i, symbol in enumerate(symbols):
+            w = weights[i]
+            rc = risk_contributions[i]
+            results[symbol] = PositionSizeResult(
+                symbol=symbol,
+                method=SizingMethod.RISK_PARITY,
+                raw_fraction=w,
+                adjusted_fraction=w,
+                position_size_pct=w * 100,
+                position_value=portfolio_value * w,
+                rationale=f"Risk parity: risk_contrib={rc:.2%}, budget={budgets[i]:.2%}",
+                adjustments=[f"risk_contribution={rc:.4f}"],
+            )
+
+        return results
+
+    def _solve_risk_parity(
+        self,
+        cov: np.ndarray,
+        budgets: np.ndarray,
+        max_iter: int = 100,
+        tol: float = 1e-8
+    ) -> np.ndarray:
+        """
+        Solve risk parity optimization using cyclical coordinate descent.
+
+        This is the Spinu (2013) algorithm for risk budgeting.
+        """
+        n = len(budgets)
+
+        # Initialize with equal weights
+        weights = np.ones(n) / n
+
+        for iteration in range(max_iter):
+            weights_old = weights.copy()
+
+            # Update each weight
+            for i in range(n):
+                # Marginal risk contribution
+                sigma = np.sqrt(cov[i, i])
+                cov_w = np.dot(cov[i, :], weights)
+
+                if sigma > 0:
+                    # Update weight to match risk budget
+                    w_new = budgets[i] / sigma * np.sqrt(np.dot(weights, np.dot(cov, weights)))
+                    w_new = w_new / (cov_w / (weights[i] * sigma) if weights[i] > 0 else 1)
+                    weights[i] = max(0.001, w_new)  # Ensure positive
+
+            # Normalize
+            weights = weights / np.sum(weights)
+
+            # Check convergence
+            if np.max(np.abs(weights - weights_old)) < tol:
+                logger.debug(f"Risk parity converged in {iteration + 1} iterations")
+                break
+
+        return weights
+
+    def optimize_portfolio_min_variance(
+        self,
+        symbols: list[str],
+        covariance_matrix: np.ndarray,
+        portfolio_value: float
+    ) -> dict[str, PositionSizeResult]:
+        """
+        Minimum variance portfolio optimization (#P5).
+
+        Finds the portfolio with lowest possible variance (risk).
+        Useful for defensive positioning.
+
+        Args:
+            symbols: List of asset symbols
+            covariance_matrix: Covariance matrix (NxN numpy array)
+            portfolio_value: Total portfolio value
+
+        Returns:
+            Dictionary of symbol to PositionSizeResult
+        """
+        n = len(symbols)
+        if n == 0:
+            return {}
+
+        try:
+            cov_inv = np.linalg.inv(covariance_matrix)
+            ones = np.ones(n)
+
+            # Min variance weights: w = Σ^-1 * 1 / (1' * Σ^-1 * 1)
+            raw_weights = cov_inv @ ones
+            weights = raw_weights / np.sum(raw_weights)
+
+        except np.linalg.LinAlgError:
+            logger.warning("Could not invert covariance matrix, using equal weights")
+            weights = np.ones(n) / n
+
+        # Apply constraints
+        weights = self._apply_weight_constraints(weights)
+
+        # Calculate portfolio variance
+        port_var = np.dot(weights, np.dot(covariance_matrix, weights))
+        port_vol = np.sqrt(port_var)
+
+        logger.info(f"Min variance optimization: portfolio_vol={port_vol:.2%}")
+
+        # Create results
+        results = {}
+        for i, symbol in enumerate(symbols):
+            w = weights[i]
+            results[symbol] = PositionSizeResult(
+                symbol=symbol,
+                method=SizingMethod.MIN_VARIANCE,
+                raw_fraction=w,
+                adjusted_fraction=w,
+                position_size_pct=w * 100,
+                position_value=portfolio_value * w,
+                rationale=f"Min variance: port_vol={port_vol:.2%}",
+            )
+
+        return results
+
+    def _apply_weight_constraints(self, weights: np.ndarray) -> np.ndarray:
+        """
+        Apply position size constraints to weights.
+
+        - Ensures non-negative (long-only)
+        - Ensures each position is within min/max limits
+        - Normalizes to sum to 1 (or less if constraints bind)
+        """
+        n = len(weights)
+
+        # Ensure non-negative (long only)
+        weights = np.maximum(weights, 0)
+
+        # Apply max constraint
+        max_weight = self._max_position_pct / 100
+        weights = np.minimum(weights, max_weight)
+
+        # Apply min constraint (set small weights to 0)
+        min_weight = self._min_position_pct / 100
+        weights[weights < min_weight / 2] = 0  # Remove very small positions
+
+        # Re-normalize
+        total = np.sum(weights)
+        if total > 0:
+            weights = weights / total
+        else:
+            weights = np.ones(n) / n
+
+        return weights
+
+    def get_efficient_frontier(
+        self,
+        symbols: list[str],
+        expected_returns: dict[str, float],
+        covariance_matrix: np.ndarray,
+        n_points: int = 20,
+        risk_free_rate: float = 0.02
+    ) -> list[dict]:
+        """
+        Calculate the efficient frontier (#P5).
+
+        Returns a series of optimal portfolios from minimum variance
+        to maximum return.
+
+        Args:
+            symbols: List of asset symbols
+            expected_returns: Expected returns by symbol
+            covariance_matrix: Covariance matrix
+            n_points: Number of points on the frontier
+            risk_free_rate: Risk-free rate
+
+        Returns:
+            List of dicts with return, risk, sharpe, weights for each point
+        """
+        n = len(symbols)
+        if n == 0:
+            return []
+
+        mu = np.array([expected_returns.get(s, 0.0) for s in symbols])
+
+        # Find min and max possible returns
+        min_return = np.min(mu)
+        max_return = np.max(mu)
+
+        frontier = []
+        target_returns = np.linspace(min_return, max_return, n_points)
+
+        for target in target_returns:
+            weights = self._solve_min_variance(mu, covariance_matrix, target)
+            weights = self._apply_weight_constraints(weights)
+
+            port_return = np.dot(weights, mu)
+            port_vol = np.sqrt(np.dot(weights, np.dot(covariance_matrix, weights)))
+            sharpe = (port_return - risk_free_rate) / port_vol if port_vol > 0 else 0
+
+            frontier.append({
+                "target_return": target,
+                "actual_return": port_return,
+                "volatility": port_vol,
+                "sharpe_ratio": sharpe,
+                "weights": {symbols[i]: weights[i] for i in range(n)},
+            })
+
+        return frontier

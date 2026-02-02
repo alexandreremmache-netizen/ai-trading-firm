@@ -175,13 +175,13 @@
 - [x] **#E12** Order persistence across restarts not implemented (FIXED: Added persist_orders_to_file and recover_orders_from_file methods; saves pending/stop orders to JSON; reconciles with broker on recovery; tracks order state, slices, fill progress)
 - [x] **#E13** Fill quality metrics not calculated (FIXED: Added get_aggregate_fill_metrics providing total orders, slippage avg/max/min, price improvement rate, orders with improvement; enhanced SliceFill tracking)
 - [x] **#E14** Implementation shortfall not tracked (FIXED: Added calculate_implementation_shortfall with delay/impact/opportunity cost decomposition; get_implementation_shortfall_summary for aggregate metrics; shortfall in bps vs decision price benchmark)
-- [ ] **#E15** No order book depth analysis
+- [x] **#E15** No order book depth analysis (FIXED: Added OrderBookSnapshot, OrderBookLevel dataclasses; update_order_book, analyze_order_book, estimate_execution_cost methods; tracks depth, imbalance, VWAP to size)
 - [ ] **#E16** Spread crossing logic missing
 - [ ] **#E17** Queue position estimation not implemented
 - [ ] **#E18** No midpoint peg order support
 - [ ] **#E19** Iceberg order support missing
-- [ ] **#E20** No passive/aggressive fill categorization
-- [ ] **#E21** Market impact model not implemented
+- [x] **#E20** No passive/aggressive fill categorization (FIXED: Added FillCategory dataclass; categorize_fill method classifying fills as aggressive/passive/midpoint based on spread position; get_fill_categorization_summary for reporting)
+- [x] **#E21** Market impact model not implemented (FIXED: Added MarketImpactEstimate dataclass; estimate_market_impact using square-root Almgren-Chriss model; temporary/permanent impact, configure_market_impact_model for tuning)
 - [ ] **#E22** Post-trade TCA incomplete
 - [ ] **#E23** No venue latency monitoring
 
@@ -210,7 +210,7 @@
 - [x] **#P4** Portfolio rebalancing triggers not defined (FIXED: Added in RiskBudgetManager - threshold, time, drawdown, volatility, and manual triggers)
 
 ### HIGH (9)
-- [ ] **#P5** No portfolio optimization (mean-variance, risk parity)
+- [x] **#P5** No portfolio optimization (mean-variance, risk parity) (FIXED: Added optimize_portfolio_mean_variance with max-Sharpe and min-variance-for-target; optimize_portfolio_risk_parity; optimize_portfolio_min_variance; get_efficient_frontier; full constraint handling)
 - [ ] **#P6** Missing sector/factor exposure constraints
 - [ ] **#P7** No cash management logic
 - [ ] **#P8** Dividend handling not implemented

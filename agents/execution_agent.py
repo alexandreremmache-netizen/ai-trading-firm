@@ -46,6 +46,128 @@ from core.contract_specs import ContractSpecsManager
 logger = logging.getLogger(__name__)
 
 
+# =========================================================================
+# ORDER BOOK DEPTH ANALYSIS (#E15)
+# =========================================================================
+
+@dataclass
+class OrderBookLevel:
+    """Single level in order book."""
+    price: float
+    size: int
+    num_orders: int = 1
+
+
+@dataclass
+class OrderBookSnapshot:
+    """
+    Order book snapshot for depth analysis (#E15).
+
+    Tracks bid/ask levels and derived metrics.
+    """
+    symbol: str
+    timestamp: datetime
+    bids: list[OrderBookLevel]  # Best bid first
+    asks: list[OrderBookLevel]  # Best ask first
+
+    @property
+    def best_bid(self) -> float | None:
+        """Best bid price."""
+        return self.bids[0].price if self.bids else None
+
+    @property
+    def best_ask(self) -> float | None:
+        """Best ask price."""
+        return self.asks[0].price if self.asks else None
+
+    @property
+    def mid_price(self) -> float | None:
+        """Mid-point price."""
+        if self.best_bid and self.best_ask:
+            return (self.best_bid + self.best_ask) / 2
+        return None
+
+    @property
+    def spread_bps(self) -> float | None:
+        """Bid-ask spread in basis points."""
+        if self.best_bid and self.best_ask and self.mid_price:
+            return (self.best_ask - self.best_bid) / self.mid_price * 10000
+        return None
+
+    def total_bid_depth(self, n_levels: int | None = None) -> int:
+        """Total bid size up to n_levels."""
+        levels = self.bids[:n_levels] if n_levels else self.bids
+        return sum(level.size for level in levels)
+
+    def total_ask_depth(self, n_levels: int | None = None) -> int:
+        """Total ask size up to n_levels."""
+        levels = self.asks[:n_levels] if n_levels else self.asks
+        return sum(level.size for level in levels)
+
+    def depth_imbalance(self, n_levels: int = 5) -> float:
+        """
+        Order book imbalance ratio.
+
+        Positive = more bid depth (buy pressure)
+        Negative = more ask depth (sell pressure)
+        """
+        bid_depth = self.total_bid_depth(n_levels)
+        ask_depth = self.total_ask_depth(n_levels)
+        total = bid_depth + ask_depth
+        if total == 0:
+            return 0.0
+        return (bid_depth - ask_depth) / total
+
+    def vwap_to_size(self, side: str, target_size: int) -> tuple[float, int]:
+        """
+        Calculate VWAP and filled size to execute target_size.
+
+        Args:
+            side: 'buy' (consume asks) or 'sell' (consume bids)
+            target_size: Target quantity
+
+        Returns:
+            (vwap, filled_size) tuple
+        """
+        levels = self.asks if side == 'buy' else self.bids
+        remaining = target_size
+        total_value = 0.0
+        total_filled = 0
+
+        for level in levels:
+            fill_at_level = min(remaining, level.size)
+            total_value += fill_at_level * level.price
+            total_filled += fill_at_level
+            remaining -= fill_at_level
+            if remaining <= 0:
+                break
+
+        vwap = total_value / total_filled if total_filled > 0 else 0.0
+        return vwap, total_filled
+
+
+@dataclass
+class FillCategory:
+    """Categorization of a fill as passive or aggressive (#E20)."""
+    is_aggressive: bool
+    category: str  # "aggressive", "passive", "midpoint", "unknown"
+    price_vs_arrival_bps: float  # Positive = paid more (buy) / received less (sell)
+    price_vs_spread_position: float  # 0 = at bid (buy), 1 = at ask (buy)
+
+
+@dataclass
+class MarketImpactEstimate:
+    """Estimated market impact for an order (#E21)."""
+    symbol: str
+    side: str
+    quantity: int
+    temporary_impact_bps: float  # Price impact during execution
+    permanent_impact_bps: float  # Long-term price impact
+    total_impact_bps: float
+    estimated_cost: float  # In currency
+    model_used: str  # "square_root", "linear", "almgren_chriss"
+
+
 @dataclass
 class SliceFill:
     """Tracks fills for a single TWAP/VWAP slice (#E4, #E5)."""
@@ -284,6 +406,19 @@ class ExecutionAgentImpl(ExecutionAgentBase):
 
         # Optional components
         self._best_execution_analyzer = None
+
+        # Order book tracking (#E15)
+        self._order_books: dict[str, OrderBookSnapshot] = {}
+
+        # Fill categorization tracking (#E20)
+        self._fill_categories: dict[str, list[FillCategory]] = {}  # order_id -> categories
+
+        # Market impact model parameters (#E21)
+        self._market_impact_params = {
+            "eta": 0.1,  # Temporary impact coefficient
+            "gamma": 0.1,  # Permanent impact coefficient
+            "alpha": 0.5,  # Power for square-root model
+        }
 
         # Thread safety for fill handling
         import threading
@@ -1991,3 +2126,376 @@ class ExecutionAgentImpl(ExecutionAgentBase):
                 "total_opportunity_cost": sum(opp_costs),
             },
         }
+
+    # =========================================================================
+    # ORDER BOOK DEPTH ANALYSIS (#E15)
+    # =========================================================================
+
+    def update_order_book(
+        self,
+        symbol: str,
+        bids: list[tuple[float, int, int]],  # (price, size, num_orders)
+        asks: list[tuple[float, int, int]]
+    ) -> None:
+        """
+        Update order book snapshot for a symbol (#E15).
+
+        Called by market data handler when order book updates received.
+
+        Args:
+            symbol: Instrument symbol
+            bids: List of (price, size, num_orders) tuples, best first
+            asks: List of (price, size, num_orders) tuples, best first
+        """
+        bid_levels = [OrderBookLevel(p, s, n) for p, s, n in bids]
+        ask_levels = [OrderBookLevel(p, s, n) for p, s, n in asks]
+
+        self._order_books[symbol] = OrderBookSnapshot(
+            symbol=symbol,
+            timestamp=datetime.now(timezone.utc),
+            bids=bid_levels,
+            asks=ask_levels,
+        )
+
+    def analyze_order_book(self, symbol: str) -> dict | None:
+        """
+        Analyze current order book depth (#E15).
+
+        Returns metrics useful for execution decisions.
+
+        Args:
+            symbol: Instrument symbol
+
+        Returns:
+            Order book analysis or None if no data
+        """
+        book = self._order_books.get(symbol)
+        if book is None:
+            return None
+
+        return {
+            "symbol": symbol,
+            "timestamp": book.timestamp.isoformat(),
+            "best_bid": book.best_bid,
+            "best_ask": book.best_ask,
+            "mid_price": book.mid_price,
+            "spread_bps": book.spread_bps,
+            "depth": {
+                "bid_depth_5": book.total_bid_depth(5),
+                "ask_depth_5": book.total_ask_depth(5),
+                "bid_depth_10": book.total_bid_depth(10),
+                "ask_depth_10": book.total_ask_depth(10),
+                "total_bid_depth": book.total_bid_depth(),
+                "total_ask_depth": book.total_ask_depth(),
+            },
+            "imbalance": {
+                "imbalance_5": book.depth_imbalance(5),
+                "imbalance_10": book.depth_imbalance(10),
+            },
+            "bid_levels": len(book.bids),
+            "ask_levels": len(book.asks),
+        }
+
+    def estimate_execution_cost(
+        self,
+        symbol: str,
+        side: str,
+        quantity: int
+    ) -> dict | None:
+        """
+        Estimate execution cost using order book (#E15).
+
+        Calculates expected VWAP and slippage for given order size.
+
+        Args:
+            symbol: Instrument symbol
+            side: 'buy' or 'sell'
+            quantity: Order quantity
+
+        Returns:
+            Execution cost estimate or None if no book data
+        """
+        book = self._order_books.get(symbol)
+        if book is None:
+            return None
+
+        vwap, filled = book.vwap_to_size(side, quantity)
+
+        if filled == 0 or book.mid_price is None:
+            return None
+
+        # Calculate slippage vs mid price
+        if side == 'buy':
+            slippage_bps = (vwap - book.mid_price) / book.mid_price * 10000
+        else:
+            slippage_bps = (book.mid_price - vwap) / book.mid_price * 10000
+
+        # Check if order is marketable (can fill at current prices)
+        is_marketable = filled >= quantity
+
+        return {
+            "symbol": symbol,
+            "side": side,
+            "target_quantity": quantity,
+            "expected_fill": filled,
+            "expected_vwap": vwap,
+            "mid_price": book.mid_price,
+            "slippage_bps": slippage_bps,
+            "slippage_cost": abs(vwap - book.mid_price) * filled,
+            "is_fully_marketable": is_marketable,
+            "fill_rate": filled / quantity if quantity > 0 else 0,
+            "spread_bps": book.spread_bps,
+        }
+
+    # =========================================================================
+    # PASSIVE/AGGRESSIVE FILL CATEGORIZATION (#E20)
+    # =========================================================================
+
+    def categorize_fill(
+        self,
+        order_id: str,
+        fill_price: float,
+        fill_quantity: int,
+        fill_side: str
+    ) -> FillCategory:
+        """
+        Categorize a fill as passive or aggressive (#E20).
+
+        Aggressive: Takes liquidity (crosses spread)
+        Passive: Provides liquidity (rests in book)
+        Midpoint: Filled at or near mid price
+
+        Args:
+            order_id: Order identifier
+            fill_price: Price at which filled
+            fill_quantity: Quantity filled
+            fill_side: 'buy' or 'sell'
+
+        Returns:
+            FillCategory with classification
+        """
+        pending = self._pending_orders.get(order_id)
+        symbol = pending.order_event.symbol if pending else None
+
+        # Get order book for context
+        book = self._order_books.get(symbol) if symbol else None
+
+        if book is None or book.best_bid is None or book.best_ask is None:
+            # Cannot categorize without order book
+            category = FillCategory(
+                is_aggressive=False,
+                category="unknown",
+                price_vs_arrival_bps=0.0,
+                price_vs_spread_position=0.5,
+            )
+        else:
+            mid = book.mid_price
+            spread = book.best_ask - book.best_bid
+
+            # Determine where in the spread the fill occurred
+            if fill_side == 'buy':
+                # For buys: at ask = aggressive, at bid = passive
+                if fill_price >= book.best_ask:
+                    is_aggressive = True
+                    category_name = "aggressive"
+                    spread_position = 1.0  # At or above ask
+                elif fill_price <= book.best_bid:
+                    is_aggressive = False
+                    category_name = "passive"
+                    spread_position = 0.0  # At or below bid
+                else:
+                    # Between bid and ask
+                    spread_position = (fill_price - book.best_bid) / spread if spread > 0 else 0.5
+                    is_aggressive = spread_position > 0.6  # More than 60% toward ask
+                    category_name = "midpoint" if 0.4 <= spread_position <= 0.6 else ("aggressive" if is_aggressive else "passive")
+
+                # Price vs arrival (positive = paid more)
+                arrival = pending.arrival_price if pending and pending.arrival_price else mid
+                price_vs_arrival = (fill_price - arrival) / arrival * 10000 if arrival else 0
+
+            else:  # sell
+                # For sells: at bid = aggressive, at ask = passive
+                if fill_price <= book.best_bid:
+                    is_aggressive = True
+                    category_name = "aggressive"
+                    spread_position = 0.0
+                elif fill_price >= book.best_ask:
+                    is_aggressive = False
+                    category_name = "passive"
+                    spread_position = 1.0
+                else:
+                    spread_position = (fill_price - book.best_bid) / spread if spread > 0 else 0.5
+                    is_aggressive = spread_position < 0.4
+                    category_name = "midpoint" if 0.4 <= spread_position <= 0.6 else ("aggressive" if is_aggressive else "passive")
+
+                # Price vs arrival (positive = received less)
+                arrival = pending.arrival_price if pending and pending.arrival_price else mid
+                price_vs_arrival = (arrival - fill_price) / arrival * 10000 if arrival else 0
+
+            category = FillCategory(
+                is_aggressive=is_aggressive,
+                category=category_name,
+                price_vs_arrival_bps=price_vs_arrival,
+                price_vs_spread_position=spread_position,
+            )
+
+        # Track for reporting
+        if order_id not in self._fill_categories:
+            self._fill_categories[order_id] = []
+        self._fill_categories[order_id].append(category)
+
+        return category
+
+    def get_fill_categorization_summary(self) -> dict:
+        """
+        Get summary of fill categorizations (#E20).
+
+        Returns breakdown of aggressive vs passive fills.
+        """
+        total_fills = 0
+        aggressive_count = 0
+        passive_count = 0
+        midpoint_count = 0
+        unknown_count = 0
+        total_arrival_slippage = []
+
+        for categories in self._fill_categories.values():
+            for cat in categories:
+                total_fills += 1
+                if cat.category == "aggressive":
+                    aggressive_count += 1
+                elif cat.category == "passive":
+                    passive_count += 1
+                elif cat.category == "midpoint":
+                    midpoint_count += 1
+                else:
+                    unknown_count += 1
+
+                if cat.price_vs_arrival_bps != 0:
+                    total_arrival_slippage.append(cat.price_vs_arrival_bps)
+
+        return {
+            "total_fills": total_fills,
+            "aggressive": {
+                "count": aggressive_count,
+                "pct": aggressive_count / total_fills * 100 if total_fills > 0 else 0,
+            },
+            "passive": {
+                "count": passive_count,
+                "pct": passive_count / total_fills * 100 if total_fills > 0 else 0,
+            },
+            "midpoint": {
+                "count": midpoint_count,
+                "pct": midpoint_count / total_fills * 100 if total_fills > 0 else 0,
+            },
+            "unknown": unknown_count,
+            "avg_arrival_slippage_bps": sum(total_arrival_slippage) / len(total_arrival_slippage) if total_arrival_slippage else 0,
+        }
+
+    # =========================================================================
+    # MARKET IMPACT MODEL (#E21)
+    # =========================================================================
+
+    def estimate_market_impact(
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        price: float | None = None,
+        adv: float | None = None,
+        volatility: float | None = None
+    ) -> MarketImpactEstimate:
+        """
+        Estimate market impact for an order (#E21).
+
+        Uses a square-root market impact model (Almgren-Chriss simplified):
+
+        Impact = η * σ * √(Q/V)
+
+        Where:
+        - η = market impact coefficient
+        - σ = volatility
+        - Q = order quantity
+        - V = average daily volume
+
+        Args:
+            symbol: Instrument symbol
+            side: 'buy' or 'sell'
+            quantity: Order quantity
+            price: Current price (uses last price if None)
+            adv: Average daily volume (uses default if None)
+            volatility: Daily volatility (uses default if None)
+
+        Returns:
+            MarketImpactEstimate with impact breakdown
+        """
+        # Get price
+        if price is None:
+            price = self._last_prices.get(symbol, 100.0)
+
+        # Default parameters if not provided
+        if adv is None:
+            adv = 1_000_000  # Default 1M shares/day
+        if volatility is None:
+            volatility = 0.02  # Default 2% daily vol
+
+        # Model parameters
+        eta = self._market_impact_params["eta"]
+        gamma = self._market_impact_params["gamma"]
+        alpha = self._market_impact_params["alpha"]
+
+        # Participation rate
+        participation = quantity / adv if adv > 0 else 0.01
+
+        # Square-root model for temporary impact
+        # Higher participation = more impact
+        temporary_impact = eta * volatility * (participation ** alpha)
+
+        # Permanent impact (information leakage)
+        # Permanent impact is typically lower than temporary
+        permanent_impact = gamma * volatility * (participation ** alpha)
+
+        # Convert to basis points
+        temporary_impact_bps = temporary_impact * 10000
+        permanent_impact_bps = permanent_impact * 10000
+        total_impact_bps = temporary_impact_bps + permanent_impact_bps
+
+        # Estimate cost in currency
+        estimated_cost = quantity * price * (total_impact_bps / 10000)
+
+        return MarketImpactEstimate(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            temporary_impact_bps=temporary_impact_bps,
+            permanent_impact_bps=permanent_impact_bps,
+            total_impact_bps=total_impact_bps,
+            estimated_cost=estimated_cost,
+            model_used="square_root_almgren_chriss",
+        )
+
+    def configure_market_impact_model(
+        self,
+        eta: float | None = None,
+        gamma: float | None = None,
+        alpha: float | None = None
+    ) -> None:
+        """
+        Configure market impact model parameters (#E21).
+
+        Args:
+            eta: Temporary impact coefficient (default 0.1)
+            gamma: Permanent impact coefficient (default 0.1)
+            alpha: Square-root power (default 0.5)
+        """
+        if eta is not None:
+            self._market_impact_params["eta"] = eta
+        if gamma is not None:
+            self._market_impact_params["gamma"] = gamma
+        if alpha is not None:
+            self._market_impact_params["alpha"] = alpha
+
+        logger.info(
+            f"Market impact model configured: eta={self._market_impact_params['eta']}, "
+            f"gamma={self._market_impact_params['gamma']}, alpha={self._market_impact_params['alpha']}"
+        )
