@@ -191,6 +191,7 @@ class TestBollingerBands(unittest.TestCase):
 
     def test_bandwidth_increases_with_volatility(self):
         """Bandwidth should increase with higher volatility."""
+        from core.technical_indicators import BollingerBandsCalculator
         bb_stable = BollingerBandsCalculator(period=20, std_dev=2.0)
         bb_volatile = BollingerBandsCalculator(period=20, std_dev=2.0)
 

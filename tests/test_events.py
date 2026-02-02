@@ -224,8 +224,8 @@ class TestMarketDataEdgeCases:
             ask=100.10,
             last=100.05
         )
-        # Mid should still calculate from bid/ask even if bid is 0
-        assert event.mid == pytest.approx(50.05)
+        # When bid is 0 (invalid), mid falls back to last price
+        assert event.mid == pytest.approx(100.05)
 
     def test_market_data_spread_only_bid_zero(self):
         """Test spread when only bid is zero."""
@@ -236,7 +236,8 @@ class TestMarketDataEdgeCases:
             ask=100.10,
             last=100.05
         )
-        assert event.spread == pytest.approx(100.10)
+        # When bid is 0 (invalid), spread is 0 (can't calculate)
+        assert event.spread == pytest.approx(0.0)
 
     def test_market_data_mid_only_ask_zero(self):
         """Test mid calculation when only ask is zero (Issue #26 edge case)."""
