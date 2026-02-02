@@ -40,8 +40,8 @@
 - [x] **#Q8** Missing walk-forward optimization support (FIXED: Added WalkForwardAnalyzer in core/backtest.py with train/test window generation, parameter optimization support)
 - [x] **#Q9** No regime detection for strategy switching (FIXED: Created core/regime_detector.py with VolatilityRegime, TrendRegime, CorrelationRegime, MarketRegime classification, HMM-based detection, strategy weight recommendations)
 - [x] **#Q10** No transaction cost model in position sizing (FIXED: Added TransactionCostModel in core/backtest.py with commission, spread, market impact, slippage modeling)
-- [ ] **#Q11** Missing slippage estimation in signal generation
-- [ ] **#Q12** No capacity constraints in strategy sizing
+- [x] **#Q11** Missing slippage estimation in signal generation (FIXED: Created core/slippage_estimator.py with SlippageEstimator, market impact models, liquidity profiles, signal strength adjustment)
+- [x] **#Q12** No capacity constraints in strategy sizing (FIXED: Added CapacityManager in core/slippage_estimator.py with ADV-based limits, daily/hourly volume tracking, signal size adjustment)
 - [x] **#Q13** ADX trend strength indicator not implemented (FIXED: Created core/technical_indicators.py with ADXCalculator, ADXResult, trend strength/direction classification)
 - [x] **#Q14** Bollinger Bands indicator not implemented (FIXED: Added BollingerBandsCalculator with squeeze detection, percent_b, bandwidth metrics)
 - [x] **#Q15** Volume-weighted indicators missing (FIXED: Added VWAPCalculator, OBVCalculator, MFICalculator with complete volume analysis)
@@ -79,11 +79,11 @@
 ### MEDIUM (14)
 - [x] **#R12** No risk factor decomposition (beta, duration, etc.) (FIXED: Created core/risk_factors.py with FactorModel, multi-factor analysis, systematic vs idiosyncratic decomposition, risk contribution attribution)
 - [x] **#R13** Missing Conditional VaR (CVaR) threshold alerts (FIXED: Added CVaR alert system in risk_agent.py with warning/critical/halt thresholds, cooldown, trading halt on extreme CVaR)
-- [ ] **#R14** No cross-margin benefit calculation
+- [x] **#R14** No cross-margin benefit calculation (FIXED: Created core/margin_optimizer.py with CrossMarginCalculator, hedging offset calculation, portfolio margin vs Reg-T comparison)
 - [ ] **#R15** Greeks sensitivity analysis not comprehensive
-- [ ] **#R16** No risk contribution attribution by strategy
-- [ ] **#R17** Missing worst-case scenario reporting
-- [ ] **#R18** No historical stress event playback
+- [x] **#R16** No risk contribution attribution by strategy (FIXED: Added RiskContributionAnalyzer in core/margin_optimizer.py with VaR decomposition, marginal VaR, strategy risk attribution)
+- [x] **#R17** Missing worst-case scenario reporting (FIXED: Created core/scenario_analysis.py with ScenarioEngine, worst-case identification, comprehensive reporting)
+- [x] **#R18** No historical stress event playback (FIXED: Added HistoricalEventLibrary in core/scenario_analysis.py with Black Monday, GFC, COVID and other crisis scenarios)
 - [ ] **#R19** Risk limits not time-of-day aware
 - [ ] **#R20** No risk exposure trending/forecasting
 - [ ] **#R21** Missing P&L attribution by risk factor
@@ -141,13 +141,13 @@
 
 ### MEDIUM (8)
 - [x] **#C33** Compliance officer notification system not implemented (FIXED: Created core/notifications.py with ComplianceOfficerNotifier, violation/suspicious activity alerts, deadline reminders)
-- [ ] **#C34** Regulatory reporting calendar not maintained
+- [x] **#C34** Regulatory reporting calendar not maintained (FIXED: Created core/regulatory_calendar.py with RegulatoryCalendar, EU/AMF deadlines, automated scheduling, alert generation)
 - [ ] **#C35** Control room functionality missing
 - [ ] **#C36** Chinese walls not enforced in system
 - [ ] **#C37** Research distribution controls missing
 - [ ] **#C38** Conflict of interest tracking incomplete
-- [ ] **#C39** Gift and entertainment logging missing
-- [ ] **#C40** Compliance training records not tracked
+- [x] **#C39** Gift and entertainment logging missing (FIXED: Added GiftEntertainmentLog in core/regulatory_calendar.py with approval workflow, annual limits, counterparty tracking)
+- [x] **#C40** Compliance training records not tracked (FIXED: Added ComplianceTrainingManager in core/regulatory_calendar.py with mandatory trainings, expiry tracking, compliance reporting)
 
 ### LOW (3)
 - [ ] **#C41** Compliance dashboard metrics incomplete
@@ -188,10 +188,10 @@
 ### MEDIUM (7)
 - [x] **#E24** Order timeout handling incomplete (FIXED: Added order timeout monitor in execution_agent.py with configurable timeouts, background monitoring task, automatic cancellation of expired orders)
 - [x] **#E25** No order throttling per venue (FIXED: Created core/order_throttling.py with OrderThrottler, per-venue rate limits, token bucket burst control, adaptive backoff on rejections)
-- [ ] **#E26** Missing order amendment support
-- [ ] **#E27** No broker error code mapping
-- [ ] **#E28** Fill notification latency not tracked
-- [ ] **#E29** Order rejection reason parsing incomplete
+- [x] **#E26** Missing order amendment support (FIXED: Created core/order_management.py with OrderAmendmentManager, amendment workflow, cancel-replace support)
+- [x] **#E27** No broker error code mapping (FIXED: Added IBErrorCodeMapper in core/order_management.py with comprehensive IB error codes categorized by type)
+- [x] **#E28** Fill notification latency not tracked (FIXED: Added FillLatencyTracker in core/order_management.py with venue latency stats, P50/P95/P99 metrics)
+- [x] **#E29** Order rejection reason parsing incomplete (FIXED: Added RejectionAnalyzer in core/order_management.py with categorization, recoverability assessment, suggested actions)
 - [ ] **#E30** No execution venue selection logic
 
 ### LOW (3)
@@ -223,7 +223,7 @@
 ### MEDIUM (6)
 - [ ] **#P14** No target portfolio construction
 - [ ] **#P15** Trade list generation incomplete
-- [ ] **#P16** No what-if analysis support
+- [x] **#P16** No what-if analysis support (FIXED: Added WhatIfAnalyzer in core/scenario_analysis.py with position change analysis, risk impact calculation, hedge optimization)
 - [x] **#P17** Historical portfolio snapshots not stored (FIXED: Created core/portfolio_snapshots.py with PortfolioSnapshotStore, SQLite storage, periodic capture, comparison tools)
 - [ ] **#P18** No portfolio comparison tools
 - [ ] **#P19** Missing custom reporting
@@ -395,7 +395,7 @@
 ## Fix Progress Tracking
 
 **Last Updated**: 2026-02-02
-**Total Issues Fixed**: 128 CRITICAL/HIGH issues + 20 MEDIUM priority issues = 148 total
+**Total Issues Fixed**: 128 CRITICAL/HIGH issues + 35 MEDIUM priority issues = 163 total
 
 ### Completed Fixes (CRITICAL)
 - [x] #Q1 - MACD signal line calculation (momentum_strategy.py)
@@ -507,26 +507,40 @@
 ### Remaining Priority (Next to Fix)
 All CRITICAL and HIGH priority issues have been addressed! (128 total)
 
-### Recently Completed MEDIUM Fixes (12 new)
+### Recently Completed MEDIUM Fixes (35 total)
 - [x] #Q7 - Backtesting framework (core/backtest.py)
 - [x] #Q8 - Walk-forward optimization (core/backtest.py)
 - [x] #Q9 - Regime detection (core/regime_detector.py)
 - [x] #Q10 - Transaction cost model (core/backtest.py)
+- [x] #Q11 - Slippage estimation (core/slippage_estimator.py)
+- [x] #Q12 - Capacity constraints (core/slippage_estimator.py)
 - [x] #Q13 - ADX indicator (core/technical_indicators.py)
 - [x] #Q14 - Bollinger Bands (core/technical_indicators.py)
 - [x] #Q15 - Volume-weighted indicators (core/technical_indicators.py)
+- [x] #Q18 - Signal decay/half-life modeling (core/signal_decay.py)
 - [x] #R12 - Risk factor decomposition (core/risk_factors.py)
+- [x] #R13 - CVaR threshold alerts (agents/risk_agent.py)
+- [x] #R14 - Cross-margin benefit calculation (core/margin_optimizer.py)
+- [x] #R16 - Risk contribution attribution by strategy (core/margin_optimizer.py)
+- [x] #R17 - Worst-case scenario reporting (core/scenario_analysis.py)
+- [x] #R18 - Historical stress event playback (core/scenario_analysis.py)
+- [x] #R25 - Risk report generation (core/risk_reports.py)
+- [x] #R27 - Risk limit breach notifications (core/notifications.py)
+- [x] #C33 - Compliance officer notifications (core/notifications.py)
+- [x] #C34 - Regulatory reporting calendar (core/regulatory_calendar.py)
+- [x] #C39 - Gift and entertainment logging (core/regulatory_calendar.py)
+- [x] #C40 - Compliance training records (core/regulatory_calendar.py)
+- [x] #E24 - Order timeout handling (agents/execution_agent.py)
+- [x] #E25 - Order throttling per venue (core/order_throttling.py)
+- [x] #E26 - Order amendment support (core/order_management.py)
+- [x] #E27 - Broker error code mapping (core/order_management.py)
+- [x] #E28 - Fill notification latency (core/order_management.py)
+- [x] #E29 - Order rejection parsing (core/order_management.py)
+- [x] #P16 - What-if analysis (core/scenario_analysis.py)
+- [x] #P17 - Historical portfolio snapshots (core/portfolio_snapshots.py)
 - [x] #S8 - Config validation (core/config_validator.py)
 - [x] #S11 - Structured JSON logging (core/structured_logging.py)
 - [x] #X9 - FX session awareness (core/fx_sessions.py)
-- [x] #E24 - Order timeout handling (agents/execution_agent.py)
-- [x] #R13 - CVaR threshold alerts (agents/risk_agent.py)
-- [x] #P17 - Historical portfolio snapshots (core/portfolio_snapshots.py)
-- [x] #E25 - Order throttling per venue (core/order_throttling.py)
-- [x] #R25 - Risk report generation (core/risk_reports.py)
-- [x] #Q18 - Signal decay/half-life modeling (core/signal_decay.py)
-- [x] #C33 - Compliance officer notifications (core/notifications.py)
-- [x] #R27 - Risk limit breach notifications (core/notifications.py)
 
 ---
 
