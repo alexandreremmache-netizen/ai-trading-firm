@@ -47,7 +47,7 @@
 - [x] **#Q15** Volume-weighted indicators missing (FIXED: Added VWAPCalculator, OBVCalculator, MFICalculator with complete volume analysis)
 - [ ] **#Q16** No mean reversion signal validation
 - [ ] **#Q17** Spread ratio validation incomplete for stat arb
-- [ ] **#Q18** No signal decay/half-life modeling
+- [x] **#Q18** No signal decay/half-life modeling (FIXED: Created core/signal_decay.py with SignalDecayManager, multiple decay models, half-life calibration, aggregate signals)
 
 ### LOW (6)
 - [ ] **#Q19** Missing docstrings in some utility functions
@@ -94,7 +94,7 @@
 
 ### LOW (5)
 - [ ] **#R26** Risk dashboard metrics incomplete
-- [ ] **#R27** No risk limit breach notification system
+- [x] **#R27** No risk limit breach notification system (FIXED: Created core/notifications.py with RiskLimitBreachNotifier, multi-channel alerts, throttling, acknowledgment tracking)
 - [ ] **#R28** Historical VaR backtest missing
 - [ ] **#R29** No risk metric caching optimization
 - [ ] **#R30** Logging of risk calculations verbose
@@ -140,7 +140,7 @@
 - [x] **#C32** Disaster recovery documentation not automated (FIXED: Added DisasterRecoveryDocumentor with DRTestRecord, RTO/RPO tracking)
 
 ### MEDIUM (8)
-- [ ] **#C33** Compliance officer notification system not implemented
+- [x] **#C33** Compliance officer notification system not implemented (FIXED: Created core/notifications.py with ComplianceOfficerNotifier, violation/suspicious activity alerts, deadline reminders)
 - [ ] **#C34** Regulatory reporting calendar not maintained
 - [ ] **#C35** Control room functionality missing
 - [ ] **#C36** Chinese walls not enforced in system
@@ -395,7 +395,7 @@
 ## Fix Progress Tracking
 
 **Last Updated**: 2026-02-02
-**Total Issues Fixed**: 128 CRITICAL/HIGH issues + 17 MEDIUM priority issues = 145 total
+**Total Issues Fixed**: 128 CRITICAL/HIGH issues + 20 MEDIUM priority issues = 148 total
 
 ### Completed Fixes (CRITICAL)
 - [x] #Q1 - MACD signal line calculation (momentum_strategy.py)
@@ -524,6 +524,9 @@ All CRITICAL and HIGH priority issues have been addressed! (128 total)
 - [x] #P17 - Historical portfolio snapshots (core/portfolio_snapshots.py)
 - [x] #E25 - Order throttling per venue (core/order_throttling.py)
 - [x] #R25 - Risk report generation (core/risk_reports.py)
+- [x] #Q18 - Signal decay/half-life modeling (core/signal_decay.py)
+- [x] #C33 - Compliance officer notifications (core/notifications.py)
+- [x] #R27 - Risk limit breach notifications (core/notifications.py)
 
 ---
 
