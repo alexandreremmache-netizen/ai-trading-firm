@@ -90,7 +90,7 @@
 - [ ] **#R22** No overnight vs intraday risk differentiation
 - [x] **#R23** Tail risk metrics (skew/kurtosis) not calculated (FIXED: Included in calculate_fat_tail_metrics under #R9 - provides skewness, excess_kurtosis, tail_ratio, extreme event counts, Jarque-Bera test)
 - [ ] **#R24** No scenario-specific position limits
-- [ ] **#R25** Missing risk report generation
+- [x] **#R25** Missing risk report generation (FIXED: Created core/risk_reports.py with RiskReportGenerator, daily summaries, position risk, limit utilization, export to JSON/CSV/HTML)
 
 ### LOW (5)
 - [ ] **#R26** Risk dashboard metrics incomplete
@@ -187,7 +187,7 @@
 
 ### MEDIUM (7)
 - [x] **#E24** Order timeout handling incomplete (FIXED: Added order timeout monitor in execution_agent.py with configurable timeouts, background monitoring task, automatic cancellation of expired orders)
-- [ ] **#E25** No order throttling per venue
+- [x] **#E25** No order throttling per venue (FIXED: Created core/order_throttling.py with OrderThrottler, per-venue rate limits, token bucket burst control, adaptive backoff on rejections)
 - [ ] **#E26** Missing order amendment support
 - [ ] **#E27** No broker error code mapping
 - [ ] **#E28** Fill notification latency not tracked
@@ -224,7 +224,7 @@
 - [ ] **#P14** No target portfolio construction
 - [ ] **#P15** Trade list generation incomplete
 - [ ] **#P16** No what-if analysis support
-- [ ] **#P17** Historical portfolio snapshots not stored
+- [x] **#P17** Historical portfolio snapshots not stored (FIXED: Created core/portfolio_snapshots.py with PortfolioSnapshotStore, SQLite storage, periodic capture, comparison tools)
 - [ ] **#P18** No portfolio comparison tools
 - [ ] **#P19** Missing custom reporting
 
@@ -395,7 +395,7 @@
 ## Fix Progress Tracking
 
 **Last Updated**: 2026-02-02
-**Total Issues Fixed**: 128 CRITICAL/HIGH issues + 14 MEDIUM priority issues = 142 total
+**Total Issues Fixed**: 128 CRITICAL/HIGH issues + 17 MEDIUM priority issues = 145 total
 
 ### Completed Fixes (CRITICAL)
 - [x] #Q1 - MACD signal line calculation (momentum_strategy.py)
@@ -521,6 +521,9 @@ All CRITICAL and HIGH priority issues have been addressed! (128 total)
 - [x] #X9 - FX session awareness (core/fx_sessions.py)
 - [x] #E24 - Order timeout handling (agents/execution_agent.py)
 - [x] #R13 - CVaR threshold alerts (agents/risk_agent.py)
+- [x] #P17 - Historical portfolio snapshots (core/portfolio_snapshots.py)
+- [x] #E25 - Order throttling per venue (core/order_throttling.py)
+- [x] #R25 - Risk report generation (core/risk_reports.py)
 
 ---
 
