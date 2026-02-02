@@ -271,11 +271,11 @@
 - [x] **#F3** First Notice Date (FND) enforcement missing for physical delivery contracts (FIXED: Added FNDViolationLevel and check_fnd_status)
 
 ### HIGH (5)
-- [ ] **#F4** Roll calendar not complete for all contracts
-- [ ] **#F5** No basis/calendar spread tracking
-- [ ] **#F6** Delivery month mismatch between spec and IB possible
-- [ ] **#F7** No expiration warning system
-- [ ] **#F8** Missing settlement price handling
+- [x] **#F4** Roll calendar not complete for all contracts (FIXED: Added EXTENDED_ROLL_SCHEDULES with 25+ contracts including currencies, livestock, softs; get_complete_roll_calendar function)
+- [x] **#F5** No basis/calendar spread tracking (FIXED: Added BasisSpread dataclass, BasisTracker class with spot basis, calendar spreads, term structure, roll yield detection)
+- [x] **#F6** Delivery month mismatch between spec and IB possible (FIXED: Added DeliveryMonthValidator with IB_CONTRACT_MONTHS, validate_contract_month, validate_roll_schedule)
+- [x] **#F7** No expiration warning system (FIXED: Added ExpirationWarning dataclass, ExpirationWarningSystem with tiered alerts, check_all_positions, acknowledgment)
+- [x] **#F8** Missing settlement price handling (FIXED: Added SettlementPrice dataclass, SettlementPriceManager with daily/final settlements, MTM calculation, variation margin)
 
 ### MEDIUM (9)
 - [ ] **#F9** No commodity-specific seasonality adjustments
@@ -395,7 +395,7 @@
 ## Fix Progress Tracking
 
 **Last Updated**: 2026-02-02
-**Total Issues Fixed**: 83 CRITICAL/HIGH issues
+**Total Issues Fixed**: 88 CRITICAL/HIGH issues
 
 ### Completed Fixes (CRITICAL)
 - [x] #Q1 - MACD signal line calculation (momentum_strategy.py)
@@ -479,9 +479,14 @@
 - [x] #O10 - Gamma scalping support (options_vol_strategy.py)
 - [x] #O11 - Vanna/volga adjustments (options_vol_strategy.py)
 - [x] #O12 - Option portfolio hedging (options_vol_strategy.py)
+- [x] #F4 - Complete roll calendar (futures_roll_manager.py)
+- [x] #F5 - Basis/calendar spread tracking (futures_roll_manager.py)
+- [x] #F6 - Delivery month validation (futures_roll_manager.py)
+- [x] #F7 - Expiration warning system (futures_roll_manager.py)
+- [x] #F8 - Settlement price handling (futures_roll_manager.py)
 
 ### Remaining Priority (Next to Fix)
-Compliance (#C5-C32), Futures (#F4-F8), FX (#X5-X8), Portfolio (#P6-P13)
+Compliance (#C5-C32), FX (#X5-X8), Portfolio (#P6-P13)
 
 ---
 
