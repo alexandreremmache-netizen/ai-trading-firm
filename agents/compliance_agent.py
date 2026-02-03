@@ -348,6 +348,10 @@ class ComplianceAgent(ValidationAgent):
         "demand_zone", "supply_zone", "price_level",
         # LLM forecasting sources (ForecastingAgent)
         "llm_forecast", "price_history", "price_forecast",
+        # FinBERT local sentiment analysis
+        "finbert_sentiment", "finbert_analysis", "local_nlp",
+        # DRL CIO sources
+        "drl_decision", "rl_policy", "learned_weights",
     }
 
     # Suspicious patterns in data content
