@@ -71,6 +71,21 @@ class ZScoreAlert:
     message: str
 
 
+@dataclass
+class DivergenceState:
+    """State for correlation divergence tracking."""
+    symbol_a: str
+    symbol_b: str
+    returns_a: deque  # Rolling returns
+    returns_b: deque
+    correlation_history: deque  # Rolling correlation values
+    current_correlation: float = 0.0
+    baseline_correlation: float = 0.0
+    divergence_zscore: float = 0.0
+    last_signal: SignalDirection = SignalDirection.FLAT
+    divergence_start: datetime | None = None
+
+
 class StatArbAgent(SignalAgent):
     """
     Statistical Arbitrage Agent.
@@ -123,6 +138,19 @@ class StatArbAgent(SignalAgent):
         self._min_pair_quality = config.parameters.get("min_pair_quality_score", 0.4)
         self._pair_ranking_enabled = config.parameters.get("pair_ranking_enabled", True)
 
+        # Correlation divergence detection (MoonDev-inspired)
+        self._divergence_enabled = config.parameters.get("divergence_enabled", True)
+        self._divergence_pairs = config.parameters.get("divergence_pairs", [
+            ["SPY", "QQQ"],   # Index ETFs
+            ["ES", "NQ"],     # Index futures
+            ["GC", "SI"],     # Precious metals
+            ["AAPL", "MSFT"], # Tech leaders
+        ])
+        self._divergence_lookback = config.parameters.get("divergence_lookback", 20)
+        self._divergence_threshold = config.parameters.get("divergence_threshold", 2.0)
+        self._correlation_breakdown_threshold = config.parameters.get("correlation_breakdown_threshold", 0.3)
+        self._divergence_states: dict[str, DivergenceState] = {}
+
     async def initialize(self) -> None:
         """Initialize pairs state."""
         logger.info(f"StatArbAgent initializing with pairs: {self._pairs_config}")
@@ -137,6 +165,20 @@ class StatArbAgent(SignalAgent):
                     price_b=deque(maxlen=self._lookback_size),
                     spread_history=deque(maxlen=self._lookback_size),
                 )
+
+        # Initialize divergence tracking (MoonDev-inspired correlation divergence)
+        if self._divergence_enabled:
+            logger.info(f"StatArbAgent initializing divergence tracking for: {self._divergence_pairs}")
+            for pair in self._divergence_pairs:
+                if len(pair) == 2:
+                    div_key = f"DIV:{pair[0]}:{pair[1]}"
+                    self._divergence_states[div_key] = DivergenceState(
+                        symbol_a=pair[0],
+                        symbol_b=pair[1],
+                        returns_a=deque(maxlen=self._divergence_lookback * 2),
+                        returns_b=deque(maxlen=self._divergence_lookback * 2),
+                        correlation_history=deque(maxlen=50),
+                    )
 
         # TODO: Load historical data to bootstrap cointegration estimates
 
@@ -197,6 +239,13 @@ class StatArbAgent(SignalAgent):
         if self._bar_counter >= self._cointegration_check_interval:
             self._bar_counter = 0
             await self._check_all_cointegrations()
+
+        # Check for correlation divergence signals (MoonDev-inspired)
+        if self._divergence_enabled:
+            div_signals = await self._check_divergence_signals(symbol, price)
+            for div_signal in div_signals:
+                await self._event_bus.publish_signal(div_signal)
+                self._audit_logger.log_event(div_signal)
 
     async def _check_pair_signal(
         self,
@@ -744,3 +793,256 @@ class StatArbAgent(SignalAgent):
             return False, f"Pair {pair_key} has too many breakdowns ({ps.cointegration_breakdown_count})"
 
         return True, "OK"
+
+    # =========================================================================
+    # CORRELATION DIVERGENCE DETECTION (MoonDev-inspired)
+    # =========================================================================
+
+    async def _check_divergence_signals(
+        self,
+        symbol: str,
+        price: float,
+    ) -> list[SignalEvent]:
+        """
+        Check for correlation divergence signals.
+
+        Detects when normally correlated assets diverge significantly,
+        signaling a mean-reversion opportunity.
+        """
+        from datetime import datetime, timezone
+
+        signals: list[SignalEvent] = []
+
+        for div_key, state in self._divergence_states.items():
+            # Update prices
+            if symbol == state.symbol_a:
+                # Calculate return if we have previous price
+                if state.returns_a:
+                    prev_prices_a = list(state.returns_a)
+                    if prev_prices_a:
+                        last_price_a = prev_prices_a[-1] if isinstance(prev_prices_a[-1], (int, float)) else price
+                        ret = (price - last_price_a) / last_price_a if last_price_a > 0 else 0
+                        state.returns_a.append(ret)
+                    else:
+                        state.returns_a.append(0)
+                else:
+                    state.returns_a.append(0)
+
+                # Store price for next iteration
+                if not hasattr(state, '_last_price_a'):
+                    state._last_price_a = price
+                state._last_price_a = price
+
+            elif symbol == state.symbol_b:
+                if state.returns_b:
+                    prev_prices_b = list(state.returns_b)
+                    if prev_prices_b:
+                        last_price_b = prev_prices_b[-1] if isinstance(prev_prices_b[-1], (int, float)) else price
+                        ret = (price - last_price_b) / last_price_b if last_price_b > 0 else 0
+                        state.returns_b.append(ret)
+                    else:
+                        state.returns_b.append(0)
+                else:
+                    state.returns_b.append(0)
+
+                if not hasattr(state, '_last_price_b'):
+                    state._last_price_b = price
+                state._last_price_b = price
+
+            else:
+                continue
+
+            # Need sufficient data for correlation
+            if len(state.returns_a) < self._divergence_lookback or len(state.returns_b) < self._divergence_lookback:
+                continue
+
+            # Calculate rolling correlation
+            returns_a = np.array(list(state.returns_a)[-self._divergence_lookback:])
+            returns_b = np.array(list(state.returns_b)[-self._divergence_lookback:])
+
+            # Align lengths
+            min_len = min(len(returns_a), len(returns_b))
+            if min_len < 10:
+                continue
+
+            returns_a = returns_a[-min_len:]
+            returns_b = returns_b[-min_len:]
+
+            # Calculate correlation
+            correlation = self._calculate_correlation(returns_a, returns_b)
+            state.current_correlation = correlation
+            state.correlation_history.append(correlation)
+
+            # Calculate baseline correlation (longer-term average)
+            if len(state.correlation_history) >= 20:
+                state.baseline_correlation = np.mean(list(state.correlation_history)[-30:])
+            else:
+                state.baseline_correlation = correlation
+
+            # Detect divergence
+            signal = self._detect_divergence_signal(div_key, state, returns_a, returns_b)
+            if signal:
+                signals.append(signal)
+
+        return signals
+
+    def _calculate_correlation(self, returns_a: np.ndarray, returns_b: np.ndarray) -> float:
+        """Calculate Pearson correlation between two return series."""
+        try:
+            if len(returns_a) < 5 or len(returns_b) < 5:
+                return 0.0
+
+            # Remove mean
+            a_centered = returns_a - np.mean(returns_a)
+            b_centered = returns_b - np.mean(returns_b)
+
+            # Calculate correlation
+            numerator = np.sum(a_centered * b_centered)
+            denominator = np.sqrt(np.sum(a_centered**2) * np.sum(b_centered**2))
+
+            if denominator < 1e-10:
+                return 0.0
+
+            return numerator / denominator
+
+        except Exception as e:
+            logger.error(f"Correlation calculation failed: {e}")
+            return 0.0
+
+    def _detect_divergence_signal(
+        self,
+        div_key: str,
+        state: DivergenceState,
+        returns_a: np.ndarray,
+        returns_b: np.ndarray,
+    ) -> SignalEvent | None:
+        """
+        Detect divergence between correlated assets and generate signal.
+
+        Strategy:
+        - When correlation breaks down (drops significantly), expect reversion
+        - When cumulative returns diverge, bet on convergence
+        """
+        from datetime import datetime, timezone
+
+        # Calculate cumulative returns divergence
+        cum_ret_a = np.sum(returns_a)
+        cum_ret_b = np.sum(returns_b)
+        divergence = cum_ret_a - cum_ret_b
+
+        # Calculate divergence z-score
+        divergence_history = []
+        for i in range(min(len(returns_a), len(returns_b)) - 5):
+            d = np.sum(returns_a[:i+5]) - np.sum(returns_b[:i+5])
+            divergence_history.append(d)
+
+        if len(divergence_history) < 5:
+            return None
+
+        div_mean = np.mean(divergence_history)
+        div_std = np.std(divergence_history)
+
+        if div_std < 1e-8:
+            return None
+
+        state.divergence_zscore = (divergence - div_mean) / div_std
+
+        # Check for correlation breakdown
+        correlation_dropped = (
+            state.baseline_correlation > 0.5 and
+            state.current_correlation < state.baseline_correlation - self._correlation_breakdown_threshold
+        )
+
+        # Generate signal on significant divergence
+        abs_zscore = abs(state.divergence_zscore)
+
+        if abs_zscore < self._divergence_threshold:
+            # No significant divergence - check for exit
+            if state.last_signal != SignalDirection.FLAT and abs_zscore < 0.5:
+                state.last_signal = SignalDirection.FLAT
+                state.divergence_start = None
+                return SignalEvent(
+                    source_agent=self.name,
+                    strategy_name="correlation_divergence",
+                    symbol=div_key,
+                    direction=SignalDirection.FLAT,
+                    strength=0.0,
+                    confidence=0.7,
+                    rationale=(
+                        f"Divergence reverted for {state.symbol_a}/{state.symbol_b}. "
+                        f"Z-score={state.divergence_zscore:.2f}, corr={state.current_correlation:.2f}"
+                    ),
+                    data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+                )
+            return None
+
+        # Determine direction (bet on convergence)
+        if state.divergence_zscore > self._divergence_threshold:
+            # A outperformed B significantly - expect A to underperform (short A, long B)
+            if state.last_signal != SignalDirection.SHORT:
+                state.last_signal = SignalDirection.SHORT
+                state.divergence_start = datetime.now(timezone.utc)
+
+                confidence = min(0.85, 0.5 + abs_zscore * 0.1)
+                if correlation_dropped:
+                    confidence = min(0.9, confidence + 0.1)  # Higher confidence on correlation breakdown
+
+                return SignalEvent(
+                    source_agent=self.name,
+                    strategy_name="correlation_divergence",
+                    symbol=div_key,
+                    direction=SignalDirection.SHORT,
+                    strength=-min(1.0, abs_zscore / 3.0),
+                    confidence=confidence,
+                    rationale=(
+                        f"Divergence detected: {state.symbol_a} outperformed {state.symbol_b}. "
+                        f"Z-score={state.divergence_zscore:.2f}, corr={state.current_correlation:.2f} "
+                        f"(baseline={state.baseline_correlation:.2f}). "
+                        f"Strategy: Short {state.symbol_a}, Long {state.symbol_b}"
+                    ),
+                    data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+                )
+
+        elif state.divergence_zscore < -self._divergence_threshold:
+            # B outperformed A significantly - expect B to underperform (long A, short B)
+            if state.last_signal != SignalDirection.LONG:
+                state.last_signal = SignalDirection.LONG
+                state.divergence_start = datetime.now(timezone.utc)
+
+                confidence = min(0.85, 0.5 + abs_zscore * 0.1)
+                if correlation_dropped:
+                    confidence = min(0.9, confidence + 0.1)
+
+                return SignalEvent(
+                    source_agent=self.name,
+                    strategy_name="correlation_divergence",
+                    symbol=div_key,
+                    direction=SignalDirection.LONG,
+                    strength=min(1.0, abs_zscore / 3.0),
+                    confidence=confidence,
+                    rationale=(
+                        f"Divergence detected: {state.symbol_b} outperformed {state.symbol_a}. "
+                        f"Z-score={state.divergence_zscore:.2f}, corr={state.current_correlation:.2f} "
+                        f"(baseline={state.baseline_correlation:.2f}). "
+                        f"Strategy: Long {state.symbol_a}, Short {state.symbol_b}"
+                    ),
+                    data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+                )
+
+        return None
+
+    def get_divergence_status(self) -> dict[str, dict]:
+        """Get divergence status for all tracked pairs."""
+        return {
+            div_key: {
+                "symbol_a": state.symbol_a,
+                "symbol_b": state.symbol_b,
+                "current_correlation": state.current_correlation,
+                "baseline_correlation": state.baseline_correlation,
+                "divergence_zscore": state.divergence_zscore,
+                "last_signal": state.last_signal.value,
+                "data_points_a": len(state.returns_a),
+                "data_points_b": len(state.returns_b),
+            }
+            for div_key, state in self._divergence_states.items()
+        }

@@ -230,6 +230,23 @@ class AgentFactory:
             signal_agents.append(sentiment_agent)
             self._event_bus.register_signal_agent("SentimentAgent")
 
+        # Chart Analysis Agent (Claude Vision pattern recognition)
+        if agents_config.get("chart_analysis", {}).get("enabled", True):
+            from agents.chart_analysis_agent import ChartAnalysisAgent
+
+            chart_config = agents_config.get("chart_analysis", {})
+            chart_agent = ChartAnalysisAgent(
+                config=AgentConfig(
+                    name="ChartAnalysisAgent",
+                    enabled=True,
+                    parameters=chart_config,
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+            )
+            signal_agents.append(chart_agent)
+            self._event_bus.register_signal_agent("ChartAnalysisAgent")
+
         logger.info(f"Created {len(signal_agents)} signal agents")
         return signal_agents
 

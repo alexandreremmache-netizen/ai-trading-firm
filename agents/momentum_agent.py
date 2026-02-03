@@ -26,6 +26,7 @@ from core.events import (
     SignalEvent,
     SignalDirection,
 )
+from core.demand_zones import DemandZoneDetector, CandleStick
 
 if TYPE_CHECKING:
     from core.event_bus import EventBus
@@ -54,6 +55,17 @@ class MomentumState:
     macd_history: deque = field(default_factory=lambda: deque(maxlen=50))
     signal_ema: float = 0.0  # 9-period EMA of MACD
     ema_initialized: bool = False
+    # Demand/Supply zone tracking (MoonDev-inspired)
+    zone_detector: DemandZoneDetector | None = None
+    at_demand_zone: bool = False
+    at_supply_zone: bool = False
+    zone_bias: str = "neutral"  # "bullish", "bearish", "neutral"
+    # OHLCV for zone detection
+    candle_open: float = 0.0
+    candle_high: float = 0.0
+    candle_low: float = 0.0
+    candle_volume: int = 0
+    last_candle_time: int = 0  # Unix timestamp for candle aggregation
 
 
 class MomentumAgent(SignalAgent):
@@ -86,6 +98,12 @@ class MomentumAgent(SignalAgent):
         self._rsi_overbought = config.parameters.get("rsi_overbought", 70)
         self._rsi_oversold = config.parameters.get("rsi_oversold", 30)
 
+        # Demand Zone configuration (MoonDev-inspired)
+        self._demand_zones_enabled = config.parameters.get("demand_zones_enabled", True)
+        self._zone_lookback = config.parameters.get("zone_lookback", 50)
+        self._zone_touch_threshold = config.parameters.get("zone_touch_threshold", 0.02)
+        self._candle_period_seconds = config.parameters.get("candle_period_seconds", 300)  # 5-min candles
+
         # State per symbol
         self._symbols: dict[str, MomentumState] = {}
         self._max_lookback = max(self._slow_period, self._rsi_period) * 2
@@ -94,7 +112,7 @@ class MomentumAgent(SignalAgent):
         """Initialize momentum tracking."""
         logger.info(
             f"MomentumAgent initializing with MA({self._fast_period}/{self._slow_period}), "
-            f"RSI({self._rsi_period})"
+            f"RSI({self._rsi_period}), DemandZones={self._demand_zones_enabled}"
         )
 
     async def process_event(self, event: Event) -> None:
@@ -113,6 +131,10 @@ class MomentumAgent(SignalAgent):
             self._symbols[symbol] = MomentumState(
                 symbol=symbol,
                 prices=deque(maxlen=self._max_lookback),
+                zone_detector=DemandZoneDetector(
+                    lookback=self._zone_lookback,
+                    zone_touch_threshold=self._zone_touch_threshold,
+                ) if self._demand_zones_enabled else None,
             )
 
         state = self._symbols[symbol]
@@ -120,6 +142,10 @@ class MomentumAgent(SignalAgent):
         # Update price
         prev_price = state.prices[-1] if state.prices else price
         state.prices.append(price)
+
+        # Update demand zone detector with candle data
+        if self._demand_zones_enabled and state.zone_detector:
+            self._update_zone_candle(state, event)
 
         # Update RSI components
         change = price - prev_price
@@ -172,6 +198,11 @@ class MomentumAgent(SignalAgent):
         if signal_direction == SignalDirection.FLAT:
             return None
 
+        # Build data sources tuple
+        data_sources = ["ib_market_data", "momentum_indicator"]
+        if self._demand_zones_enabled and (state.at_demand_zone or state.at_supply_zone):
+            data_sources.extend(["demand_zone", "supply_zone", "price_level"])
+
         return SignalEvent(
             source_agent=self.name,
             strategy_name="momentum_trend",
@@ -180,7 +211,7 @@ class MomentumAgent(SignalAgent):
             strength=strength,
             confidence=self._calculate_confidence(state),
             rationale=rationale,
-            data_sources=("ib_market_data", "momentum_indicator"),
+            data_sources=tuple(data_sources),
         )
 
     def _calculate_rsi(self, state: MomentumState) -> float:
@@ -334,17 +365,35 @@ class MomentumAgent(SignalAgent):
             bearish_signals += 1
             reasons.append(f"MACD bearish ({state.macd:.4f} < signal {state.macd_signal:.4f})")
 
-        # Determine direction and strength
+        # Demand/Supply Zone Analysis (MoonDev-inspired)
+        if self._demand_zones_enabled:
+            if state.at_demand_zone:
+                bullish_signals += 1
+                reasons.append(f"At demand zone (support, bias={state.zone_bias})")
+            elif state.at_supply_zone:
+                bearish_signals += 1
+                reasons.append(f"At supply zone (resistance, bias={state.zone_bias})")
+
+            # Zone bias can add partial weight
+            if state.zone_bias == "bullish" and not state.at_supply_zone:
+                bullish_signals += 0.5
+                reasons.append("Zone structure bullish")
+            elif state.zone_bias == "bearish" and not state.at_demand_zone:
+                bearish_signals += 0.5
+                reasons.append("Zone structure bearish")
+
+        # Determine direction and strength (now using 4 indicators instead of 3)
+        max_signals = 4 if self._demand_zones_enabled else 3
         total_signals = bullish_signals + bearish_signals
 
         if total_signals == 0:
             return SignalDirection.FLAT, 0.0, "No clear momentum signal"
 
         if bullish_signals > bearish_signals:
-            strength = bullish_signals / 3.0  # Normalize to [0, 1]
+            strength = bullish_signals / max_signals  # Normalize to [0, 1]
             return SignalDirection.LONG, strength, " | ".join(reasons)
         elif bearish_signals > bullish_signals:
-            strength = bearish_signals / 3.0
+            strength = bearish_signals / max_signals
             return SignalDirection.SHORT, -strength, " | ".join(reasons)
         else:
             return SignalDirection.FLAT, 0.0, "Mixed signals - no clear direction"
@@ -375,4 +424,83 @@ class MomentumAgent(SignalAgent):
         # Base confidence + agreement bonus
         confidence = 0.4 + (agreement * 0.15)
 
+        # Boost confidence if at a zone that confirms direction
+        if state.at_demand_zone and ma_bullish:
+            confidence += 0.1
+        elif state.at_supply_zone and not ma_bullish:
+            confidence += 0.1
+
         return min(0.9, confidence)
+
+    def _update_zone_candle(self, state: MomentumState, event: MarketDataEvent) -> None:
+        """
+        Update demand zone detector with candle data.
+
+        Aggregates tick data into candles for zone detection.
+        """
+        from datetime import datetime, timezone
+        import time
+
+        current_time = int(time.time())
+        candle_boundary = current_time - (current_time % self._candle_period_seconds)
+
+        price = event.mid or event.last
+        if price <= 0:
+            return
+
+        # Check if we need to start a new candle
+        if state.last_candle_time != candle_boundary:
+            # Complete previous candle if we have one
+            if state.last_candle_time > 0 and state.candle_open > 0:
+                candle = CandleStick(
+                    timestamp=datetime.fromtimestamp(state.last_candle_time, tz=timezone.utc),
+                    open=state.candle_open,
+                    high=state.candle_high,
+                    low=state.candle_low,
+                    close=price,  # Previous price was the close
+                    volume=state.candle_volume,
+                )
+                state.zone_detector.add_candle(candle)
+
+                # Update zone analysis
+                self._update_zone_analysis(state, price)
+
+            # Start new candle
+            state.last_candle_time = candle_boundary
+            state.candle_open = price
+            state.candle_high = price
+            state.candle_low = price
+            state.candle_volume = event.volume
+        else:
+            # Update current candle
+            state.candle_high = max(state.candle_high, event.high if event.high > 0 else price)
+            state.candle_low = min(state.candle_low, event.low if event.low > 0 else price)
+            state.candle_volume += event.volume
+
+    def _update_zone_analysis(self, state: MomentumState, current_price: float) -> None:
+        """Update zone analysis for the symbol."""
+        if not state.zone_detector:
+            return
+
+        analysis = state.zone_detector.get_zone_analysis(current_price)
+
+        state.at_demand_zone = analysis["at_demand_zone"]
+        state.at_supply_zone = analysis["at_supply_zone"]
+        state.zone_bias = analysis["bias"]
+
+        if state.at_demand_zone:
+            logger.debug(f"Momentum: {state.symbol} at demand zone (bias={state.zone_bias})")
+        elif state.at_supply_zone:
+            logger.debug(f"Momentum: {state.symbol} at supply zone (bias={state.zone_bias})")
+
+    def get_zone_status(self, symbol: str) -> dict | None:
+        """Get demand/supply zone status for a symbol."""
+        if symbol not in self._symbols:
+            return None
+
+        state = self._symbols[symbol]
+        if not state.zone_detector:
+            return None
+
+        current_price = state.prices[-1] if state.prices else 0
+        return state.zone_detector.get_zone_analysis(current_price)

@@ -341,6 +341,11 @@ class ComplianceAgent(ValidationAgent):
         # LLM sentiment analysis sources (SentimentAgent)
         "llm_sentiment", "news_sentiment", "financial_news",
         "sentiment_indicator",
+        # Chart analysis sources (ChartAnalysisAgent)
+        "chart_analysis", "claude_vision", "pattern_recognition",
+        "technical_chart", "candlestick_pattern",
+        # Demand zone analysis
+        "demand_zone", "supply_zone", "price_level",
     }
 
     # Suspicious patterns in data content

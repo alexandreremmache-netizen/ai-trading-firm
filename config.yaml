@@ -162,12 +162,13 @@ risk_budget:
   high_vol_reduction: 0.50            # Reduce budget by 50% in high vol
   # Fixed allocations (used when method="fixed")
   fixed_allocations:
-    MacroAgent: 0.15
-    StatArbAgent: 0.20
-    MomentumAgent: 0.20
-    MarketMakingAgent: 0.15
+    MacroAgent: 0.10
+    StatArbAgent: 0.15
+    MomentumAgent: 0.15
+    MarketMakingAgent: 0.10
     OptionsVolAgent: 0.15
     SentimentAgent: 0.15
+    ChartAnalysisAgent: 0.20
 
 # =============================================================================
 # === DANGEROUS - Regulatory Compliance ===
@@ -511,6 +512,17 @@ agents:
       - ["GOOGL", "META"]
       - ["ES", "NQ"]       # Index futures pair
       - ["GC", "SI"]       # Metals pair
+    # Correlation divergence detection (MoonDev-inspired)
+    divergence_enabled: true
+    divergence_threshold: 2.0           # Z-score threshold for divergence signal
+    divergence_lookback: 20             # Periods for correlation calculation
+    correlation_breakdown_threshold: 0.3 # Drop in correlation to trigger alert
+    divergence_pairs:                   # Pairs to monitor for divergence
+      - ["SPY", "QQQ"]    # Index ETFs
+      - ["ES", "NQ"]      # Index futures
+      - ["GC", "SI"]      # Precious metals
+      - ["AAPL", "MSFT"]  # Tech leaders
+      - ["XLF", "JPM"]    # Financials
 
   momentum:
     enabled: true
@@ -520,6 +532,11 @@ agents:
     rsi_period: 14
     rsi_overbought: 70
     rsi_oversold: 30
+    # Demand/Supply zone detection (MoonDev-inspired)
+    demand_zones_enabled: true
+    zone_lookback: 50                   # Candles to analyze for zones
+    zone_touch_threshold: 0.02          # 2% zone width
+    candle_period_seconds: 300          # 5-minute candles for zone detection
 
   market_making:
     enabled: true
@@ -547,14 +564,31 @@ agents:
     calls_per_minute: 20                # Rate limit for LLM API
     timeout_seconds: 10                 # API timeout
 
+  # Claude Vision chart pattern analysis
+  chart_analysis:
+    enabled: true
+    model: "claude-sonnet-4-20250514"   # Vision-capable model
+    symbols:                            # Symbols to analyze
+      - "SPY"
+      - "QQQ"
+      - "AAPL"
+      - "MSFT"
+      - "NVDA"
+    analysis_interval_seconds: 300      # Analyze every 5 minutes
+    candle_count: 50                    # Number of candles to display
+    chart_timeframe: "15min"            # Candle timeframe
+    min_confidence: 0.5                 # Minimum confidence for signal
+    timeout_seconds: 30                 # API timeout (longer for vision)
+
   # ========== DECISION & VALIDATION AGENTS ==========
   cio:
-    signal_weight_macro: 0.15
-    signal_weight_stat_arb: 0.20
+    signal_weight_macro: 0.10
+    signal_weight_stat_arb: 0.15
     signal_weight_momentum: 0.20
-    signal_weight_market_making: 0.15
+    signal_weight_market_making: 0.10
     signal_weight_options_vol: 0.15
     signal_weight_sentiment: 0.15       # LLM sentiment analysis weight
+    signal_weight_chart_analysis: 0.15  # Claude Vision chart patterns
     min_conviction_threshold: 0.6
     max_concurrent_decisions: 5
     # Dynamic weight settings

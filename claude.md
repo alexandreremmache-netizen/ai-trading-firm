@@ -97,7 +97,8 @@ ai-trading-firm/
 │   ├── momentum_agent.py   # Signal agent - momentum/tendance
 │   ├── market_making_agent.py # Signal agent - market making
 │   ├── options_vol_agent.py   # Signal agent - volatilite options
-│   └── sentiment_agent.py  # Signal agent - LLM news sentiment (Claude/GPT)
+│   ├── sentiment_agent.py  # Signal agent - LLM news sentiment (Claude/GPT)
+│   └── chart_analysis_agent.py # Signal agent - Claude Vision chart patterns
 │
 ├── strategies/             # Logique de strategies (utilisee par les agents)
 │   ├── stat_arb_strategy.py    # Pairs trading, spreads commodities (BETA)
@@ -116,6 +117,7 @@ ai-trading-firm/
 │   ├── dependency_injection.py # Container DI
 │   ├── logger.py           # Audit logger (decisions, trades)
 │   ├── llm_client.py       # Client async LLM (Anthropic/OpenAI)
+│   ├── demand_zones.py     # Detection zones demand/supply (MoonDev)
 │   ├── var_calculator.py   # VaR parametrique/historique/Monte Carlo
 │   ├── stress_tester.py    # Scenarios de stress
 │   ├── correlation_manager.py # Gestion correlations
@@ -165,6 +167,7 @@ ai-trading-firm/
 | `MarketMakingAgent` | Spreads, gestion inventory | ALPHA |
 | `OptionsVolAgent` | Surface de volatilite, Greeks, term structure | BETA |
 | `SentimentAgent` | Analyse sentiment news via LLM (Claude/GPT) | BETA |
+| `ChartAnalysisAgent` | Analyse patterns graphiques via Claude Vision | BETA |
 
 ### Decision Agent
 
