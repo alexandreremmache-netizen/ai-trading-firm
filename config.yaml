@@ -234,6 +234,16 @@ logging:
   trade_file: "logs/trades.jsonl"
   decision_file: "logs/decisions.jsonl"
 
+# Health Check Server (separate from dashboard on port 8080)
+health_check:
+  enabled: true
+  host: "127.0.0.1"
+  port: 8081  # Changed from 8080 to avoid conflict with dashboard
+  max_event_queue_pct: 90.0
+  max_latency_ms: 1000.0
+  min_active_agents: 3
+  broker_required: false
+
 # Monitoring & Observability
 monitoring:
   log_dir: "logs/agents"
