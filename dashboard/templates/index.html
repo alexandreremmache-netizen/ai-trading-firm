@@ -51,6 +51,15 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            color: var(--text-primary);
+        }
+
+        .card-body {
+            color: var(--text-primary);
+        }
+
+        .card-body strong {
+            color: var(--text-primary);
         }
 
         .status-dot {
@@ -92,6 +101,7 @@
             border-radius: 8px;
             margin-bottom: 0.5rem;
             background: rgba(255,255,255,0.03);
+            color: var(--text-primary);
         }
 
         .agent-row:hover {
@@ -101,6 +111,7 @@
         .agent-name {
             flex: 1;
             font-weight: 500;
+            color: var(--text-primary);
         }
 
         .agent-type {
@@ -120,6 +131,11 @@
             margin-bottom: 0.5rem;
             background: rgba(255,255,255,0.02);
             font-size: 0.85rem;
+            color: var(--text-primary);
+        }
+
+        .event-item strong {
+            color: var(--text-primary);
         }
 
         .event-item.signal { border-color: var(--accent-green); }
@@ -137,6 +153,11 @@
             border-radius: 8px;
             text-align: center;
             font-size: 0.85rem;
+            color: var(--text-primary);
+        }
+
+        .signal-cell .fw-bold {
+            color: var(--text-primary);
         }
 
         .signal-long { background: rgba(0, 212, 170, 0.2); border: 1px solid var(--accent-green); }
@@ -149,10 +170,19 @@
             padding: 0.75rem;
             border-bottom: 1px solid rgba(255,255,255,0.05);
             align-items: center;
+            color: var(--text-primary);
         }
 
         .position-row:hover {
             background: rgba(255,255,255,0.05);
+        }
+
+        .position-row div {
+            color: var(--text-primary);
+        }
+
+        .position-row strong {
+            color: var(--text-primary);
         }
 
         .alert-toast {
@@ -327,6 +357,9 @@
                         <a class="nav-link" data-bs-toggle="pill" href="#positionsTab">Positions</a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link" data-bs-toggle="pill" href="#closedTab">Closed</a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link" data-bs-toggle="pill" href="#signalsTab">Signals</a>
                     </li>
                     <li class="nav-item">
@@ -349,9 +382,9 @@
                         </div>
                     </div>
 
-                    <!-- Positions Tab -->
+                    <!-- Positions Tab (Open Only) -->
                     <div class="tab-pane fade" id="positionsTab">
-                        <div class="card mb-3">
+                        <div class="card">
                             <div class="card-header">
                                 <span><i class="fas fa-wallet me-2"></i>Open Positions</span>
                                 <span class="badge bg-primary ms-2" id="openPositionsCount">0</span>
@@ -369,6 +402,10 @@
                                 </div>
                             </div>
                         </div>
+                    </div>
+
+                    <!-- Closed Positions Tab -->
+                    <div class="tab-pane fade" id="closedTab">
                         <div class="card">
                             <div class="card-header">
                                 <span><i class="fas fa-history me-2"></i>Closed Positions</span>
