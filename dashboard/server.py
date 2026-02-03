@@ -1357,6 +1357,7 @@ class DashboardServer:
                         "metrics": self._state.get_metrics(),
                         "agents": self._state.get_agents(),
                         "positions": self._state.get_positions(),
+                        "closed_positions": self._state.get_closed_positions(),
                         "signals": self._state.get_signals(),
                         "decisions": self._state.get_decisions(),
                         "risk": {

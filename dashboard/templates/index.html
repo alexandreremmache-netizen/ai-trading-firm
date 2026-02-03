@@ -27,9 +27,27 @@
             min-height: 100vh;
         }
 
+        .navbar {
+            background: #0d1117 !important;
+        }
+
         .navbar-brand {
             font-weight: 700;
             font-size: 1.5rem;
+            color: var(--text-primary) !important;
+        }
+
+        .navbar .text-secondary {
+            color: var(--text-secondary) !important;
+        }
+
+        .navbar span {
+            color: var(--text-primary);
+        }
+
+        .navbar .btn-outline-light {
+            color: var(--text-primary);
+            border-color: var(--text-secondary);
         }
 
         .card {
@@ -77,15 +95,17 @@
         .metric-card {
             text-align: center;
             padding: 1rem;
+            color: var(--text-primary);
         }
 
         .metric-value {
             font-size: 2rem;
             font-weight: 700;
+            color: var(--text-primary);
         }
 
         .metric-label {
-            color: var(--text-secondary);
+            color: var(--text-secondary) !important;
             font-size: 0.85rem;
             text-transform: uppercase;
         }
@@ -551,6 +571,7 @@
                     if (data.payload.metrics) updateMetrics(data.payload.metrics);
                     if (data.payload.agents) updateAgents(data.payload.agents);
                     if (data.payload.positions) updatePositions(data.payload.positions);
+                    if (data.payload.closed_positions) updateClosedPositions(data.payload.closed_positions);
                     if (data.payload.signals) updateSignals(data.payload.signals);
                     if (data.payload.decisions) updateDecisions(data.payload.decisions);
                     if (data.payload.risk) updateRisk(data.payload.risk);
