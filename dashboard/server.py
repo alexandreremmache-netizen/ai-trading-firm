@@ -386,6 +386,9 @@ class DashboardState:
         # Closed positions history
         self._closed_positions: deque[dict] = deque(maxlen=100)
 
+        # Track broker positions for closed position detection
+        self._broker_positions: dict[str, dict] = {}
+
         # Lock for thread safety
         self._lock = asyncio.Lock()
 
@@ -880,24 +883,59 @@ class DashboardState:
     async def get_positions_async(self) -> list[dict]:
         """Get all positions from broker asynchronously."""
         positions = []
+        current_symbols = set()
 
         # Try to get positions from broker
         if self._broker and hasattr(self._broker, 'is_connected') and self._broker.is_connected:
             try:
                 portfolio_state = await self._broker.get_portfolio_state()
                 for symbol, pos in portfolio_state.positions.items():
+                    current_symbols.add(symbol)
                     pnl_pct = 0.0
                     if pos.avg_cost > 0:
                         pnl_pct = ((pos.market_value / (pos.avg_cost * pos.quantity)) - 1) * 100 if pos.quantity != 0 else 0
+
+                    current_price = pos.market_value / pos.quantity if pos.quantity != 0 else 0
+
                     positions.append({
                         "symbol": symbol,
                         "quantity": pos.quantity,
                         "entry_price": pos.avg_cost,
-                        "current_price": pos.market_value / pos.quantity if pos.quantity != 0 else 0,
+                        "current_price": current_price,
                         "pnl": round(pos.unrealized_pnl, 2),
                         "pnl_pct": round(pnl_pct, 2),
                         "market_value": round(pos.market_value, 2),
                     })
+
+                    # Track position for closed position detection
+                    self._broker_positions[symbol] = {
+                        "quantity": pos.quantity,
+                        "entry_price": pos.avg_cost,
+                        "current_price": current_price,
+                        "pnl": round(pos.unrealized_pnl, 2),
+                    }
+
+                # Detect closed positions (symbols that were in previous update but not in current)
+                closed_symbols = set(self._broker_positions.keys()) - current_symbols
+                for symbol in closed_symbols:
+                    prev_pos = self._broker_positions.pop(symbol)
+                    # Add to closed positions
+                    realized_pnl = prev_pos.get("pnl", 0)
+                    entry_price = prev_pos.get("entry_price", 0)
+                    qty = prev_pos.get("quantity", 0)
+
+                    self._closed_positions.appendleft({
+                        "symbol": symbol,
+                        "quantity": qty,
+                        "entry_price": round(entry_price, 2),
+                        "exit_price": round(prev_pos.get("current_price", entry_price), 2),
+                        "pnl": round(realized_pnl, 2),
+                        "pnl_pct": round((realized_pnl / (entry_price * abs(qty))) * 100, 2) if entry_price and qty else 0,
+                        "closed_at": datetime.now(timezone.utc).isoformat(),
+                        "side": "LONG" if qty > 0 else "SHORT",
+                    })
+                    logger.info(f"Position closed: {symbol} qty={qty} P&L={realized_pnl}")
+
             except Exception as e:
                 logger.warning(f"Error getting positions from broker: {e}")
 
