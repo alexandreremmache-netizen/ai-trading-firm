@@ -162,6 +162,108 @@
         .event-item.decision { border-color: var(--accent-yellow); }
         .event-item.risk { border-color: var(--accent-red); }
 
+        /* CIO Decision Cards */
+        .decision-card {
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            margin-bottom: 0.75rem;
+            border-left: 4px solid transparent;
+            overflow: hidden;
+            transition: background 0.2s ease;
+        }
+
+        .decision-card:hover {
+            background: rgba(255,255,255,0.06);
+        }
+
+        .decision-card.decision-long {
+            border-left-color: var(--accent-green);
+        }
+
+        .decision-card.decision-short {
+            border-left-color: var(--accent-yellow);
+        }
+
+        .decision-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            padding: 0.75rem 1rem 0.5rem 1rem;
+        }
+
+        .decision-card-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin: 0;
+        }
+
+        .decision-card-title.long-action {
+            color: var(--accent-green);
+        }
+
+        .decision-card-title.short-action {
+            color: var(--accent-yellow);
+        }
+
+        .decision-card-subtitle {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-top: 0.25rem;
+        }
+
+        .decision-card-pnl {
+            font-size: 1rem;
+            font-weight: 600;
+            text-align: right;
+            white-space: nowrap;
+        }
+
+        .decision-card-pnl.positive {
+            color: var(--accent-green);
+        }
+
+        .decision-card-pnl.negative {
+            color: var(--accent-red);
+        }
+
+        .decision-card-pnl.neutral {
+            color: var(--text-secondary);
+        }
+
+        .decision-card-body {
+            padding: 0 1rem 0.75rem 1rem;
+        }
+
+        .decision-rationale {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .decision-rationale .rationale-label {
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+
+        .decision-rationale .rationale-value {
+            color: var(--text-secondary);
+        }
+
+        .decision-rationale .signal-agent {
+            color: var(--accent-blue);
+        }
+
+        .decision-rationale .signal-weight {
+            color: var(--accent-yellow);
+        }
+
+        .decision-rationale .signal-confidence {
+            color: var(--accent-green);
+        }
+
         .signal-matrix {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
@@ -183,6 +285,20 @@
         .signal-long { background: rgba(0, 212, 170, 0.2); border: 1px solid var(--accent-green); }
         .signal-short { background: rgba(255, 107, 107, 0.2); border: 1px solid var(--accent-red); }
         .signal-flat { background: rgba(255, 217, 61, 0.1); border: 1px solid var(--accent-yellow); }
+
+        /* Closed positions with colored left border */
+        .closed-position {
+            border-left: 4px solid transparent;
+            padding-left: 0.5rem;
+        }
+        .closed-long {
+            border-left-color: var(--accent-green);
+            background: rgba(0, 212, 170, 0.05);
+        }
+        .closed-short {
+            border-left-color: var(--accent-red);
+            background: rgba(255, 107, 107, 0.05);
+        }
 
         .position-row {
             display: grid;
@@ -465,8 +581,9 @@
                         <div class="card">
                             <div class="card-header">
                                 <span><i class="fas fa-gavel me-2"></i>CIO Decisions</span>
+                                <span class="badge bg-info ms-2" id="decisionsCount">0</span>
                             </div>
-                            <div class="card-body" style="max-height: 400px; overflow-y: auto;">
+                            <div class="card-body" style="max-height: 500px; overflow-y: auto;">
                                 <div id="decisionsList">
                                     <!-- Populated by JS -->
                                 </div>
@@ -713,9 +830,9 @@
             if (countBadge) countBadge.textContent = positions.length;
 
             container.innerHTML = positions.map(pos => `
-                <div class="position-row">
+                <div class="position-row closed-position ${pos.side === 'LONG' ? 'closed-long' : 'closed-short'}">
                     <div><strong>${pos.symbol}</strong> <span class="badge ${pos.side === 'LONG' ? 'bg-success' : 'bg-danger'}">${pos.side}</span></div>
-                    <div>${pos.quantity}</div>
+                    <div>${Math.abs(pos.quantity)}</div>
                     <div>$${pos.entry_price.toFixed(2)}</div>
                     <div>$${pos.exit_price.toFixed(2)}</div>
                     <div class="${pos.pnl >= 0 ? 'positive' : 'negative'}">
@@ -748,22 +865,94 @@
 
         function updateDecisions(decisions) {
             const container = document.getElementById('decisionsList');
+            const countBadge = document.getElementById('decisionsCount');
 
             if (!decisions || decisions.length === 0) {
                 container.innerHTML = '<div class="text-secondary text-center py-3">No decisions yet</div>';
+                if (countBadge) countBadge.textContent = '0';
                 return;
             }
 
-            container.innerHTML = decisions.slice(0, 20).map(dec => `
-                <div class="event-item decision mb-2">
-                    <div class="d-flex justify-content-between">
-                        <strong>${dec.symbol} - ${dec.direction}</strong>
-                        <span class="${dec.pnl >= 0 ? 'positive' : 'negative'}">${formatCurrency(dec.pnl)}</span>
+            if (countBadge) countBadge.textContent = decisions.length;
+
+            container.innerHTML = decisions.slice(0, 20).map(dec => {
+                const isLong = dec.direction === 'LONG' || dec.direction === 'BUY';
+                const directionClass = isLong ? 'decision-long' : 'decision-short';
+                const actionClass = isLong ? 'long-action' : 'short-action';
+                const actionText = isLong ? 'BUY' : 'SELL';
+                const pnlClass = dec.pnl > 0 ? 'positive' : dec.pnl < 0 ? 'negative' : 'neutral';
+                const convictionPct = (dec.conviction * 100).toFixed(0);
+
+                // Parse and format the rationale
+                const formattedRationale = formatDecisionRationale(dec.rationale, convictionPct);
+
+                return `
+                    <div class="decision-card ${directionClass}">
+                        <div class="decision-card-header">
+                            <div>
+                                <div class="decision-card-title ${actionClass}">${dec.symbol} - ${actionText}</div>
+                                <div class="decision-card-subtitle">Conviction: ${convictionPct}% | Qty: ${dec.quantity}</div>
+                            </div>
+                            <div class="decision-card-pnl ${pnlClass}">${formatCurrency(dec.pnl)}</div>
+                        </div>
+                        <div class="decision-card-body">
+                            <div class="decision-rationale">${formattedRationale}</div>
+                        </div>
                     </div>
-                    <div>Conviction: ${(dec.conviction * 100).toFixed(0)}% | Qty: ${dec.quantity}</div>
-                    <div class="text-secondary small">${dec.rationale}</div>
-                </div>
-            `).join('');
+                `;
+            }).join('');
+        }
+
+        function formatDecisionRationale(rationale, convictionPct) {
+            if (!rationale) return '';
+
+            // Split by pipe delimiter and format each part
+            const parts = rationale.split('|').map(p => p.trim()).filter(p => p);
+
+            let formatted = [];
+            for (const part of parts) {
+                // Check for key: value patterns
+                const colonIndex = part.indexOf(':');
+                if (colonIndex > 0) {
+                    const key = part.substring(0, colonIndex).trim();
+                    const value = part.substring(colonIndex + 1).trim();
+
+                    // Special formatting for contributing signals
+                    if (key.toLowerCase().includes('contributing') || key.toLowerCase().includes('signal')) {
+                        const formattedValue = formatContributingSignals(value);
+                        formatted.push(`<span class="rationale-label">${key}:</span> ${formattedValue}`);
+                    } else if (key.toLowerCase() === 'direction') {
+                        const dirColor = value.toLowerCase() === 'long' ? 'var(--accent-green)' : 'var(--accent-yellow)';
+                        formatted.push(`<span class="rationale-label">${key}:</span> <span style="color: ${dirColor}; font-weight: 500;">${value}</span>`);
+                    } else if (key.toLowerCase() === 'conviction') {
+                        formatted.push(`<span class="rationale-label">${key}:</span> <span style="color: var(--accent-blue);">${value}</span>`);
+                    } else if (key.toLowerCase() === 'strength' || key.toLowerCase() === 'signal strength') {
+                        formatted.push(`<span class="rationale-label">${key}:</span> <span style="color: var(--accent-green);">${value}</span>`);
+                    } else {
+                        formatted.push(`<span class="rationale-label">${key}:</span> <span class="rationale-value">${value}</span>`);
+                    }
+                } else if (part) {
+                    formatted.push(`<span class="rationale-value">${part}</span>`);
+                }
+            }
+
+            return formatted.join('<br>');
+        }
+
+        function formatContributingSignals(signalsStr) {
+            if (!signalsStr) return signalsStr;
+
+            // Match patterns like "AgentName (weight: X, confidence: Y%)"
+            const agentPattern = /(\w+)\s*\(([^)]+)\)/g;
+
+            return signalsStr.replace(agentPattern, (match, agentName, details) => {
+                // Parse weight and confidence from details
+                let formattedDetails = details
+                    .replace(/weight:\s*([\d.]+)/gi, 'weight: <span class="signal-weight">$1</span>')
+                    .replace(/confidence:\s*([\d.]+%?)/gi, 'confidence: <span class="signal-confidence">$1</span>');
+
+                return `<span class="signal-agent">${agentName}</span> (${formattedDetails})`;
+            });
         }
 
         function updateRisk(risk) {
