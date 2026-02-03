@@ -338,6 +338,9 @@ class ComplianceAgent(ValidationAgent):
         "macro_indicator", "vix_indicator",
         # Emergency deleveraging source (internal risk management)
         "leverage_monitor",
+        # LLM sentiment analysis sources (SentimentAgent)
+        "llm_sentiment", "news_sentiment", "financial_news",
+        "sentiment_indicator",
     }
 
     # Suspicious patterns in data content

@@ -209,6 +209,27 @@ class AgentFactory:
             signal_agents.append(options_agent)
             self._event_bus.register_signal_agent("OptionsVolAgent")
 
+        # Sentiment Agent (LLM-powered news analysis)
+        if agents_config.get("sentiment", {}).get("enabled", True):
+            from agents.sentiment_agent import SentimentAgent
+            from core.llm_client import LLMClient
+
+            sentiment_config = agents_config.get("sentiment", {})
+            llm_client = LLMClient(config=sentiment_config)
+
+            sentiment_agent = SentimentAgent(
+                config=AgentConfig(
+                    name="SentimentAgent",
+                    enabled=True,
+                    parameters=sentiment_config,
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+                llm_client=llm_client,
+            )
+            signal_agents.append(sentiment_agent)
+            self._event_bus.register_signal_agent("SentimentAgent")
+
         logger.info(f"Created {len(signal_agents)} signal agents")
         return signal_agents
 

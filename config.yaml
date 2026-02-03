@@ -163,10 +163,11 @@ risk_budget:
   # Fixed allocations (used when method="fixed")
   fixed_allocations:
     MacroAgent: 0.15
-    StatArbAgent: 0.25
-    MomentumAgent: 0.25
+    StatArbAgent: 0.20
+    MomentumAgent: 0.20
     MarketMakingAgent: 0.15
-    OptionsVolAgent: 0.20
+    OptionsVolAgent: 0.15
+    SentimentAgent: 0.15
 
 # =============================================================================
 # === DANGEROUS - Regulatory Compliance ===
@@ -533,13 +534,27 @@ agents:
     max_dte: 45
     delta_range: [0.20, 0.40]
 
+  # LLM-powered news sentiment analysis
+  sentiment:
+    enabled: true
+    llm_provider: "anthropic"           # "anthropic" or "openai"
+    model: "claude-3-haiku-20240307"    # Fast model for real-time analysis
+    news_sources:
+      - "https://feeds.finance.yahoo.com/rss/2.0/headline"
+    analysis_interval_seconds: 300      # Analyze every 5 minutes
+    max_news_age_hours: 24              # Only consider news < 24h old
+    min_confidence: 0.5                 # Minimum confidence for signal
+    calls_per_minute: 20                # Rate limit for LLM API
+    timeout_seconds: 10                 # API timeout
+
   # ========== DECISION & VALIDATION AGENTS ==========
   cio:
     signal_weight_macro: 0.15
-    signal_weight_stat_arb: 0.25
-    signal_weight_momentum: 0.25
+    signal_weight_stat_arb: 0.20
+    signal_weight_momentum: 0.20
     signal_weight_market_making: 0.15
-    signal_weight_options_vol: 0.20
+    signal_weight_options_vol: 0.15
+    signal_weight_sentiment: 0.15       # LLM sentiment analysis weight
     min_conviction_threshold: 0.6
     max_concurrent_decisions: 5
     # Dynamic weight settings
