@@ -804,17 +804,21 @@
 
             if (countBadge) countBadge.textContent = positions.length;
 
-            container.innerHTML = positions.map(pos => `
+            container.innerHTML = positions.map(pos => {
+                const isLong = pos.quantity > 0;
+                const side = isLong ? 'LONG' : 'SHORT';
+                const badgeClass = isLong ? 'bg-success' : 'bg-danger';
+                return `
                 <div class="position-row">
-                    <div><strong>${pos.symbol}</strong></div>
-                    <div class="${pos.quantity > 0 ? 'positive' : 'negative'}">${pos.quantity > 0 ? '+' : ''}${pos.quantity}</div>
+                    <div><strong>${pos.symbol}</strong> <span class="badge ${badgeClass}">${side}</span></div>
+                    <div class="${isLong ? 'positive' : 'negative'}">${isLong ? '+' : ''}${pos.quantity}</div>
                     <div>$${pos.entry_price.toFixed(2)}</div>
                     <div>$${pos.current_price.toFixed(2)}</div>
                     <div class="${pos.pnl >= 0 ? 'positive' : 'negative'}">
                         ${formatCurrency(pos.pnl)} (${pos.pnl_pct.toFixed(1)}%)
                     </div>
                 </div>
-            `).join('');
+            `}).join('');
         }
 
         function updateClosedPositions(positions) {
