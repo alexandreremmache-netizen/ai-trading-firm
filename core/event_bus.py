@@ -1724,3 +1724,358 @@ class EventBus:
             EventBusHealthStatus.HEALTHY,
             EventBusHealthStatus.DEGRADED
         )
+
+
+# ============================================================================
+# EventMultiplexer - Filter-based subscriptions and source multiplexing
+# ============================================================================
+
+EventFilter = Callable[[Event], bool]
+EventTransformer = Callable[[Event], Event]
+
+
+@dataclass
+class FilteredSubscription:
+    """A subscription with an optional filter."""
+    handler: Callable[[Event], Coroutine[Any, Any, None]]
+    event_filter: EventFilter | None = None
+    transformer: EventTransformer | None = None
+    subscription_id: str = field(default_factory=lambda: f"sub_{datetime.now(timezone.utc).timestamp()}")
+
+
+@dataclass
+class EventSource:
+    """Configuration for an event source."""
+    name: str
+    source_id: str
+    priority: int = 0  # Higher = more preferred
+    enabled: bool = True
+    last_event_time: datetime | None = None
+    event_count: int = 0
+
+
+class EventMultiplexer:
+    """
+    Event Multiplexer for advanced event routing.
+
+    Inspired by basana's event dispatcher pattern.
+
+    Features:
+    - Filter-based subscriptions (subscribe with predicate)
+    - Multiple event source multiplexing (combine feeds)
+    - Event transformation pipeline
+    - Symbol-based routing shortcuts
+
+    Usage:
+        multiplexer = EventMultiplexer(event_bus)
+
+        # Subscribe with filter
+        multiplexer.subscribe_with_filter(
+            EventType.SIGNAL,
+            my_handler,
+            filter_fn=lambda e: e.symbol == "AAPL"
+        )
+
+        # Subscribe to specific symbol
+        multiplexer.subscribe_symbol("AAPL", my_handler)
+
+        # Add event sources
+        multiplexer.register_source("ib_primary", priority=10)
+        multiplexer.register_source("ib_backup", priority=5)
+    """
+
+    def __init__(self, event_bus: EventBus):
+        self._event_bus = event_bus
+        self._filtered_subscriptions: dict[EventType, list[FilteredSubscription]] = defaultdict(list)
+        self._symbol_handlers: dict[str, list[Callable[[Event], Coroutine[Any, Any, None]]]] = defaultdict(list)
+        self._sources: dict[str, EventSource] = {}
+        self._transformers: list[EventTransformer] = []
+        self._lock = asyncio.Lock()
+
+        # Metrics
+        self._events_routed = 0
+        self._events_filtered = 0
+        self._events_transformed = 0
+
+        # Internal handler registration
+        self._registered_event_types: set[EventType] = set()
+
+    def subscribe_with_filter(
+        self,
+        event_type: EventType,
+        handler: Callable[[Event], Coroutine[Any, Any, None]],
+        filter_fn: EventFilter | None = None,
+        transformer: EventTransformer | None = None,
+    ) -> str:
+        """
+        Subscribe with an optional filter function.
+
+        Args:
+            event_type: Type of events to receive
+            handler: Async handler function
+            filter_fn: Optional predicate - handler only called if filter returns True
+            transformer: Optional transformer - transform event before delivery
+
+        Returns:
+            Subscription ID for unsubscribe
+
+        Example:
+            # Only receive SIGNAL events for AAPL with high confidence
+            sub_id = multiplexer.subscribe_with_filter(
+                EventType.SIGNAL,
+                my_handler,
+                filter_fn=lambda e: e.symbol == "AAPL" and e.confidence > 0.8
+            )
+        """
+        subscription = FilteredSubscription(
+            handler=handler,
+            event_filter=filter_fn,
+            transformer=transformer,
+        )
+        self._filtered_subscriptions[event_type].append(subscription)
+
+        # Register internal dispatcher with EventBus if not already done
+        if event_type not in self._registered_event_types:
+            self._event_bus.subscribe(event_type, self._create_dispatcher(event_type))
+            self._registered_event_types.add(event_type)
+
+        logger.debug(f"Added filtered subscription {subscription.subscription_id} for {event_type.value}")
+        return subscription.subscription_id
+
+    def subscribe_symbol(
+        self,
+        symbol: str,
+        handler: Callable[[Event], Coroutine[Any, Any, None]],
+        event_types: list[EventType] | None = None,
+    ) -> list[str]:
+        """
+        Subscribe to all events for a specific symbol.
+
+        Args:
+            symbol: Symbol to filter for (e.g., "AAPL", "ES")
+            handler: Async handler function
+            event_types: Optional list of event types (defaults to SIGNAL, MARKET_DATA)
+
+        Returns:
+            List of subscription IDs
+
+        Example:
+            # Receive all AAPL signals and market data
+            multiplexer.subscribe_symbol("AAPL", my_handler)
+        """
+        if event_types is None:
+            event_types = [EventType.SIGNAL, EventType.MARKET_DATA]
+
+        def symbol_filter(event: Event) -> bool:
+            return hasattr(event, 'symbol') and event.symbol == symbol
+
+        subscription_ids = []
+        for event_type in event_types:
+            sub_id = self.subscribe_with_filter(event_type, handler, filter_fn=symbol_filter)
+            subscription_ids.append(sub_id)
+
+        self._symbol_handlers[symbol].append(handler)
+        logger.info(f"Subscribed to symbol {symbol} for events: {[et.value for et in event_types]}")
+        return subscription_ids
+
+    def unsubscribe(self, subscription_id: str) -> bool:
+        """
+        Unsubscribe by subscription ID.
+
+        Args:
+            subscription_id: ID returned from subscribe_with_filter
+
+        Returns:
+            True if found and removed, False otherwise
+        """
+        for event_type, subs in self._filtered_subscriptions.items():
+            for sub in subs:
+                if sub.subscription_id == subscription_id:
+                    subs.remove(sub)
+                    logger.debug(f"Removed subscription {subscription_id}")
+                    return True
+        return False
+
+    def _create_dispatcher(self, event_type: EventType) -> Callable[[Event], Coroutine[Any, Any, None]]:
+        """Create an internal dispatcher for an event type."""
+
+        async def dispatch(event: Event) -> None:
+            subscriptions = self._filtered_subscriptions.get(event_type, [])
+            if not subscriptions:
+                return
+
+            # Apply global transformers
+            transformed_event = event
+            for transformer in self._transformers:
+                try:
+                    transformed_event = transformer(transformed_event)
+                    self._events_transformed += 1
+                except Exception as e:
+                    logger.exception(f"Transformer error: {e}")
+
+            # Dispatch to filtered subscriptions
+            tasks = []
+            for sub in subscriptions:
+                # Check filter
+                if sub.event_filter is not None:
+                    try:
+                        if not sub.event_filter(transformed_event):
+                            self._events_filtered += 1
+                            continue
+                    except Exception as e:
+                        logger.exception(f"Filter error for {sub.subscription_id}: {e}")
+                        continue
+
+                # Apply subscription-specific transformer
+                final_event = transformed_event
+                if sub.transformer is not None:
+                    try:
+                        final_event = sub.transformer(final_event)
+                    except Exception as e:
+                        logger.exception(f"Subscription transformer error: {e}")
+                        continue
+
+                tasks.append(sub.handler(final_event))
+
+            # Execute handlers concurrently
+            if tasks:
+                self._events_routed += len(tasks)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.exception(f"Handler error: {result}")
+
+        return dispatch
+
+    def add_global_transformer(self, transformer: EventTransformer) -> None:
+        """
+        Add a global event transformer applied to all events.
+
+        Args:
+            transformer: Function that transforms Event -> Event
+
+        Example:
+            # Add timestamp normalization
+            multiplexer.add_global_transformer(normalize_timestamp)
+        """
+        self._transformers.append(transformer)
+
+    def register_source(
+        self,
+        name: str,
+        source_id: str | None = None,
+        priority: int = 0,
+    ) -> EventSource:
+        """
+        Register an event source for multiplexing.
+
+        Args:
+            name: Human-readable name (e.g., "IB Primary")
+            source_id: Unique ID (defaults to name)
+            priority: Higher priority sources preferred when duplicates exist
+
+        Returns:
+            EventSource object
+
+        Example:
+            primary = multiplexer.register_source("IB Primary", priority=10)
+            backup = multiplexer.register_source("IB Backup", priority=5)
+        """
+        source_id = source_id or name.lower().replace(" ", "_")
+        source = EventSource(name=name, source_id=source_id, priority=priority)
+        self._sources[source_id] = source
+        logger.info(f"Registered event source: {name} (priority={priority})")
+        return source
+
+    def record_source_event(self, source_id: str) -> None:
+        """Record that an event was received from a source."""
+        if source_id in self._sources:
+            self._sources[source_id].last_event_time = datetime.now(timezone.utc)
+            self._sources[source_id].event_count += 1
+
+    def get_active_source(self) -> EventSource | None:
+        """
+        Get the highest-priority active source.
+
+        An active source has received events within the last 60 seconds.
+
+        Returns:
+            Highest priority active source, or None if no active sources
+        """
+        now = datetime.now(timezone.utc)
+        active_sources = []
+
+        for source in self._sources.values():
+            if not source.enabled:
+                continue
+            if source.last_event_time is None:
+                continue
+            if (now - source.last_event_time).total_seconds() > 60.0:
+                continue
+            active_sources.append(source)
+
+        if not active_sources:
+            return None
+
+        return max(active_sources, key=lambda s: s.priority)
+
+    def get_metrics(self) -> dict:
+        """Get multiplexer metrics."""
+        return {
+            "events_routed": self._events_routed,
+            "events_filtered": self._events_filtered,
+            "events_transformed": self._events_transformed,
+            "subscriptions": sum(len(subs) for subs in self._filtered_subscriptions.values()),
+            "registered_event_types": [et.value for et in self._registered_event_types],
+            "sources": {
+                sid: {
+                    "name": s.name,
+                    "priority": s.priority,
+                    "enabled": s.enabled,
+                    "event_count": s.event_count,
+                    "last_event": s.last_event_time.isoformat() if s.last_event_time else None,
+                }
+                for sid, s in self._sources.items()
+            },
+        }
+
+
+# ============================================================================
+# Convenience filters for common use cases
+# ============================================================================
+
+def symbol_filter(symbol: str) -> EventFilter:
+    """Create a filter for a specific symbol."""
+    def _filter(event: Event) -> bool:
+        return hasattr(event, 'symbol') and event.symbol == symbol
+    return _filter
+
+
+def confidence_filter(min_confidence: float) -> EventFilter:
+    """Create a filter for minimum confidence."""
+    def _filter(event: Event) -> bool:
+        return hasattr(event, 'confidence') and event.confidence >= min_confidence
+    return _filter
+
+
+def direction_filter(direction: str) -> EventFilter:
+    """Create a filter for signal direction (LONG, SHORT, FLAT)."""
+    def _filter(event: Event) -> bool:
+        if not hasattr(event, 'direction'):
+            return False
+        return event.direction.value == direction or str(event.direction) == direction
+    return _filter
+
+
+def combined_filter(*filters: EventFilter) -> EventFilter:
+    """Combine multiple filters with AND logic."""
+    def _filter(event: Event) -> bool:
+        return all(f(event) for f in filters)
+    return _filter
+
+
+def any_filter(*filters: EventFilter) -> EventFilter:
+    """Combine multiple filters with OR logic."""
+    def _filter(event: Event) -> bool:
+        return any(f(event) for f in filters)
+    return _filter

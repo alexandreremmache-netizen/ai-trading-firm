@@ -346,6 +346,8 @@ class ComplianceAgent(ValidationAgent):
         "technical_chart", "candlestick_pattern",
         # Demand zone analysis
         "demand_zone", "supply_zone", "price_level",
+        # LLM forecasting sources (ForecastingAgent)
+        "llm_forecast", "price_history", "price_forecast",
     }
 
     # Suspicious patterns in data content

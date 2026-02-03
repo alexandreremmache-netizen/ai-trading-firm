@@ -247,6 +247,27 @@ class AgentFactory:
             signal_agents.append(chart_agent)
             self._event_bus.register_signal_agent("ChartAnalysisAgent")
 
+        # Forecasting Agent (LLM-powered price prediction)
+        if agents_config.get("forecasting", {}).get("enabled", True):
+            from agents.forecasting_agent import ForecastingAgent
+            from core.llm_client import LLMClient
+
+            forecasting_config = agents_config.get("forecasting", {})
+            llm_client = LLMClient(config=forecasting_config.get("llm", {}))
+
+            forecasting_agent = ForecastingAgent(
+                config=AgentConfig(
+                    name="ForecastingAgent",
+                    enabled=True,
+                    parameters=forecasting_config,
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+                llm_client=llm_client,
+            )
+            signal_agents.append(forecasting_agent)
+            self._event_bus.register_signal_agent("ForecastingAgent")
+
         logger.info(f"Created {len(signal_agents)} signal agents")
         return signal_agents
 

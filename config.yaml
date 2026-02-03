@@ -580,15 +580,47 @@ agents:
     min_confidence: 0.5                 # Minimum confidence for signal
     timeout_seconds: 30                 # API timeout (longer for vision)
 
+  # LLM-powered price forecasting (alphaswarm-inspired)
+  forecasting:
+    enabled: true
+    forecast_horizons:                  # Timeframes to forecast
+      - "1h"
+      - "4h"
+    min_confidence: 0.6                 # Minimum confidence to generate signal
+    forecast_interval_seconds: 300      # Minimum time between forecasts
+    price_history_length: 100           # Price points to keep for context
+    symbols:                            # Symbols to forecast
+      - "SPY"
+      - "QQQ"
+      - "AAPL"
+      - "MSFT"
+      - "ES"
+      - "NQ"
+    llm:
+      llm_provider: "anthropic"
+      model: "claude-3-haiku-20240307"  # Fast model for forecasts
+      calls_per_minute: 20
+      timeout_seconds: 15
+
+  # ========== EXIT RULES (TakeProfit/StopLoss) ==========
+  exit_rules:
+    enabled: true
+    default_take_profit_pct: 10.0       # 10% profit target
+    default_stop_loss_pct: 5.0          # 5% loss limit
+    trailing_enabled: true              # Enable trailing stops
+    trailing_distance_pct: 3.0          # Trail 3% below peak
+    time_exit_hours: 0                  # 0 = disabled, else max holding time
+
   # ========== DECISION & VALIDATION AGENTS ==========
   cio:
     signal_weight_macro: 0.10
-    signal_weight_stat_arb: 0.15
-    signal_weight_momentum: 0.20
-    signal_weight_market_making: 0.10
-    signal_weight_options_vol: 0.15
-    signal_weight_sentiment: 0.15       # LLM sentiment analysis weight
+    signal_weight_stat_arb: 0.12
+    signal_weight_momentum: 0.15
+    signal_weight_market_making: 0.08
+    signal_weight_options_vol: 0.12
+    signal_weight_sentiment: 0.13       # LLM sentiment analysis weight
     signal_weight_chart_analysis: 0.15  # Claude Vision chart patterns
+    signal_weight_forecasting: 0.15     # LLM price forecasting
     min_conviction_threshold: 0.6
     max_concurrent_decisions: 5
     # Dynamic weight settings
