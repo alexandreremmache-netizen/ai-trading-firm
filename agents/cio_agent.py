@@ -198,6 +198,12 @@ class CIOAgent(DecisionAgent):
         # Price cache for position sizing (symbol -> latest price)
         self._price_cache: dict[str, float] = {}
 
+        # Broker reference for leverage-aware deleveraging
+        self._broker = None
+        self._max_leverage = config.parameters.get("max_leverage", 2.0)
+        self._deleveraging_active = False
+        self._last_deleverage_check = datetime.now(timezone.utc)
+
         # Signal history for correlation tracking (#Q5)
         self._signal_history: dict[str, list[tuple[datetime, float]]] = {}  # agent -> [(time, direction_val)]
         self._signal_correlation_matrix: dict[tuple[str, str], float] = {}  # (agent1, agent2) -> correlation
@@ -315,6 +321,12 @@ class CIOAgent(DecisionAgent):
 
         Groups signals by symbol and makes decisions for each.
         """
+        # Check for emergency deleveraging BEFORE processing new signals
+        deleverage_triggered = await self._check_and_deleverage()
+        if deleverage_triggered:
+            # Skip normal signal processing when actively deleveraging
+            return
+
         # Group signals by symbol
         by_symbol: dict[str, dict[str, SignalEvent]] = {}
         for agent_name, signal in signals.items():
@@ -331,6 +343,133 @@ class CIOAgent(DecisionAgent):
                 timestamp=datetime.now(timezone.utc),
             )
             await self._make_decision_from_aggregation(agg)
+
+    async def _check_and_deleverage(self) -> bool:
+        """
+        Check leverage and generate deleveraging orders if needed.
+
+        Returns True if deleveraging orders were generated, False otherwise.
+        """
+        if not self._broker:
+            return False
+
+        # Only check every 5 seconds to avoid spam
+        now = datetime.now(timezone.utc)
+        if (now - self._last_deleverage_check).total_seconds() < 5.0:
+            return False
+        self._last_deleverage_check = now
+
+        try:
+            # Get portfolio state from broker
+            portfolio_state = await self._broker.get_portfolio_state()
+            portfolio_value = portfolio_state.net_liquidation
+            if portfolio_value <= 0:
+                return False
+
+            positions = portfolio_state.positions
+            if not positions:
+                return False
+
+            # Calculate current gross exposure
+            gross_exposure = sum(
+                abs(pos.quantity * (pos.market_value / pos.quantity if pos.quantity != 0 else pos.avg_cost))
+                for pos in positions.values()
+                if pos.quantity != 0
+            )
+
+            current_leverage = gross_exposure / portfolio_value
+
+            # If leverage is OK, nothing to do
+            if current_leverage <= self._max_leverage:
+                if self._deleveraging_active:
+                    logger.info(f"CIO: Leverage normalized ({current_leverage:.2f}x <= {self._max_leverage}x), resuming normal operations")
+                    self._deleveraging_active = False
+                return False
+
+            # Leverage is too high - need to deleverage
+            if not self._deleveraging_active:
+                logger.warning(
+                    f"CIO: EMERGENCY DELEVERAGING TRIGGERED - Leverage {current_leverage:.2f}x exceeds limit {self._max_leverage}x"
+                )
+                self._deleveraging_active = True
+
+            # Calculate how much to reduce
+            target_exposure = portfolio_value * self._max_leverage * 0.95  # Target 95% of limit
+            excess_exposure = gross_exposure - target_exposure
+
+            if excess_exposure <= 0:
+                return False
+
+            # Sort positions by absolute market value (largest first)
+            sorted_positions = sorted(
+                [(sym, pos) for sym, pos in positions.items() if pos.quantity != 0],
+                key=lambda x: abs(x[1].market_value),
+                reverse=True
+            )
+
+            # Generate deleveraging orders for largest positions
+            for symbol, pos in sorted_positions:
+                if excess_exposure <= 0:
+                    break
+
+                price = abs(pos.market_value / pos.quantity) if pos.quantity != 0 else pos.avg_cost
+                position_value = abs(pos.market_value)
+
+                # Determine how much of this position to close
+                close_value = min(position_value * 0.5, excess_exposure)  # Close max 50% at a time
+                close_qty = int(close_value / price)
+
+                if close_qty <= 0:
+                    continue
+
+                # Determine sell direction based on current position
+                action = OrderSide.SELL if pos.quantity > 0 else OrderSide.BUY
+
+                # Create deleveraging decision
+                decision = DecisionEvent(
+                    source_agent=self.name,
+                    symbol=symbol,
+                    action=action,
+                    quantity=close_qty,
+                    order_type=OrderType.MARKET,  # Use market orders for urgent deleveraging
+                    limit_price=None,
+                    rationale=f"EMERGENCY DELEVERAGING: Reducing leverage from {current_leverage:.2f}x to target {self._max_leverage}x",
+                    contributing_signals=tuple(),
+                    data_sources=("leverage_monitor",),
+                    conviction_score=1.0,  # Max conviction for emergency orders
+                )
+
+                # Log decision
+                logger.warning(
+                    f"CIO DELEVERAGING: {action.value} {close_qty} {symbol} "
+                    f"(reducing exposure by ${close_value:,.0f})"
+                )
+
+                self._audit_logger.log_decision(
+                    agent_name=self.name,
+                    decision_id=decision.event_id,
+                    symbol=symbol,
+                    action=decision.action.value,
+                    quantity=close_qty,
+                    rationale=decision.rationale,
+                    data_sources=list(decision.data_sources),
+                    contributing_signals=[],
+                    conviction_score=1.0,
+                )
+
+                # Publish decision
+                await self._event_bus.publish(decision)
+
+                excess_exposure -= close_value
+
+                # Track active decision
+                self._active_decisions[decision.event_id] = datetime.now(timezone.utc)
+
+            return True
+
+        except Exception as e:
+            logger.exception(f"CIO: Error checking leverage for deleveraging: {e}")
+            return False
 
     async def process_event(self, event: Event) -> None:
         """
@@ -1389,6 +1528,11 @@ class CIOAgent(DecisionAgent):
         """
         self._risk_budget_manager = risk_budget_manager
         logger.info("CIO: Risk budget manager attached")
+
+    def set_broker(self, broker) -> None:
+        """Set broker for leverage-aware deleveraging."""
+        self._broker = broker
+        logger.info("CIO: Broker attached for leverage monitoring")
 
     def set_portfolio_value(self, value: float) -> None:
         """Update portfolio value for position sizing."""

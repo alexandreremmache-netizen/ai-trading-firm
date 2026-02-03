@@ -336,6 +336,8 @@ class ComplianceAgent(ValidationAgent):
         "stat_arb_indicator", "pair_correlation",
         "order_book", "market_making_indicator", "inventory",
         "macro_indicator", "vix_indicator",
+        # Emergency deleveraging source (internal risk management)
+        "leverage_monitor",
     }
 
     # Suspicious patterns in data content

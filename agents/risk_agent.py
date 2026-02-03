@@ -777,6 +777,30 @@ class RiskAgent(ValidationAgent):
 
         new_exposure = current_sector_exposure + additional_exposure
 
+        # DELEVERAGING LOGIC: Allow trades that reduce sector exposure when over limit
+        is_reducing_exposure = additional_exposure < 0
+        is_sector_over_limit = current_sector_exposure > self._max_sector_pct
+
+        if is_sector_over_limit and is_reducing_exposure:
+            # Always allow trades that reduce sector concentration when over limit
+            reduction_pct = abs(additional_exposure) * 100
+            logger.info(
+                f"DELEVERAGING: Sector {sector} trade approved - reduces exposure by {reduction_pct:.1f}% "
+                f"(current={current_sector_exposure*100:.1f}% -> projected={new_exposure*100:.1f}%)"
+            )
+            return RiskCheckResult(
+                check_name="sector_limit",
+                passed=True,  # Always pass for deleveraging trades
+                current_value=new_exposure,
+                limit_value=self._max_sector_pct,
+                message=f"DELEVERAGING: Reduces {sector} exposure from {current_sector_exposure*100:.1f}% to {new_exposure*100:.1f}%",
+                details={
+                    "sector": sector,
+                    "sector_exposure_pct": new_exposure * 100,
+                    "is_deleveraging": True,
+                }
+            )
+
         # Check sector limit
         sector_exceeded = new_exposure > self._max_sector_pct
         sector_warning = new_exposure > self._max_sector_pct * 0.8 and not sector_exceeded
@@ -968,11 +992,29 @@ class RiskAgent(ValidationAgent):
         # Calculate both gross and net leverage
         gross_leverage = projected_gross / portfolio_value
         net_leverage = abs(net_exposure + (order_value if is_buy else -order_value)) / portfolio_value
+        current_leverage = gross_exposure / portfolio_value
 
         # Use the more conservative (higher) of gross leverage and net leverage for limit check
         # But provide netting benefit info in the message
         effective_leverage = max(gross_leverage, net_leverage)
         netting_benefit = gross_leverage - net_leverage if gross_leverage > net_leverage else 0
+
+        # DELEVERAGING LOGIC: Allow trades that reduce exposure when over limit
+        is_deleveraging = gross_delta < 0
+        is_over_limit = current_leverage > self._max_leverage
+
+        if is_over_limit and is_deleveraging:
+            # Always allow trades that reduce leverage when we're over the limit
+            leverage_reduction = (gross_exposure - projected_gross) / portfolio_value
+            message = f"DELEVERAGING ALLOWED: Reduces leverage by {leverage_reduction:.2f}x (current={current_leverage:.2f}x -> projected={gross_leverage:.2f}x)"
+            logger.info(f"Deleveraging trade approved for {symbol}: {message}")
+            return RiskCheckResult(
+                check_name="leverage_limit",
+                passed=True,  # Always pass for deleveraging trades
+                current_value=gross_leverage,
+                limit_value=self._max_leverage,
+                message=message
+            )
 
         if effective_leverage > self._max_leverage:
             message = f"Leverage would exceed {self._max_leverage}x limit (gross={gross_leverage:.2f}x, net={net_leverage:.2f}x)"

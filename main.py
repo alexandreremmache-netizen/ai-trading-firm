@@ -694,6 +694,11 @@ class TradingFirmOrchestrator:
             self._cio_agent.set_correlation_manager(self._correlation_manager)
             logger.info("  CorrelationManager -> CIOAgent")
 
+        # Wire Broker to CIO Agent for leverage-aware deleveraging
+        if self._cio_agent and self._broker:
+            self._cio_agent.set_broker(self._broker)
+            logger.info("  Broker -> CIOAgent (leverage monitoring)")
+
         # Wire Best Execution to Execution Agent
         if self._execution_agent and self._best_execution:
             self._execution_agent.set_best_execution_analyzer(self._best_execution)
