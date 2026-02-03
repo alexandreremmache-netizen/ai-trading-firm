@@ -255,7 +255,7 @@ class OptionsVolAgent(SignalAgent):
                     f"Vol premium={state.vol_premium*100:.1f}%. "
                     f"Consider selling premium.{opt_info}"
                 ),
-                data_sources=(state.symbol, "options_chain", "IB_market_data"),
+                data_sources=("ib_options_data", "options_indicator", "volatility_indicator"),
             )
 
         # Low IV - buy premium opportunity
@@ -284,7 +284,7 @@ class OptionsVolAgent(SignalAgent):
                     f"Vol premium={state.vol_premium*100:.1f}%. "
                     f"Consider buying premium.{opt_info}"
                 ),
-                data_sources=(state.symbol, "options_chain", "IB_market_data"),
+                data_sources=("ib_options_data", "options_indicator", "volatility_indicator"),
             )
 
         return None

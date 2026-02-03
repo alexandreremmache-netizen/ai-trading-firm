@@ -292,7 +292,7 @@ class StatArbAgent(SignalAgent):
                     f"Short {pair_state.symbol_a}, Long {pair_state.symbol_b}. "
                     f"Quality={pair_state.pair_quality_score:.2f}"
                 ),
-                data_sources=(pair_state.symbol_a, pair_state.symbol_b, "IB_market_data"),
+                data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
             )
 
         elif zscore < -self._zscore_entry and current_signal != SignalDirection.LONG:
@@ -311,7 +311,7 @@ class StatArbAgent(SignalAgent):
                     f"Long {pair_state.symbol_a}, Short {pair_state.symbol_b}. "
                     f"Quality={pair_state.pair_quality_score:.2f}"
                 ),
-                data_sources=(pair_state.symbol_a, pair_state.symbol_b, "IB_market_data"),
+                data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
             )
 
         # Exit signals
@@ -325,7 +325,7 @@ class StatArbAgent(SignalAgent):
                 strength=0.0,
                 confidence=0.8,
                 rationale=f"Pair {pair_key} spread reverted, z-score={zscore:.2f}. Exit position.",
-                data_sources=(pair_state.symbol_a, pair_state.symbol_b, "IB_market_data"),
+                data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
             )
 
         return None

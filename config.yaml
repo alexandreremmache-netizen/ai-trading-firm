@@ -72,10 +72,12 @@ risk:
 
   # Position size limits (typical range: 2-10%)
   # Example: 5.0 means no single position > 5% of portfolio
-  max_position_size_pct: 5.0          # [float, 1.0-20.0] Max single position %
+  max_position_pct: 5.0               # [float, 1.0-20.0] Max single position %
+  max_position_size_pct: 5.0          # [float, 1.0-20.0] (alias)
 
   # Sector concentration limit (typical range: 15-30%)
-  max_sector_exposure_pct: 20.0       # [float, 5.0-50.0] Max sector exposure %
+  max_sector_pct: 20.0                # [float, 5.0-50.0] Max sector exposure %
+  max_sector_exposure_pct: 20.0       # [float, 5.0-50.0] (alias)
 
   # Loss limits - CRITICAL for capital preservation
   # These trigger automatic trading halt (kill-switch)
@@ -197,7 +199,7 @@ transaction_reporting:
   # REQUIRED FOR PRODUCTION: Your 20-character LEI
   # Get yours at: https://www.gleif.org/en/about-lei/get-an-lei-find-lei-issuing-organizations
   # Example format: 5493006MHB84DD0ZWV18
-  firm_lei: ""
+  firm_lei: "529900T8BM49AURSDO55"   # Same LEI as compliance section
   firm_country: "FR"                  # France (AMF jurisdiction)
   default_venue: "XPAR"               # Paris exchange MIC
 
@@ -205,6 +207,7 @@ transaction_reporting:
 compliance:
   jurisdiction: "EU"
   regulator: "AMF"
+  firm_lei: "529900T8BM49AURSDO55"    # [string, 20 chars] Legal Entity Identifier (paper trading placeholder)
   require_rationale: true             # All decisions must have rationale
   audit_retention_days: 2555          # 7 years as per MiFID II
   banned_instruments: []              # Instruments we cannot trade
@@ -300,6 +303,28 @@ sector_map:
   JPY: "forex"
 
 # =============================================================================
+# === SAFE TO MODIFY - Portfolio Settings ===
+# =============================================================================
+
+portfolio:
+  initial_capital: 100000.0           # [float] Starting capital in USD
+  base_currency: "USD"                # [string] Base currency for reporting
+
+# =============================================================================
+# === SAFE TO MODIFY - Strategy Configuration ===
+# =============================================================================
+
+strategies:
+  enabled:                            # [list] Strategies to activate
+    - "momentum"
+    - "stat_arb"
+    - "market_making"
+  weights:                            # Strategy allocation weights (must sum to 1.0)
+    momentum: 0.4
+    stat_arb: 0.4
+    market_making: 0.2
+
+# =============================================================================
 # === SAFE TO MODIFY - Trading Universe ===
 # Add or remove instruments you want to trade
 # =============================================================================
@@ -348,7 +373,7 @@ universe:
 
   # Futures (continuous contracts)
   futures:
-    # Index Futures
+    # Index Futures - E-mini
     - symbol: "ES"         # E-mini S&P 500
       exchange: "CME"
       currency: "USD"
@@ -362,8 +387,25 @@ universe:
       exchange: "CME"
       currency: "USD"
 
+    # Index Futures - Micro (1/10th of E-mini)
+    - symbol: "MES"        # Micro E-mini S&P 500
+      exchange: "CME"
+      currency: "USD"
+    - symbol: "MNQ"        # Micro E-mini NASDAQ 100
+      exchange: "CME"
+      currency: "USD"
+    - symbol: "MYM"        # Micro E-mini Dow
+      exchange: "CBOT"
+      currency: "USD"
+    - symbol: "M2K"        # Micro E-mini Russell 2000
+      exchange: "CME"
+      currency: "USD"
+
     # Energy Futures
     - symbol: "CL"         # Crude Oil WTI
+      exchange: "NYMEX"
+      currency: "USD"
+    - symbol: "MCL"        # Micro WTI Crude Oil
       exchange: "NYMEX"
       currency: "USD"
     - symbol: "NG"         # Natural Gas
@@ -380,7 +422,13 @@ universe:
     - symbol: "GC"         # Gold
       exchange: "COMEX"
       currency: "USD"
+    - symbol: "MGC"        # Micro Gold
+      exchange: "COMEX"
+      currency: "USD"
     - symbol: "SI"         # Silver
+      exchange: "COMEX"
+      currency: "USD"
+    - symbol: "SIL"        # Micro Silver
       exchange: "COMEX"
       currency: "USD"
     - symbol: "PL"         # Platinum

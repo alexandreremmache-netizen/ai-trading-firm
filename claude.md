@@ -218,6 +218,21 @@ risk:
   max_drawdown_pct: 10.0        # Kill-switch a -10%
 ```
 
+### Univers d'Instruments Supportes
+
+| Type | Instruments | Exchange | Heures |
+|------|-------------|----------|--------|
+| **Equities** | AAPL, MSFT, GOOGL, AMZN, META, NVDA, TSLA, JPM, V, JNJ | SMART | 09:30-16:00 ET |
+| **ETFs** | SPY, QQQ, IWM, DIA, GLD, SLV, TLT, XLF, XLE, VXX | SMART | 09:30-16:00 ET |
+| **E-mini Futures** | ES, NQ, YM, RTY, CL, GC, SI | CME/COMEX/NYMEX | ~23h/jour |
+| **Micro Futures** | MES, MNQ, MYM, M2K, MCL, MGC, SIL | CME/COMEX/NYMEX | ~23h/jour |
+| **Forex** | EUR/USD, GBP/USD, USD/JPY, USD/CHF, AUD/USD, USD/CAD | IDEALPRO | 24h/5j |
+
+**Detection automatique du type de contrat** dans `broker.py`:
+- Forex: `Forex('EURUSD', exchange='IDEALPRO')`
+- Futures: `Future(symbol, exchange, lastTradeDateOrContractMonth)`
+- Stocks/ETFs: `Stock(symbol, 'SMART', 'USD')`
+
 ---
 
 ## Contraintes
@@ -322,6 +337,10 @@ python -m pytest tests/test_risk_agent.py -v
 - TWR/MWR performance attribution
 - EventBus health check + cleanup handlers
 - 203 nouveaux tests
+- **Heures de marche par type**: Forex 24/5, Futures ~23h/jour, Equities 09:30-16:00
+- **Micro contrats**: MES, MNQ, MYM, M2K, MCL, MGC, SIL ajoutes
+- **Detection auto type contrat**: Forex/Future/Stock dans broker.py
+- **Fix bug None*int**: Protection `price = ... or 100.0` dans compliance
 
 ---
 

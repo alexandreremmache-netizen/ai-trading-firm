@@ -180,7 +180,7 @@ class MomentumAgent(SignalAgent):
             strength=strength,
             confidence=self._calculate_confidence(state),
             rationale=rationale,
-            data_sources=(state.symbol, "IB_market_data"),
+            data_sources=("ib_market_data", "momentum_indicator"),
         )
 
     def _calculate_rsi(self, state: MomentumState) -> float:

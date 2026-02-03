@@ -245,7 +245,7 @@ class MarketMakingAgent(SignalAgent):
                 f"({(market_data.spread/market_data.mid)*10000:.1f}bps), "
                 f"optimal={optimal_spread:.1f}bps, inventory={state.inventory}"
             ),
-            data_sources=(state.symbol, "IB_market_data", "order_book"),
+            data_sources=("ib_market_data", "order_book", "market_making_indicator"),
         )
 
     def _generate_inventory_signal(
@@ -275,7 +275,7 @@ class MarketMakingAgent(SignalAgent):
                 f"Inventory management: {action} inventory "
                 f"({state.inventory}/{self._max_inventory})"
             ),
-            data_sources=(state.symbol, "IB_market_data", "inventory"),
+            data_sources=("ib_market_data", "inventory", "market_making_indicator"),
         )
 
     def update_inventory(self, symbol: str, quantity_change: int) -> None:

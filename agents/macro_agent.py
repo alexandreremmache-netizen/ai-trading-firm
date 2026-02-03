@@ -165,7 +165,7 @@ class MacroAgent(SignalAgent):
             strength=strength,
             confidence=0.6,  # TODO: Calculate based on model confidence
             rationale=f"VIX regime change to {regime} (VIX={vix_level:.1f})",
-            data_sources=("VIX", "IB_market_data"),
+            data_sources=("ib_market_data", "macro_indicator", "vix_indicator"),
         )
 
     async def _analyze_yield_curve(self) -> SignalEvent | None:

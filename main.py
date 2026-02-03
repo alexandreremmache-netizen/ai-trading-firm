@@ -618,19 +618,12 @@ class TradingFirmOrchestrator:
 
         # Contract Specifications Manager
         contract_specs_config = self._config.get("contract_specs", {})
-        self._contract_specs = ContractSpecsManager(
-            margin_buffer_pct=contract_specs_config.get("margin_buffer_pct", 10.0)
-        )
+        self._contract_specs = ContractSpecsManager(config=contract_specs_config)
         logger.info(f"Contract specs manager initialized ({self._contract_specs.get_all_symbols().__len__()} contracts)")
 
         # Correlation Manager
         correlation_config = self._config.get("correlation", {})
-        self._correlation_manager = CorrelationManager(
-            lookback_days=correlation_config.get("lookback_days", 60),
-            max_pairwise_correlation=correlation_config.get("max_pairwise_correlation", 0.85),
-            min_history_days=correlation_config.get("min_history_days", 20),
-            regime_change_threshold=correlation_config.get("regime_change_threshold", 0.15),
-        )
+        self._correlation_manager = CorrelationManager(config=correlation_config)
         logger.info("Correlation manager initialized")
 
         # Futures Roll Manager
@@ -641,50 +634,28 @@ class TradingFirmOrchestrator:
 
         # VaR Calculator
         var_config = self._config.get("var", {})
-        self._var_calculator = VaRCalculator(
-            confidence_level=var_config.get("confidence_level", 0.95),
-            horizon_days=var_config.get("horizon_days", 1),
-            monte_carlo_simulations=var_config.get("monte_carlo_simulations", 10000),
-            ewma_decay_factor=var_config.get("ewma_decay_factor", 0.94),
-        )
+        self._var_calculator = VaRCalculator(config=var_config)
         logger.info(f"VaR calculator initialized (method: {var_config.get('method', 'all')})")
 
         # Stress Tester
         stress_config = self._config.get("stress_testing", {})
         if stress_config.get("enabled", True):
-            self._stress_tester = StressTester(
-                max_scenario_loss_pct=stress_config.get("max_scenario_loss_pct", 25.0),
-                margin_buffer_pct=stress_config.get("margin_buffer_pct", 20.0),
-            )
-            logger.info(f"Stress tester initialized ({len(self._stress_tester.get_scenario_names())} scenarios)")
+            self._stress_tester = StressTester(config=stress_config)
+            logger.info("Stress tester initialized")
 
         # Position Sizer (Kelly criterion)
         position_sizing_config = self._config.get("position_sizing", {})
-        self._position_sizer = PositionSizer(
-            method=position_sizing_config.get("method", "kelly"),
-            use_half_kelly=position_sizing_config.get("use_half_kelly", True),
-            max_position_pct=position_sizing_config.get("max_position_pct", 10.0),
-            min_position_pct=position_sizing_config.get("min_position_pct", 1.0),
-            vol_target=position_sizing_config.get("vol_target", 0.15),
-            correlation_discount=position_sizing_config.get("correlation_discount", True),
-        )
+        self._position_sizer = PositionSizer(config=position_sizing_config)
         logger.info(f"Position sizer initialized (method: {position_sizing_config.get('method', 'kelly')})")
 
         # Performance Attribution
         attribution_config = self._config.get("attribution", {})
-        self._attribution = PerformanceAttribution(
-            rolling_window_days=attribution_config.get("rolling_window_days", 30),
-            risk_free_rate=attribution_config.get("risk_free_rate", 0.05),
-        )
+        self._attribution = PerformanceAttribution(config=attribution_config)
         logger.info("Performance attribution initialized")
 
         # Best Execution Analyzer
         best_execution_config = self._config.get("best_execution", {})
-        self._best_execution = BestExecutionAnalyzer(
-            default_benchmark=best_execution_config.get("benchmark", "vwap"),
-            slippage_alert_bps=best_execution_config.get("slippage_alert_bps", 50),
-            report_retention_quarters=best_execution_config.get("report_retention_quarters", 8),
-        )
+        self._best_execution = BestExecutionAnalyzer(config=best_execution_config)
         logger.info(f"Best execution analyzer initialized (benchmark: {best_execution_config.get('benchmark', 'vwap')})")
 
         logger.info("Infrastructure components initialized")
@@ -873,6 +844,7 @@ class TradingFirmOrchestrator:
             "jurisdiction": compliance_config.get("jurisdiction", "EU"),
             "restricted_instruments": compliance_config.get("banned_instruments", []),
             "allowed_asset_classes": compliance_config.get("allowed_asset_classes", ["equity", "etf"]),
+            "entity_lei": compliance_config.get("firm_lei", ""),
         }
 
         self._compliance_agent = ComplianceAgent(
@@ -940,6 +912,7 @@ class TradingFirmOrchestrator:
                 ),
                 event_bus=self._event_bus,
                 audit_logger=self._audit_logger,
+                reporting_config=reporting_params,
             )
 
         logger.info("All agents initialized")

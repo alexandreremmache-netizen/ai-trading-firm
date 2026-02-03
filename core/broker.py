@@ -1786,12 +1786,105 @@ class IBBroker:
 
         async def _execute_order() -> int | None:
             """Inner function for circuit breaker wrapping."""
-            # Create contract
+            # Detect asset class from symbol
+            symbol = order_event.symbol.upper()
+
+            # Forex symbols
+            FOREX_SYMBOLS = {
+                "EUR", "GBP", "JPY", "CHF", "AUD", "CAD", "NZD", "SEK", "NOK", "DKK",
+                "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD",
+            }
+            # Futures symbols (E-mini, Micro, Energy, Metals, Bonds, Agriculture)
+            FUTURES_SYMBOLS = {
+                "ES", "NQ", "YM", "RTY",  # E-mini
+                "MES", "MNQ", "MYM", "M2K",  # Micro index
+                "CL", "MCL", "NG", "RB", "HO",  # Energy
+                "GC", "MGC", "SI", "SIL", "PL", "HG",  # Metals
+                "ZC", "ZW", "ZS", "ZM", "ZL",  # Agriculture
+                "ZB", "ZN", "ZF", "ZT",  # Bonds
+            }
+
+            # Determine sec_type and exchange
+            if symbol in FOREX_SYMBOLS:
+                sec_type = "CASH"
+                exchange = "IDEALPRO"
+            elif symbol in FUTURES_SYMBOLS:
+                sec_type = "FUT"
+                # Use cached contract from market data subscription if available
+                cached_key = f"{symbol}:CME:USD"
+                if cached_key not in self._contracts:
+                    cached_key = f"{symbol}:CBOT:USD"
+                if cached_key not in self._contracts:
+                    cached_key = f"{symbol}:NYMEX:USD"
+                if cached_key not in self._contracts:
+                    cached_key = f"{symbol}:COMEX:USD"
+
+                if cached_key in self._contracts:
+                    # Use the cached front month contract
+                    contract = self._contracts[cached_key]
+                else:
+                    # Try to get front month
+                    contract = await self._get_front_month_future(symbol, "CME", "USD")
+                    if contract is None:
+                        logger.error(f"Failed to get front month future for {symbol}")
+                        return None
+
+                # Skip normal qualification for futures - already qualified
+                # Jump to order creation
+                action = "BUY" if order_event.side == OrderSide.BUY else "SELL"
+
+                if order_event.order_type == OrderType.MARKET:
+                    ib_order = MarketOrder(action, order_event.quantity)
+                elif order_event.order_type == OrderType.LIMIT:
+                    if order_event.limit_price is None:
+                        logger.error("Limit order requires limit_price")
+                        return None
+                    ib_order = LimitOrder(action, order_event.quantity, order_event.limit_price)
+                elif order_event.order_type == OrderType.STOP:
+                    if order_event.stop_price is None:
+                        logger.error("Stop order requires stop_price")
+                        return None
+                    ib_order = StopOrder(action, order_event.quantity, order_event.stop_price)
+                elif order_event.order_type == OrderType.STOP_LIMIT:
+                    if order_event.limit_price is None or order_event.stop_price is None:
+                        logger.error("Stop-limit order requires both limit_price and stop_price")
+                        return None
+                    ib_order = StopLimitOrder(
+                        action, order_event.quantity, order_event.limit_price, order_event.stop_price,
+                    )
+                else:
+                    logger.error(f"Unsupported order type: {order_event.order_type}")
+                    return None
+
+                # Time in force
+                from core.events import TimeInForce
+                tif_map = {
+                    TimeInForce.DAY: "DAY", TimeInForce.GTC: "GTC",
+                    TimeInForce.IOC: "IOC", TimeInForce.FOK: "FOK",
+                }
+                tif = getattr(order_event, 'time_in_force', TimeInForce.DAY)
+                ib_order.tif = tif_map.get(tif, "DAY")
+
+                # Place order
+                try:
+                    trade = self._ib.placeOrder(contract, ib_order)
+                    broker_order_id = trade.order.orderId
+                    logger.info(f"Order placed: {action} {order_event.quantity} {symbol} @ {order_event.order_type.value} (order_id={broker_order_id})")
+                    self._active_orders[broker_order_id] = trade
+                    return broker_order_id
+                except Exception as e:
+                    logger.error(f"Failed to place futures order: {e}")
+                    return None
+            else:
+                sec_type = "STK"
+                exchange = "SMART"
+
+            # Create contract for stocks/ETFs and forex
             contract = self._create_contract(
                 order_event.symbol,
-                exchange="SMART",
+                exchange=exchange,
                 currency="USD",
-                sec_type="STK",
+                sec_type=sec_type,
             )
 
             # Qualify contract
@@ -1882,7 +1975,7 @@ class IBBroker:
 
         try:
             # Wrap order execution in circuit breaker (#S6)
-            broker_order_id = await self._circuit_breaker.call_async(_execute_order)
+            broker_order_id = await self._circuit_breaker.call(_execute_order)
 
             # ERR-001: Store idempotency mapping after successful placement
             if broker_order_id is not None and idempotency_key is not None:

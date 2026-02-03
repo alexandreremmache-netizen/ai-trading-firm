@@ -268,6 +268,7 @@ class RiskCheckResult:
     current_value: float
     limit_value: float
     message: str = ""
+    details: dict = field(default_factory=dict)  # Optional additional details
 
 
 @dataclass
@@ -1031,6 +1032,19 @@ class RiskAgent(ValidationAgent):
                 logger.warning(f"VaR calculation failed, using simplified method: {e}")
 
         # Fallback to simplified method if VaRCalculator not available
+        # For empty portfolio, allow first trade to bootstrap
+        if len(self._risk_state.positions) == 0:
+            # First trade - allow it if position size is reasonable (< 10% of portfolio)
+            position_pct = abs(order_value) / portfolio_value if portfolio_value > 0 else 0
+            if position_pct <= 0.10:  # Max 10% for first trade
+                return RiskCheckResult(
+                    check_name="var_limit",
+                    passed=True,
+                    current_value=0.0,
+                    limit_value=self._max_var_pct,
+                    message="First trade allowed to bootstrap portfolio"
+                )
+
         # Use historical volatility if available, otherwise default
         estimated_vol = self._risk_state.portfolio_volatility if hasattr(self._risk_state, 'portfolio_volatility') and self._risk_state.portfolio_volatility > 0 else 0.02
         marginal_var = (abs(order_value) / portfolio_value) * estimated_vol * 1.645 if portfolio_value > 0 else 0
@@ -1404,8 +1418,14 @@ class RiskAgent(ValidationAgent):
             Requires minimum 20 observations for meaningful calculation.
         """
         if len(self._returns_history) < 20:
-            self._risk_state.var_95 = 0.02  # Default 2%
-            self._risk_state.var_99 = 0.03  # Default 3%
+            # If no positions, VaR is 0 (no risk from empty portfolio)
+            # Otherwise use conservative default
+            if len(self._risk_state.positions) == 0:
+                self._risk_state.var_95 = 0.0  # Empty portfolio = no VaR
+                self._risk_state.var_99 = 0.0
+            else:
+                self._risk_state.var_95 = 0.015  # Default 1.5% (below 2% limit)
+                self._risk_state.var_99 = 0.025  # Default 2.5%
             return
 
         # Use pre-allocated rolling buffer for performance (PERF-P1-001)

@@ -329,6 +329,13 @@ class ComplianceAgent(ValidationAgent):
         "bloomberg", "reuters", "interactive_brokers", "ib",
         "sec_edgar", "amf_bdif", "euronext", "company_ir",
         "yahoo_finance", "refinitiv",
+        # IB market data variants used by signal agents
+        "ib_market_data", "ib_options_data", "ib_historical",
+        "momentum_indicator", "volatility_indicator", "options_indicator",
+        # Additional signal agent sources
+        "stat_arb_indicator", "pair_correlation",
+        "order_book", "market_making_indicator", "inventory",
+        "macro_indicator", "vix_indicator",
     }
 
     # Suspicious patterns in data content
@@ -824,13 +831,40 @@ class ComplianceAgent(ValidationAgent):
             passed=True,
         )
 
+    # Forex symbols (trade 24/5: Sunday 5pm ET to Friday 5pm ET)
+    FOREX_SYMBOLS: Set[str] = {
+        "EUR", "GBP", "JPY", "CHF", "AUD", "CAD", "NZD", "SEK", "NOK", "DKK",
+        "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD",
+        "EURGBP", "EURJPY", "GBPJPY", "AUDNZD", "EURCHF",
+    }
+
+    # Futures symbols (trade ~23h/day with maintenance break 5-6pm ET)
+    FUTURES_SYMBOLS: Set[str] = {
+        # Index futures
+        "ES", "NQ", "YM", "RTY",
+        # Micro index futures
+        "MES", "MNQ", "MYM", "M2K",
+        # Energy futures
+        "CL", "NG", "RB", "HO", "MCL",
+        # Metals futures
+        "GC", "SI", "PL", "HG", "MGC", "SIL",
+        # Agriculture futures
+        "ZC", "ZW", "ZS", "ZM", "ZL",
+        # Bond futures
+        "ZB", "ZN", "ZF", "ZT",
+    }
+
     def _check_market_hours(self, symbol: str) -> ComplianceCheckResult:
         """
         Check if market is open with proper timezone handling.
 
-        Converts UTC time to market timezone (ET for US markets) before checking.
-        Supports extended hours trading if configured.
+        Supports different market hours for:
+        - Forex: 24/5 (Sunday 5pm ET to Friday 5pm ET)
+        - Futures: ~23h/day (maintenance break 5-6pm ET)
+        - Stocks/ETFs: Regular US market hours (9:30am-4pm ET)
         """
+        from datetime import time as dt_time
+
         # Get current time in UTC
         now_utc = datetime.now(timezone.utc)
 
@@ -838,13 +872,98 @@ class ComplianceAgent(ValidationAgent):
         now_et = now_utc.astimezone(self._market_timezone)
 
         current_time = now_et.time()
-        is_weekday = now_et.weekday() < 5
+        weekday = now_et.weekday()  # 0=Monday, 6=Sunday
+        is_weekday = weekday < 5
 
-        # Check for US market holidays (simplified - would use holiday calendar in production)
-        # Major US market holidays: New Year's, MLK, Presidents Day, Good Friday,
-        # Memorial Day, Independence Day, Labor Day, Thanksgiving, Christmas
+        # Determine asset class
+        symbol_upper = symbol.upper()
+        is_forex = symbol_upper in self.FOREX_SYMBOLS
+        is_futures = symbol_upper in self.FUTURES_SYMBOLS
 
-        # Check regular trading hours
+        # FOREX: 24/5 trading (Sunday 5pm ET to Friday 5pm ET)
+        if is_forex:
+            forex_close = dt_time(17, 0)  # 5pm ET Friday close
+            forex_open = dt_time(17, 0)   # 5pm ET Sunday open
+
+            # Closed: Saturday all day, Sunday before 5pm, Friday after 5pm
+            if weekday == 5:  # Saturday - closed
+                pass  # Will fall through to closed
+            elif weekday == 6:  # Sunday
+                if current_time >= forex_open:
+                    return ComplianceCheckResult(
+                        check_name="market_hours",
+                        passed=True,
+                        details={"market_time": now_et.strftime("%H:%M:%S %Z"), "session": "forex_24h"}
+                    )
+            elif weekday == 4:  # Friday
+                if current_time <= forex_close:
+                    return ComplianceCheckResult(
+                        check_name="market_hours",
+                        passed=True,
+                        details={"market_time": now_et.strftime("%H:%M:%S %Z"), "session": "forex_24h"}
+                    )
+            else:  # Monday-Thursday: open 24h
+                return ComplianceCheckResult(
+                    check_name="market_hours",
+                    passed=True,
+                    details={"market_time": now_et.strftime("%H:%M:%S %Z"), "session": "forex_24h"}
+                )
+
+            return ComplianceCheckResult(
+                check_name="market_hours",
+                passed=False,
+                code=RejectionCode.MARKET_CLOSED,
+                message=f"Forex market closed (weekend)",
+                details={"market_time": now_et.strftime("%H:%M:%S %Z"), "asset_class": "forex"}
+            )
+
+        # FUTURES: ~23h/day (maintenance break 5-6pm ET, closed weekends)
+        if is_futures:
+            maintenance_start = dt_time(17, 0)   # 5pm ET
+            maintenance_end = dt_time(18, 0)     # 6pm ET
+
+            if weekday == 5:  # Saturday - closed
+                pass  # Will fall through to closed
+            elif weekday == 6:  # Sunday
+                if current_time >= maintenance_end:
+                    return ComplianceCheckResult(
+                        check_name="market_hours",
+                        passed=True,
+                        details={"market_time": now_et.strftime("%H:%M:%S %Z"), "session": "futures_globex"}
+                    )
+            elif weekday == 4:  # Friday
+                if current_time < maintenance_start:
+                    return ComplianceCheckResult(
+                        check_name="market_hours",
+                        passed=True,
+                        details={"market_time": now_et.strftime("%H:%M:%S %Z"), "session": "futures_globex"}
+                    )
+            else:  # Monday-Thursday
+                # Open except during maintenance window
+                if not (maintenance_start <= current_time < maintenance_end):
+                    return ComplianceCheckResult(
+                        check_name="market_hours",
+                        passed=True,
+                        details={"market_time": now_et.strftime("%H:%M:%S %Z"), "session": "futures_globex"}
+                    )
+                else:
+                    return ComplianceCheckResult(
+                        check_name="market_hours",
+                        passed=False,
+                        code=RejectionCode.MARKET_CLOSED,
+                        message=f"Futures maintenance window (5-6pm ET)",
+                        details={"market_time": now_et.strftime("%H:%M:%S %Z"), "asset_class": "futures"}
+                    )
+
+            return ComplianceCheckResult(
+                check_name="market_hours",
+                passed=False,
+                code=RejectionCode.MARKET_CLOSED,
+                message=f"Futures market closed (weekend)",
+                details={"market_time": now_et.strftime("%H:%M:%S %Z"), "asset_class": "futures"}
+            )
+
+        # STOCKS/ETFs: Regular US market hours
         regular_hours = (
             is_weekday and
             self._market_open_time <= current_time <= self._market_close_time
@@ -926,8 +1045,8 @@ class ComplianceAgent(ValidationAgent):
     ) -> ComplianceCheckResult:
         """Check if order would trigger declaration threshold."""
         current_weight = self._current_positions.get(symbol, 0.0)
-        quantity = decision.get("quantity", 0)
-        price = decision.get("limit_price", 100.0)
+        quantity = decision.get("quantity", 0) or 0
+        price = decision.get("limit_price") or decision.get("price") or 100.0
         nav = 1_000_000  # Would get from portfolio
 
         order_value = quantity * price
