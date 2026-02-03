@@ -79,12 +79,30 @@ class MacroAgent(SignalAgent):
         if not isinstance(event, MarketDataEvent):
             return
 
-        # TODO: Implement actual macro signal logic
+        symbol = event.symbol
+        macro_symbols = {"VIX", "TLT", "UUP", "SPY", "QQQ", "GLD", "USO", "IWM"}
+
+        # Only process macro-relevant symbols
+        if symbol not in macro_symbols:
+            return
+
         signal = await self._analyze_macro_conditions(event)
 
-        if signal:
-            await self._event_bus.publish_signal(signal)
-            self._audit_logger.log_event(signal)
+        # Always publish a signal for macro symbols to satisfy barrier
+        if signal is None:
+            signal = SignalEvent(
+                source_agent=self.name,
+                strategy_name="macro_monitoring",
+                symbol=symbol,
+                direction=SignalDirection.FLAT,
+                strength=0.0,
+                confidence=0.3,
+                rationale=f"Macro: Monitoring {symbol}, no actionable signal",
+                data_sources=("ib_market_data", "macro_indicator"),
+            )
+
+        await self._event_bus.publish_signal(signal)
+        self._audit_logger.log_event(signal)
 
     async def _analyze_macro_conditions(
         self,
@@ -103,13 +121,24 @@ class MacroAgent(SignalAgent):
         # Placeholder logic - replace with actual macro models
         symbol = market_data.symbol
 
-        # Skip non-macro symbols
-        if symbol not in ["VIX", "TLT", "UUP", "SPY"]:
+        # Process macro-relevant symbols
+        # VIX for volatility regime, SPY/QQQ for broad market, GLD for risk-off, TLT for rates
+        macro_symbols = {"VIX", "TLT", "UUP", "SPY", "QQQ", "GLD", "USO", "IWM"}
+
+        if symbol not in macro_symbols:
             return None
 
-        # Example: VIX-based regime detection
+        # VIX-based regime detection
         if symbol == "VIX":
             return await self._process_vix_signal(market_data)
+
+        # SPY/QQQ momentum for regime
+        if symbol in ("SPY", "QQQ"):
+            return await self._process_equity_regime_signal(market_data)
+
+        # GLD/TLT for risk-off detection
+        if symbol in ("GLD", "TLT"):
+            return await self._process_safe_haven_signal(market_data)
 
         return None
 
@@ -167,6 +196,129 @@ class MacroAgent(SignalAgent):
             rationale=f"VIX regime change to {regime} (VIX={vix_level:.1f})",
             data_sources=("ib_market_data", "macro_indicator", "vix_indicator"),
         )
+
+    async def _process_equity_regime_signal(
+        self,
+        market_data: MarketDataEvent,
+    ) -> SignalEvent | None:
+        """
+        Process SPY/QQQ data for equity regime detection.
+
+        Uses price momentum as a simple regime indicator.
+        """
+        symbol = market_data.symbol
+        price = market_data.last or market_data.mid
+
+        if price <= 0:
+            return None
+
+        # Store price history (simple approach using instance variable)
+        if not hasattr(self, "_price_history"):
+            self._price_history: dict[str, list[float]] = {}
+
+        if symbol not in self._price_history:
+            self._price_history[symbol] = []
+
+        self._price_history[symbol].append(price)
+
+        # Keep last 50 prices
+        if len(self._price_history[symbol]) > 50:
+            self._price_history[symbol] = self._price_history[symbol][-50:]
+
+        # Need at least 5 prices for signal (fast startup)
+        if len(self._price_history[symbol]) < 5:
+            return None
+
+        prices = self._price_history[symbol]
+        n = len(prices)
+
+        # Adaptive SMA based on available data
+        sma_short = sum(prices[-min(5, n):]) / min(5, n)
+        sma_long = sum(prices[-min(10, n):]) / min(10, n)
+
+        # Simple momentum regime
+        momentum = (sma_short - sma_long) / sma_long * 100 if sma_long > 0 else 0  # Percentage
+
+        if momentum > 0.1:
+            direction = SignalDirection.LONG
+            regime = "bullish"
+            strength = min(1.0, momentum / 2)
+        elif momentum < -0.1:
+            direction = SignalDirection.SHORT
+            regime = "bearish"
+            strength = max(-1.0, momentum / 2)
+        else:
+            # Neutral signal with low strength
+            direction = SignalDirection.FLAT
+            regime = "neutral"
+            strength = 0.0
+
+        return SignalEvent(
+            source_agent=self.name,
+            strategy_name="macro_equity_regime",
+            symbol=symbol,
+            direction=direction,
+            strength=strength,
+            confidence=0.55,
+            rationale=f"Equity regime {regime}: {symbol} SMA10/SMA20 momentum={momentum:.2f}%",
+            data_sources=("ib_market_data", "macro_indicator", "momentum_indicator"),
+        )
+
+    async def _process_safe_haven_signal(
+        self,
+        market_data: MarketDataEvent,
+    ) -> SignalEvent | None:
+        """
+        Process GLD/TLT for safe haven demand (risk-off indicator).
+
+        Rising GLD/TLT suggests risk-off environment.
+        """
+        symbol = market_data.symbol
+        price = market_data.last or market_data.mid
+
+        if price <= 0:
+            return None
+
+        # Store price history
+        if not hasattr(self, "_safe_haven_history"):
+            self._safe_haven_history: dict[str, list[float]] = {}
+
+        if symbol not in self._safe_haven_history:
+            self._safe_haven_history[symbol] = []
+
+        self._safe_haven_history[symbol].append(price)
+
+        # Keep last 30 prices
+        if len(self._safe_haven_history[symbol]) > 30:
+            self._safe_haven_history[symbol] = self._safe_haven_history[symbol][-30:]
+
+        # Need at least 4 prices (fast startup)
+        if len(self._safe_haven_history[symbol]) < 4:
+            return None
+
+        prices = self._safe_haven_history[symbol]
+        n = len(prices)
+        half = max(2, n // 2)
+        recent_avg = sum(prices[-half:]) / half
+        older_avg = sum(prices[:-half]) / (n - half) if n > half else recent_avg
+
+        # Safe haven demand rising = risk-off
+        change_pct = (recent_avg - older_avg) / older_avg * 100
+
+        if change_pct > 0.3:
+            # Risk-off: safe havens rising
+            return SignalEvent(
+                source_agent=self.name,
+                strategy_name="macro_safe_haven",
+                symbol="SPY",  # Signal affects broad market
+                direction=SignalDirection.SHORT,
+                strength=-0.3,
+                confidence=0.5,
+                rationale=f"Risk-off: {symbol} rising {change_pct:.2f}% (safe haven demand)",
+                data_sources=("ib_market_data", "macro_indicator", "safe_haven_indicator"),
+            )
+
+        return None
 
     async def _analyze_yield_curve(self) -> SignalEvent | None:
         """

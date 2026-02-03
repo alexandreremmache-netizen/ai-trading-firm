@@ -105,9 +105,21 @@ class MarketMakingAgent(SignalAgent):
 
         symbol = event.symbol
 
-        # Skip if insufficient data
-        if event.bid <= 0 or event.ask <= 0:
+        # Handle delayed data: use mid/last price if bid/ask unavailable
+        bid = event.bid if event.bid > 0 else (event.mid or event.last or 0)
+        ask = event.ask if event.ask > 0 else (event.mid or event.last or 0)
+        mid = event.mid if event.mid > 0 else ((bid + ask) / 2 if bid > 0 and ask > 0 else event.last or 0)
+
+        # Skip if no valid price data at all
+        if mid <= 0:
             return
+
+        # For delayed data, estimate spread from typical values
+        if event.bid <= 0 or event.ask <= 0:
+            # Estimate spread as 0.05% for liquid instruments
+            estimated_spread = mid * 0.0005
+            bid = mid - estimated_spread / 2
+            ask = mid + estimated_spread / 2
 
         # Get or create symbol state
         if symbol not in self._symbols:
@@ -122,12 +134,13 @@ class MarketMakingAgent(SignalAgent):
 
         state = self._symbols[symbol]
 
-        # Update state
-        state.bid_prices.append(event.bid)
-        state.ask_prices.append(event.ask)
-        state.mid_prices.append(event.mid)
-        state.spreads.append(event.spread)
-        state.volumes.append(event.volume)
+        # Update state with computed values
+        spread = ask - bid if ask > bid else mid * 0.0005
+        state.bid_prices.append(bid)
+        state.ask_prices.append(ask)
+        state.mid_prices.append(mid)
+        state.spreads.append(spread)
+        state.volumes.append(event.volume if event.volume > 0 else 1000)
 
         # Check quote refresh rate (not HFT)
         now = datetime.now(timezone.utc)
@@ -138,9 +151,9 @@ class MarketMakingAgent(SignalAgent):
 
         state.last_quote_time = now
 
-        # Generate signal if we have enough data
-        if len(state.mid_prices) >= 20:
-            signal = self._generate_mm_signal(state, event)
+        # Generate signal if we have enough data (reduced from 20 to 10 for faster startup)
+        if len(state.mid_prices) >= 10:
+            signal = self._generate_mm_signal(state, mid, spread)
             if signal:
                 await self._event_bus.publish_signal(signal)
                 self._audit_logger.log_event(signal)
@@ -148,7 +161,8 @@ class MarketMakingAgent(SignalAgent):
     def _generate_mm_signal(
         self,
         state: MarketMakingState,
-        market_data: MarketDataEvent,
+        mid: float,
+        spread: float,
     ) -> SignalEvent | None:
         """
         Generate market making signal.
@@ -160,35 +174,42 @@ class MarketMakingAgent(SignalAgent):
         - Optimal spread calculation
         """
         # Calculate fair value (simple mid for now)
-        state.fair_value = market_data.mid
+        state.fair_value = mid
 
         # Calculate realized volatility
         mid_array = np.array(list(state.mid_prices))
         if len(mid_array) >= 2:
-            returns = np.diff(np.log(mid_array))
-            state.volatility = np.std(returns) * np.sqrt(252 * 390)  # Annualized
+            # Avoid log of zero
+            mid_array = mid_array[mid_array > 0]
+            if len(mid_array) >= 2:
+                returns = np.diff(np.log(mid_array))
+                state.volatility = np.std(returns) * np.sqrt(252 * 390)  # Annualized
 
         # Calculate optimal spread based on volatility and inventory
-        optimal_spread = self._calculate_optimal_spread(state, market_data)
+        optimal_spread = self._calculate_optimal_spread(state, mid)
 
         # Check if current spread is attractive
-        current_spread_bps = (market_data.spread / market_data.mid) * 10000
+        current_spread_bps = (spread / mid) * 10000 if mid > 0 else 0
 
-        # Generate signal based on spread opportunity
-        if current_spread_bps > optimal_spread * 1.5:
+        # Generate signal based on spread opportunity (relaxed threshold)
+        if current_spread_bps > optimal_spread * 1.2:
             # Wide spread - opportunity to provide liquidity
-            return self._generate_liquidity_signal(state, market_data, optimal_spread)
+            return self._generate_liquidity_signal(state, mid, spread, optimal_spread)
 
         # Inventory management signal
         if abs(state.inventory) > self._max_inventory * 0.8:
-            return self._generate_inventory_signal(state, market_data)
+            return self._generate_inventory_signal(state, mid)
+
+        # Also generate neutral MM signal periodically for active symbols
+        if len(state.mid_prices) % 5 == 0:  # Every 5th update
+            return self._generate_neutral_mm_signal(state, mid, spread, optimal_spread)
 
         return None
 
     def _calculate_optimal_spread(
         self,
         state: MarketMakingState,
-        market_data: MarketDataEvent,
+        mid: float,
     ) -> float:
         """
         Calculate optimal spread in basis points.
@@ -214,7 +235,8 @@ class MarketMakingAgent(SignalAgent):
     def _generate_liquidity_signal(
         self,
         state: MarketMakingState,
-        market_data: MarketDataEvent,
+        mid: float,
+        spread: float,
         optimal_spread: float,
     ) -> SignalEvent:
         """Generate signal to provide liquidity."""
@@ -232,6 +254,8 @@ class MarketMakingAgent(SignalAgent):
             direction = SignalDirection.FLAT
             strength = 0.0
 
+        current_spread_bps = (spread / mid) * 10000 if mid > 0 else 0
+
         return SignalEvent(
             source_agent=self.name,
             strategy_name="market_making",
@@ -241,9 +265,34 @@ class MarketMakingAgent(SignalAgent):
             confidence=0.5,
             target_price=state.fair_value,
             rationale=(
-                f"MM opportunity: spread={market_data.spread:.4f} "
-                f"({(market_data.spread/market_data.mid)*10000:.1f}bps), "
+                f"MM opportunity: spread={spread:.4f} "
+                f"({current_spread_bps:.1f}bps), "
                 f"optimal={optimal_spread:.1f}bps, inventory={state.inventory}"
+            ),
+            data_sources=("ib_market_data", "order_book", "market_making_indicator"),
+        )
+
+    def _generate_neutral_mm_signal(
+        self,
+        state: MarketMakingState,
+        mid: float,
+        spread: float,
+        optimal_spread: float,
+    ) -> SignalEvent:
+        """Generate neutral market making signal for activity."""
+        current_spread_bps = (spread / mid) * 10000 if mid > 0 else 0
+
+        return SignalEvent(
+            source_agent=self.name,
+            strategy_name="market_making",
+            symbol=state.symbol,
+            direction=SignalDirection.FLAT,
+            strength=0.0,
+            confidence=0.4,
+            target_price=state.fair_value,
+            rationale=(
+                f"MM neutral: spread={current_spread_bps:.1f}bps, "
+                f"optimal={optimal_spread:.1f}bps, vol={state.volatility:.1%}"
             ),
             data_sources=("ib_market_data", "order_book", "market_making_indicator"),
         )
@@ -251,7 +300,7 @@ class MarketMakingAgent(SignalAgent):
     def _generate_inventory_signal(
         self,
         state: MarketMakingState,
-        market_data: MarketDataEvent,
+        mid: float,
     ) -> SignalEvent:
         """Generate signal to reduce inventory."""
         if state.inventory > 0:
@@ -270,7 +319,7 @@ class MarketMakingAgent(SignalAgent):
             direction=direction,
             strength=strength,
             confidence=0.7,
-            target_price=market_data.mid,
+            target_price=mid,
             rationale=(
                 f"Inventory management: {action} inventory "
                 f"({state.inventory}/{self._max_inventory})"

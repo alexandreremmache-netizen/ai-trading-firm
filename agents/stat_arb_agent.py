@@ -171,6 +171,27 @@ class StatArbAgent(SignalAgent):
             await self._event_bus.publish_signal(signal)
             self._audit_logger.log_event(signal)
 
+        # If no signals generated for this event but symbol is tracked, send a neutral signal
+        # This ensures the barrier gets a response from StatArbAgent
+        if not signals:
+            # Send a neutral signal if symbol is part of any tracked pair
+            for pair_key, pair_state in self._pairs.items():
+                if symbol == pair_state.symbol_a or symbol == pair_state.symbol_b:
+                    # Send a neutral/monitoring signal to satisfy barrier
+                    data_status = f"A:{len(pair_state.price_a)}/B:{len(pair_state.price_b)}"
+                    neutral_signal = SignalEvent(
+                        source_agent=self.name,
+                        strategy_name="stat_arb_pairs",
+                        symbol=pair_key,
+                        direction=SignalDirection.FLAT,
+                        strength=0.0,
+                        confidence=0.3,
+                        rationale=f"Pair {pair_key} monitoring: data={data_status}, zscore={pair_state.zscore:.2f}",
+                        data_sources=("ib_market_data", "stat_arb_indicator"),
+                    )
+                    await self._event_bus.publish_signal(neutral_signal)
+                    break  # Only need one signal per event
+
         # P2: Periodic cointegration check
         self._bar_counter += 1
         if self._bar_counter >= self._cointegration_check_interval:
@@ -191,8 +212,8 @@ class StatArbAgent(SignalAgent):
         3. Compute spread and z-score
         4. Check for entry/exit signals
         """
-        # Need sufficient data
-        min_data = 100
+        # Need sufficient data (reduced from 100 to 10 for faster startup)
+        min_data = 10
         if len(pair_state.price_a) < min_data or len(pair_state.price_b) < min_data:
             return None
 
@@ -213,8 +234,8 @@ class StatArbAgent(SignalAgent):
         spread = prices_a - pair_state.hedge_ratio * prices_b
         pair_state.spread_history.append(spread[-1])
 
-        # Calculate z-score
-        if len(pair_state.spread_history) < min_data:
+        # Calculate z-score (reduced threshold for faster startup)
+        if len(pair_state.spread_history) < 5:
             return None
 
         spread_array = np.array(list(pair_state.spread_history))
@@ -269,11 +290,9 @@ class StatArbAgent(SignalAgent):
         """Generate signal based on z-score."""
         current_signal = pair_state.last_signal
 
-        # P2: Check if pair is tradeable
+        # P2: Check if pair is tradeable (allow signals with reduced confidence if not verified)
         tradeable, reason = self.is_pair_tradeable(pair_key)
-        if not tradeable and self._pair_ranking_enabled:
-            logger.debug(f"StatArb: Skipping signal for {pair_key}: {reason}")
-            return None
+        confidence_penalty = 0.0 if tradeable else 0.3  # Reduce confidence if not verified tradeable
 
         # Entry signals
         if zscore > self._zscore_entry and current_signal != SignalDirection.SHORT:
@@ -285,7 +304,7 @@ class StatArbAgent(SignalAgent):
                 symbol=pair_key,  # Pair identifier
                 direction=SignalDirection.SHORT,
                 strength=-min(1.0, zscore / 3.0),
-                confidence=self._calculate_confidence(zscore, pair_state),
+                confidence=max(0.1, self._calculate_confidence(zscore, pair_state) - confidence_penalty),
                 target_price=None,
                 rationale=(
                     f"Pair {pair_key} spread z-score={zscore:.2f} > {self._zscore_entry}. "
@@ -304,7 +323,7 @@ class StatArbAgent(SignalAgent):
                 symbol=pair_key,
                 direction=SignalDirection.LONG,
                 strength=min(1.0, abs(zscore) / 3.0),
-                confidence=self._calculate_confidence(zscore, pair_state),
+                confidence=max(0.1, self._calculate_confidence(zscore, pair_state) - confidence_penalty),
                 target_price=None,
                 rationale=(
                     f"Pair {pair_key} spread z-score={zscore:.2f} < -{self._zscore_entry}. "
