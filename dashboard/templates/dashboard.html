@@ -1966,15 +1966,101 @@ Warnings:            0
         }
 
         function handleSnapshot(data) {
+            console.log('Received snapshot:', Object.keys(data));
             state.data = { ...state.data, ...data };
             updateAllViews();
+
+            // Update config if present
+            if (data.config) {
+                updateConfig(data.config);
+            }
+        }
+
+        function updateConfig(config) {
+            if (!config) return;
+
+            // Firm settings
+            const configMode = document.getElementById('config-mode');
+            if (configMode && config.mode) {
+                configMode.textContent = config.mode;
+            }
+
+            const configLei = document.getElementById('config-lei');
+            if (configLei && config.lei) {
+                configLei.textContent = config.lei;
+            }
+
+            // Broker settings
+            const configBrokerHost = document.getElementById('config-broker-host');
+            if (configBrokerHost && config.broker_host) {
+                configBrokerHost.textContent = config.broker_host;
+            }
+
+            const configBrokerPort = document.getElementById('config-broker-port');
+            if (configBrokerPort && config.broker_port) {
+                configBrokerPort.textContent = config.broker_port;
+            }
+
+            const configBrokerClientId = document.getElementById('config-broker-clientid');
+            if (configBrokerClientId && config.client_id) {
+                configBrokerClientId.textContent = config.client_id;
+            }
+
+            // Risk limits
+            const configMaxPosition = document.getElementById('config-max-position');
+            if (configMaxPosition && config.max_position_size_pct !== undefined) {
+                configMaxPosition.textContent = config.max_position_size_pct + '%';
+            }
+
+            const configMaxLeverage = document.getElementById('config-max-leverage');
+            if (configMaxLeverage && config.max_leverage !== undefined) {
+                configMaxLeverage.textContent = config.max_leverage + 'x';
+            }
+
+            const configMaxDailyLoss = document.getElementById('config-max-daily-loss');
+            if (configMaxDailyLoss && config.max_daily_loss_pct !== undefined) {
+                configMaxDailyLoss.textContent = config.max_daily_loss_pct + '%';
+            }
+
+            const configMaxDrawdown = document.getElementById('config-max-drawdown');
+            if (configMaxDrawdown && config.max_drawdown_pct !== undefined) {
+                configMaxDrawdown.textContent = config.max_drawdown_pct + '%';
+            }
+
+            // Update header mode
+            const headerMode = document.getElementById('header-mode');
+            if (headerMode && config.mode) {
+                headerMode.textContent = config.mode.charAt(0).toUpperCase() + config.mode.slice(1);
+            }
         }
 
         function handleUpdate(data) {
-            if (data.overview) updateOverview(data.overview);
-            if (data.risk) updateRisk(data.risk);
-            if (data.performance) updatePerformance(data.performance);
-            if (data.agents) updateAgents(data.agents);
+            console.log('Received update:', Object.keys(data));
+
+            if (data.overview) {
+                state.data.overview = { ...state.data.overview, ...data.overview };
+                updateOverview(state.data.overview);
+            }
+            if (data.risk) {
+                state.data.risk = { ...state.data.risk, ...data.risk };
+                updateRisk(state.data.risk);
+            }
+            if (data.performance) {
+                state.data.performance = { ...state.data.performance, ...data.performance };
+                updatePerformance(state.data.performance);
+            }
+            if (data.agents) {
+                state.data.agents = { ...state.data.agents, ...data.agents };
+                updateAgents(state.data.agents);
+            }
+            if (data.positions) {
+                state.data.positions = data.positions;
+                updatePositions();
+            }
+            if (data.config) {
+                state.data.config = { ...state.data.config, ...data.config };
+                updateConfig(state.data.config);
+            }
         }
 
         function handleSignal(signal) {
@@ -2056,238 +2142,292 @@ Warnings:            0
         // Chart Initialization
         // ========================================
         function initEquityChart() {
-            const ctx = document.getElementById('equity-chart').getContext('2d');
-            state.charts.equity = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [{
-                        label: 'Equity',
-                        data: [],
-                        borderColor: '#58a6ff',
-                        backgroundColor: 'rgba(88, 166, 255, 0.1)',
-                        fill: true,
-                        tension: 0.4,
-                        pointRadius: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: { display: false }
+            const canvas = document.getElementById('equity-chart');
+            if (!canvas) {
+                console.warn('equity-chart canvas not found');
+                return;
+            }
+            if (state.charts.equity) {
+                return; // Already initialized
+            }
+
+            try {
+                const ctx = canvas.getContext('2d');
+                state.charts.equity = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: [{
+                            label: 'Equity',
+                            data: [],
+                            borderColor: '#58a6ff',
+                            backgroundColor: 'rgba(88, 166, 255, 0.1)',
+                            fill: true,
+                            tension: 0.4,
+                            pointRadius: 0
+                        }]
                     },
-                    scales: {
-                        x: {
-                            display: true,
-                            grid: { color: '#30363d' },
-                            ticks: { color: '#8b949e' }
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false }
                         },
-                        y: {
-                            display: true,
-                            grid: { color: '#30363d' },
-                            ticks: { color: '#8b949e' }
+                        scales: {
+                            x: {
+                                display: true,
+                                grid: { color: '#30363d' },
+                                ticks: { color: '#8b949e' }
+                            },
+                            y: {
+                                display: true,
+                                grid: { color: '#30363d' },
+                                ticks: { color: '#8b949e' }
+                            }
                         }
                     }
-                }
-            });
+                });
+                console.log('Equity chart initialized');
+            } catch (e) {
+                console.error('Error initializing equity chart:', e);
+            }
         }
 
         function initPerformanceCharts() {
             // Equity Chart
-            const eqCtx = document.getElementById('perf-equity-chart').getContext('2d');
-            state.charts.perfEquity = new Chart(eqCtx, {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [{
-                        label: 'Portfolio',
-                        data: [],
-                        borderColor: '#58a6ff',
-                        fill: false,
-                        tension: 0.4,
-                        pointRadius: 0
-                    }, {
-                        label: 'Benchmark',
-                        data: [],
-                        borderColor: '#8b949e',
-                        fill: false,
-                        tension: 0.4,
-                        pointRadius: 0,
-                        borderDash: [5, 5]
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            display: true,
-                            labels: { color: '#e6edf3' }
+            const eqCanvas = document.getElementById('perf-equity-chart');
+            if (eqCanvas && !state.charts.perfEquity) {
+                try {
+                    const eqCtx = eqCanvas.getContext('2d');
+                    state.charts.perfEquity = new Chart(eqCtx, {
+                        type: 'line',
+                        data: {
+                            labels: [],
+                            datasets: [{
+                                label: 'Portfolio',
+                                data: [],
+                                borderColor: '#58a6ff',
+                                fill: false,
+                                tension: 0.4,
+                                pointRadius: 0
+                            }, {
+                                label: 'Benchmark',
+                                data: [],
+                                borderColor: '#8b949e',
+                                fill: false,
+                                tension: 0.4,
+                                pointRadius: 0,
+                                borderDash: [5, 5]
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: {
+                                    display: true,
+                                    labels: { color: '#e6edf3' }
+                                }
+                            },
+                            scales: {
+                                x: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } },
+                                y: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } }
+                            }
                         }
-                    },
-                    scales: {
-                        x: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } },
-                        y: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } }
-                    }
+                    });
+                } catch (e) {
+                    console.error('Error initializing perf equity chart:', e);
                 }
-            });
+            }
 
             // Daily P&L Chart
-            const pnlCtx = document.getElementById('daily-pnl-chart').getContext('2d');
-            state.charts.dailyPnl = new Chart(pnlCtx, {
-                type: 'bar',
-                data: {
-                    labels: [],
-                    datasets: [{
-                        label: 'Daily P&L',
-                        data: [],
-                        backgroundColor: (ctx) => {
-                            const value = ctx.raw;
-                            return value >= 0 ? 'rgba(63, 185, 80, 0.8)' : 'rgba(248, 81, 73, 0.8)';
+            const pnlCanvas = document.getElementById('daily-pnl-chart');
+            if (pnlCanvas && !state.charts.dailyPnl) {
+                try {
+                    const pnlCtx = pnlCanvas.getContext('2d');
+                    state.charts.dailyPnl = new Chart(pnlCtx, {
+                        type: 'bar',
+                        data: {
+                            labels: [],
+                            datasets: [{
+                                label: 'Daily P&L',
+                                data: [],
+                                backgroundColor: (ctx) => {
+                                    const value = ctx.raw;
+                                    return value >= 0 ? 'rgba(63, 185, 80, 0.8)' : 'rgba(248, 81, 73, 0.8)';
+                                }
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { display: false }
+                            },
+                            scales: {
+                                x: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } },
+                                y: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } }
+                            }
                         }
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: { display: false }
-                    },
-                    scales: {
-                        x: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } },
-                        y: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } }
-                    }
+                    });
+                } catch (e) {
+                    console.error('Error initializing daily pnl chart:', e);
                 }
-            });
+            }
         }
 
         function initRiskCharts() {
-            const ctx = document.getElementById('drawdown-chart').getContext('2d');
-            state.charts.drawdown = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [{
-                        label: 'Drawdown',
-                        data: [],
-                        borderColor: '#f85149',
-                        backgroundColor: 'rgba(248, 81, 73, 0.2)',
-                        fill: true,
-                        tension: 0.4,
-                        pointRadius: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: { display: false }
+            const canvas = document.getElementById('drawdown-chart');
+            if (!canvas || state.charts.drawdown) return;
+
+            try {
+                const ctx = canvas.getContext('2d');
+                state.charts.drawdown = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: [{
+                            label: 'Drawdown',
+                            data: [],
+                            borderColor: '#f85149',
+                            backgroundColor: 'rgba(248, 81, 73, 0.2)',
+                            fill: true,
+                            tension: 0.4,
+                            pointRadius: 0
+                        }]
                     },
-                    scales: {
-                        x: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } },
-                        y: {
-                            reverse: true,
-                            grid: { color: '#30363d' },
-                            ticks: { color: '#8b949e' }
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false }
+                        },
+                        scales: {
+                            x: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } },
+                            y: {
+                                reverse: true,
+                                grid: { color: '#30363d' },
+                                ticks: { color: '#8b949e' }
+                            }
                         }
                     }
-                }
-            });
+                });
+            } catch (e) {
+                console.error('Error initializing drawdown chart:', e);
+            }
         }
 
         function initSectorChart() {
-            const ctx = document.getElementById('sector-chart').getContext('2d');
-            state.charts.sector = new Chart(ctx, {
-                type: 'doughnut',
-                data: {
-                    labels: ['Technology', 'Healthcare', 'Finance', 'Energy', 'Consumer', 'Other'],
-                    datasets: [{
-                        data: [30, 20, 15, 10, 15, 10],
-                        backgroundColor: [
-                            '#58a6ff', '#3fb950', '#a371f7', '#d29922', '#39c5cf', '#8b949e'
-                        ],
-                        borderWidth: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            position: 'right',
-                            labels: { color: '#e6edf3' }
+            const canvas = document.getElementById('sector-chart');
+            if (!canvas || state.charts.sector) return;
+
+            try {
+                const ctx = canvas.getContext('2d');
+                state.charts.sector = new Chart(ctx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['No positions'],
+                        datasets: [{
+                            data: [1],
+                            backgroundColor: ['#30363d'],
+                            borderWidth: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'right',
+                                labels: { color: '#e6edf3' }
+                            }
                         }
                     }
-                }
-            });
+                });
+            } catch (e) {
+                console.error('Error initializing sector chart:', e);
+            }
         }
 
         function initDecisionsChart() {
-            const ctx = document.getElementById('decisions-chart').getContext('2d');
-            state.charts.decisions = new Chart(ctx, {
-                type: 'doughnut',
-                data: {
-                    labels: ['Profitable', 'Unprofitable', 'Pending'],
-                    datasets: [{
-                        data: [0, 0, 0],
-                        backgroundColor: ['#3fb950', '#f85149', '#8b949e'],
-                        borderWidth: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            position: 'bottom',
-                            labels: { color: '#e6edf3' }
+            const canvas = document.getElementById('decisions-chart');
+            if (!canvas || state.charts.decisions) return;
+
+            try {
+                const ctx = canvas.getContext('2d');
+                state.charts.decisions = new Chart(ctx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['Profitable', 'Unprofitable', 'Pending'],
+                        datasets: [{
+                            data: [0, 0, 1],
+                            backgroundColor: ['#3fb950', '#f85149', '#8b949e'],
+                            borderWidth: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'bottom',
+                                labels: { color: '#e6edf3' }
+                            }
                         }
                     }
-                }
-            });
+                });
+            } catch (e) {
+                console.error('Error initializing decisions chart:', e);
+            }
         }
 
         function initSentimentChart() {
-            const ctx = document.getElementById('sentiment-chart').getContext('2d');
-            state.charts.sentiment = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: ['6h', '5h', '4h', '3h', '2h', '1h', 'Now'],
-                    datasets: [{
-                        label: 'Bullish',
-                        data: [55, 58, 52, 60, 65, 62, 68],
-                        borderColor: '#3fb950',
-                        fill: false,
-                        tension: 0.4
-                    }, {
-                        label: 'Bearish',
-                        data: [30, 28, 32, 25, 22, 25, 20],
-                        borderColor: '#f85149',
-                        fill: false,
-                        tension: 0.4
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            position: 'top',
-                            labels: { color: '#e6edf3' }
-                        }
+            const canvas = document.getElementById('sentiment-chart');
+            if (!canvas || state.charts.sentiment) return;
+
+            try {
+                const ctx = canvas.getContext('2d');
+                state.charts.sentiment = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: ['6h', '5h', '4h', '3h', '2h', '1h', 'Now'],
+                        datasets: [{
+                            label: 'Bullish',
+                            data: [55, 58, 52, 60, 65, 62, 68],
+                            borderColor: '#3fb950',
+                            fill: false,
+                            tension: 0.4
+                        }, {
+                            label: 'Bearish',
+                            data: [30, 28, 32, 25, 22, 25, 20],
+                            borderColor: '#f85149',
+                            fill: false,
+                            tension: 0.4
+                        }]
                     },
-                    scales: {
-                        x: { grid: { display: false }, ticks: { color: '#8b949e' } },
-                        y: {
-                            grid: { color: '#30363d' },
-                            ticks: { color: '#8b949e' },
-                            min: 0,
-                            max: 100
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'top',
+                                labels: { color: '#e6edf3' }
+                            }
+                        },
+                        scales: {
+                            x: { grid: { display: false }, ticks: { color: '#8b949e' } },
+                            y: {
+                                grid: { color: '#30363d' },
+                                ticks: { color: '#8b949e' },
+                                min: 0,
+                                max: 100
+                            }
                         }
                     }
-                }
-            });
+                });
+            } catch (e) {
+                console.error('Error initializing sentiment chart:', e);
+            }
         }
 
         // ========================================
@@ -2311,110 +2451,379 @@ Warnings:            0
             // Update header
             const pnl = data.daily_pnl || 0;
             const pnlEl = document.getElementById('header-pnl');
-            pnlEl.textContent = formatCurrency(pnl);
-            pnlEl.className = `header-metric-value ${pnl >= 0 ? 'positive' : 'negative'}`;
+            if (pnlEl) {
+                pnlEl.textContent = formatCurrency(pnl);
+                pnlEl.className = `header-metric-value ${pnl >= 0 ? 'positive' : 'negative'}`;
+            }
 
-            document.getElementById('header-positions').textContent = data.positions_count || 0;
+            const headerPositions = document.getElementById('header-positions');
+            if (headerPositions) {
+                headerPositions.textContent = data.positions_count || state.data.positions.length || 0;
+            }
+
+            const headerMode = document.getElementById('header-mode');
+            if (headerMode && data.mode) {
+                headerMode.textContent = data.mode.charAt(0).toUpperCase() + data.mode.slice(1);
+            }
 
             // Update metrics
-            document.getElementById('overview-equity').textContent = formatCurrency(data.equity || 100000);
-            document.getElementById('overview-daily-pnl').textContent = formatCurrency(pnl);
-            const pnlPct = document.getElementById('overview-daily-pnl-pct');
-            pnlPct.textContent = formatPercent(data.daily_pnl_pct || 0);
-            pnlPct.className = `metric-change ${(data.daily_pnl_pct || 0) >= 0 ? 'positive' : 'negative'}`;
+            const overviewEquity = document.getElementById('overview-equity');
+            if (overviewEquity) {
+                overviewEquity.textContent = formatCurrency(data.equity || 100000);
+            }
 
-            document.getElementById('overview-positions').textContent = data.positions_count || 0;
-            document.getElementById('overview-var').textContent = formatPercent(data.var_95 || 0);
+            const overviewDailyPnl = document.getElementById('overview-daily-pnl');
+            if (overviewDailyPnl) {
+                overviewDailyPnl.textContent = formatCurrency(pnl);
+            }
+
+            const pnlPct = document.getElementById('overview-daily-pnl-pct');
+            if (pnlPct) {
+                pnlPct.textContent = formatPercent(data.daily_pnl_pct || 0);
+                pnlPct.className = `metric-change ${(data.daily_pnl_pct || 0) >= 0 ? 'positive' : 'negative'}`;
+            }
+
+            const overviewPositions = document.getElementById('overview-positions');
+            if (overviewPositions) {
+                overviewPositions.textContent = data.positions_count || state.data.positions.length || 0;
+            }
+
+            const overviewVar = document.getElementById('overview-var');
+            if (overviewVar) {
+                overviewVar.textContent = formatPercent(data.var_95 || 0);
+            }
+
+            // Update equity change
+            const equityChange = document.getElementById('overview-equity-change');
+            if (equityChange && data.daily_pnl_pct !== undefined) {
+                equityChange.textContent = `${formatPercent(data.daily_pnl_pct)} today`;
+                equityChange.className = `metric-change ${(data.daily_pnl_pct || 0) >= 0 ? 'positive' : 'negative'}`;
+            }
+
+            // Update positions detail (long/short count)
+            const positionsDetail = document.getElementById('overview-positions-detail');
+            if (positionsDetail) {
+                const positions = state.data.positions || [];
+                const longCount = positions.filter(p => p.quantity > 0).length;
+                const shortCount = positions.filter(p => p.quantity < 0).length;
+                positionsDetail.textContent = `${longCount} long, ${shortCount} short`;
+            }
+
+            // Update VaR status
+            const varStatus = document.getElementById('overview-var-status');
+            if (varStatus) {
+                const var95 = (data.var_95 || 0) * 100;
+                if (var95 > 2) {
+                    varStatus.textContent = 'Elevated';
+                    varStatus.className = 'metric-change negative';
+                } else if (var95 > 1) {
+                    varStatus.textContent = 'Moderate';
+                    varStatus.className = 'metric-change';
+                    varStatus.style.color = 'var(--warning)';
+                } else {
+                    varStatus.textContent = 'Normal';
+                    varStatus.className = 'metric-change positive';
+                }
+            }
+
+            // Update system status
+            updateSystemStatus(data);
+        }
+
+        function updateSystemStatus(data) {
+            const statusEventbus = document.getElementById('status-eventbus');
+            if (statusEventbus) {
+                statusEventbus.textContent = data.eventbus_status || (state.connected ? 'Connected' : 'Disconnected');
+                statusEventbus.style.color = (data.eventbus_status === 'Running' || state.connected) ? 'var(--positive)' : 'var(--negative)';
+            }
+
+            const statusBroker = document.getElementById('status-broker');
+            if (statusBroker) {
+                statusBroker.textContent = data.broker_status || 'Unknown';
+                statusBroker.style.color = data.broker_status === 'Connected' ? 'var(--positive)' : 'var(--warning)';
+            }
+
+            const statusAgents = document.getElementById('status-agents');
+            if (statusAgents) {
+                statusAgents.textContent = data.active_agents || '0';
+            }
+
+            const statusUptime = document.getElementById('status-uptime');
+            if (statusUptime && data.uptime) {
+                statusUptime.textContent = formatUptime(data.uptime);
+            }
+        }
+
+        function formatUptime(seconds) {
+            if (!seconds || seconds < 0) return '-';
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = Math.floor(seconds % 60);
+            if (hours > 0) {
+                return `${hours}h ${minutes}m`;
+            } else if (minutes > 0) {
+                return `${minutes}m ${secs}s`;
+            } else {
+                return `${secs}s`;
+            }
         }
 
         function updateSignals() {
             const tableBody = document.querySelector('#signals-table tbody');
-            if (state.data.signals.length === 0) {
+            if (!tableBody) return;
+
+            if (!state.data.signals || state.data.signals.length === 0) {
                 tableBody.innerHTML = '<tr><td colspan="5" class="empty-state">No signals yet</td></tr>';
                 return;
             }
 
-            tableBody.innerHTML = state.data.signals.slice(0, 20).map(signal => `
-                <tr>
-                    <td>${formatTime(signal.timestamp)}</td>
-                    <td>${signal.agent}</td>
-                    <td>${signal.symbol}</td>
-                    <td class="${signal.direction === 'buy' ? 'positive' : signal.direction === 'sell' ? 'negative' : ''}">${signal.direction.toUpperCase()}</td>
-                    <td>${(signal.strength * 100).toFixed(0)}%</td>
-                </tr>
-            `).join('');
+            tableBody.innerHTML = state.data.signals.slice(0, 20).map(signal => {
+                const direction = signal.direction || 'hold';
+                const strength = signal.strength !== undefined ? signal.strength : 0.5;
+                const agent = signal.agent || signal.agent_name || 'Unknown';
+                const symbol = signal.symbol || 'N/A';
+
+                return `
+                    <tr>
+                        <td>${formatTime(signal.timestamp)}</td>
+                        <td>${agent}</td>
+                        <td>${symbol}</td>
+                        <td class="${direction === 'buy' ? 'positive' : direction === 'sell' ? 'negative' : ''}">${direction.toUpperCase()}</td>
+                        <td>${(strength * 100).toFixed(0)}%</td>
+                    </tr>
+                `;
+            }).join('');
+
+            // Also update the heatmap when signals change
+            initSignalHeatmap();
         }
 
         function updateDecisions() {
             const feed = document.getElementById('decisions-feed');
-            if (state.data.decisions.length === 0) {
+            if (!feed) return;
+
+            const decisions = state.data.decisions || [];
+
+            if (decisions.length === 0) {
                 feed.innerHTML = '<div class="empty-state">No decisions yet</div>';
-                return;
+            } else {
+                feed.innerHTML = decisions.slice(0, 10).map(decision => {
+                    const action = decision.action || 'hold';
+                    const symbol = decision.symbol || 'N/A';
+                    const quantity = decision.quantity || 0;
+                    const price = decision.price || 0;
+                    const rationale = decision.rationale || 'No rationale provided';
+                    const signals = decision.contributing_signals || [];
+
+                    return `
+                        <div class="decision-item">
+                            <div class="decision-action ${action}">${action.toUpperCase()}</div>
+                            <div class="decision-details">
+                                <div class="decision-header">
+                                    <span class="decision-symbol">${symbol}</span>
+                                    <span class="decision-quantity">${quantity} shares @ ${formatCurrency(price)}</span>
+                                </div>
+                                <div class="decision-rationale">${rationale}</div>
+                                <div class="decision-signals">
+                                    ${signals.map(s => `<span class="decision-signal">${s}</span>`).join('')}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
             }
 
-            feed.innerHTML = state.data.decisions.slice(0, 10).map(decision => `
-                <div class="decision-item">
-                    <div class="decision-action ${decision.action}">${decision.action.toUpperCase()}</div>
-                    <div class="decision-details">
-                        <div class="decision-header">
-                            <span class="decision-symbol">${decision.symbol}</span>
-                            <span class="decision-quantity">${decision.quantity} shares @ ${formatCurrency(decision.price)}</span>
-                        </div>
-                        <div class="decision-rationale">${decision.rationale}</div>
-                        <div class="decision-signals">
-                            ${(decision.contributing_signals || []).map(s => `<span class="decision-signal">${s}</span>`).join('')}
-                        </div>
-                    </div>
-                </div>
-            `).join('');
+            const decisionsTotal = document.getElementById('decisions-total');
+            if (decisionsTotal) {
+                decisionsTotal.textContent = decisions.length;
+            }
 
-            document.getElementById('decisions-total').textContent = state.data.decisions.length;
+            // Update decisions chart
+            updateDecisionsChartData(decisions);
+
+            // Update win rate
+            const decisionsWinrate = document.getElementById('decisions-winrate');
+            if (decisionsWinrate && decisions.length > 0) {
+                // Count profitable decisions (if outcome data is available)
+                const withOutcome = decisions.filter(d => d.outcome !== undefined);
+                if (withOutcome.length > 0) {
+                    const profitable = withOutcome.filter(d => d.outcome === 'profit' || d.pnl > 0).length;
+                    decisionsWinrate.textContent = `${((profitable / withOutcome.length) * 100).toFixed(1)}%`;
+                }
+            }
+        }
+
+        function updateDecisionsChartData(decisions) {
+            if (!state.charts.decisions) return;
+
+            const profitable = decisions.filter(d => d.outcome === 'profit' || d.pnl > 0).length;
+            const unprofitable = decisions.filter(d => d.outcome === 'loss' || d.pnl < 0).length;
+            const pending = decisions.filter(d => d.outcome === undefined || d.outcome === 'pending').length;
+
+            state.charts.decisions.data.datasets[0].data = [profitable, unprofitable, pending || decisions.length - profitable - unprofitable];
+
+            try {
+                state.charts.decisions.update();
+            } catch (e) {
+                console.error('Error updating decisions chart:', e);
+            }
         }
 
         function updatePositions() {
             const positions = state.data.positions || [];
-            document.getElementById('positions-total').textContent = positions.length;
+
+            // Update positions count in multiple places
+            const positionsTotal = document.getElementById('positions-total');
+            if (positionsTotal) {
+                positionsTotal.textContent = positions.length;
+            }
+
+            const headerPositions = document.getElementById('header-positions');
+            if (headerPositions) {
+                headerPositions.textContent = positions.length;
+            }
+
+            const overviewPositions = document.getElementById('overview-positions');
+            if (overviewPositions) {
+                overviewPositions.textContent = positions.length;
+            }
 
             let totalUnrealized = 0;
             let totalExposure = 0;
 
             positions.forEach(p => {
                 totalUnrealized += p.unrealized_pnl || 0;
-                totalExposure += Math.abs(p.market_value || 0);
+                totalExposure += Math.abs(p.market_value || p.quantity * (p.current_price || 0) || 0);
             });
 
-            document.getElementById('positions-unrealized').textContent = formatCurrency(totalUnrealized);
-            document.getElementById('positions-exposure').textContent = formatCurrency(totalExposure);
-
-            const tableBody = document.querySelector('#positions-table tbody');
-            if (positions.length === 0) {
-                tableBody.innerHTML = '<tr><td colspan="7" class="empty-state">No positions</td></tr>';
-                return;
+            const positionsUnrealized = document.getElementById('positions-unrealized');
+            if (positionsUnrealized) {
+                positionsUnrealized.textContent = formatCurrency(totalUnrealized);
+                positionsUnrealized.className = `metric-value ${totalUnrealized >= 0 ? 'positive' : 'negative'}`;
             }
 
-            tableBody.innerHTML = positions.map(p => {
-                const pnlClass = (p.unrealized_pnl || 0) >= 0 ? 'positive' : 'negative';
-                return `
-                    <tr>
-                        <td><strong>${p.symbol}</strong></td>
-                        <td><span class="position-side ${p.quantity > 0 ? 'long' : 'short'}">${p.quantity > 0 ? 'LONG' : 'SHORT'}</span></td>
-                        <td>${Math.abs(p.quantity)}</td>
-                        <td>${formatCurrency(p.entry_price)}</td>
-                        <td>${formatCurrency(p.current_price)}</td>
-                        <td class="${pnlClass}">${formatCurrency(p.unrealized_pnl)}</td>
-                        <td class="${pnlClass}">${formatPercent(p.pnl_pct)}</td>
-                    </tr>
-                `;
-            }).join('');
+            const positionsExposure = document.getElementById('positions-exposure');
+            if (positionsExposure) {
+                positionsExposure.textContent = formatCurrency(totalExposure);
+            }
+
+            // Update positions table
+            const tableBody = document.querySelector('#positions-table tbody');
+            if (tableBody) {
+                if (positions.length === 0) {
+                    tableBody.innerHTML = '<tr><td colspan="7" class="empty-state">No positions</td></tr>';
+                } else {
+                    tableBody.innerHTML = positions.map(p => {
+                        const pnlClass = (p.unrealized_pnl || 0) >= 0 ? 'positive' : 'negative';
+                        return `
+                            <tr>
+                                <td><strong>${p.symbol}</strong></td>
+                                <td><span class="position-side ${p.quantity > 0 ? 'long' : 'short'}">${p.quantity > 0 ? 'LONG' : 'SHORT'}</span></td>
+                                <td>${Math.abs(p.quantity)}</td>
+                                <td>${formatCurrency(p.entry_price || 0)}</td>
+                                <td>${formatCurrency(p.current_price || 0)}</td>
+                                <td class="${pnlClass}">${formatCurrency(p.unrealized_pnl || 0)}</td>
+                                <td class="${pnlClass}">${formatPercent(p.pnl_pct || 0)}</td>
+                            </tr>
+                        `;
+                    }).join('');
+                }
+            }
+
+            // Update overview positions list (summary view)
+            const overviewPositionsList = document.getElementById('overview-positions-list');
+            if (overviewPositionsList) {
+                if (positions.length === 0) {
+                    overviewPositionsList.innerHTML = '<div class="empty-state">No open positions</div>';
+                } else {
+                    overviewPositionsList.innerHTML = positions.slice(0, 5).map(p => {
+                        const pnlClass = (p.unrealized_pnl || 0) >= 0 ? 'positive' : 'negative';
+                        return `
+                            <div class="position-row">
+                                <div class="position-info">
+                                    <span class="position-symbol">${p.symbol}</span>
+                                    <span class="position-side ${p.quantity > 0 ? 'long' : 'short'}">${p.quantity > 0 ? 'LONG' : 'SHORT'}</span>
+                                </div>
+                                <div>
+                                    <span class="${pnlClass}">${formatCurrency(p.unrealized_pnl || 0)}</span>
+                                    <span class="${pnlClass}" style="margin-left: 8px; font-size: 0.85rem;">(${formatPercent(p.pnl_pct || 0)})</span>
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+
+                    if (positions.length > 5) {
+                        overviewPositionsList.innerHTML += `<div style="text-align: center; padding: 8px; color: var(--text-muted);">+ ${positions.length - 5} more positions</div>`;
+                    }
+                }
+            }
+
+            // Update positions detail (long/short count)
+            const positionsDetail = document.getElementById('overview-positions-detail');
+            if (positionsDetail) {
+                const longCount = positions.filter(p => p.quantity > 0).length;
+                const shortCount = positions.filter(p => p.quantity < 0).length;
+                positionsDetail.textContent = `${longCount} long, ${shortCount} short`;
+            }
+
+            // Update sector chart if available
+            updateSectorChartData(positions);
+        }
+
+        function updateSectorChartData(positions) {
+            if (!state.charts.sector || positions.length === 0) return;
+
+            // Simple sector mapping (in real app, this would come from a data source)
+            const sectorMap = {
+                'AAPL': 'Technology', 'MSFT': 'Technology', 'NVDA': 'Technology', 'GOOGL': 'Technology', 'META': 'Technology',
+                'TSLA': 'Consumer', 'AMZN': 'Consumer',
+                'JPM': 'Finance', 'V': 'Finance', 'XLF': 'Finance',
+                'JNJ': 'Healthcare',
+                'XLE': 'Energy', 'CL': 'Energy',
+                'SPY': 'ETF', 'QQQ': 'ETF', 'IWM': 'ETF', 'DIA': 'ETF',
+                'GLD': 'Commodities', 'SLV': 'Commodities', 'GC': 'Commodities', 'SI': 'Commodities'
+            };
+
+            const sectorValues = {};
+            positions.forEach(p => {
+                const sector = sectorMap[p.symbol] || 'Other';
+                const value = Math.abs(p.market_value || p.quantity * (p.current_price || 0) || 0);
+                sectorValues[sector] = (sectorValues[sector] || 0) + value;
+            });
+
+            const labels = Object.keys(sectorValues);
+            const data = Object.values(sectorValues);
+
+            if (labels.length > 0) {
+                state.charts.sector.data.labels = labels;
+                state.charts.sector.data.datasets[0].data = data;
+                state.charts.sector.update();
+            }
         }
 
         function updateRisk(data) {
             if (!data) return;
 
-            document.getElementById('risk-var-95').textContent = formatPercent(data.var_95 || 0);
-            document.getElementById('risk-var-99').textContent = formatPercent(data.var_99 || 0);
-            document.getElementById('risk-drawdown').textContent = formatPercent(data.current_drawdown || 0);
-            document.getElementById('risk-leverage').textContent = `${(data.leverage || 0).toFixed(1)}x`;
+            const riskVar95 = document.getElementById('risk-var-95');
+            if (riskVar95) {
+                riskVar95.textContent = formatPercent(data.var_95 || 0);
+            }
+
+            const riskVar99 = document.getElementById('risk-var-99');
+            if (riskVar99) {
+                riskVar99.textContent = formatPercent(data.var_99 || 0);
+            }
+
+            const riskDrawdown = document.getElementById('risk-drawdown');
+            if (riskDrawdown) {
+                riskDrawdown.textContent = formatPercent(data.current_drawdown || 0);
+                riskDrawdown.className = `metric-value ${(data.current_drawdown || 0) > 0.05 ? 'negative' : ''}`;
+            }
+
+            const riskLeverage = document.getElementById('risk-leverage');
+            if (riskLeverage) {
+                riskLeverage.textContent = `${(data.leverage || 0).toFixed(1)}x`;
+            }
 
             // Update gauges
             updateGauge('gauge-var', 'gauge-var-value', (data.var_95 || 0) * 100 / 3, `${((data.var_95 || 0) * 100).toFixed(1)}%`);
@@ -2425,6 +2834,17 @@ Warnings:            0
             updateLimitBar('position', data.position_limit_util || 0);
             updateLimitBar('sector', data.sector_limit_util || 0);
             updateLimitBar('daily', data.daily_loss_util || 0);
+
+            // Update drawdown chart
+            if (data.current_drawdown !== undefined) {
+                updateDrawdownChart(data.current_drawdown);
+            }
+
+            // Also update overview VaR
+            const overviewVar = document.getElementById('overview-var');
+            if (overviewVar) {
+                overviewVar.textContent = formatPercent(data.var_95 || 0);
+            }
         }
 
         function updateGauge(pathId, valueId, percent, text) {
@@ -2462,14 +2882,53 @@ Warnings:            0
         function updatePerformance(data) {
             if (!data) return;
 
-            document.getElementById('perf-total-return').textContent = formatPercent(data.total_return || 0);
-            document.getElementById('perf-sharpe').textContent = data.sharpe ? data.sharpe.toFixed(2) : '-';
-            document.getElementById('perf-sortino').textContent = data.sortino ? data.sortino.toFixed(2) : '-';
-            document.getElementById('perf-maxdd').textContent = formatPercent(data.max_drawdown || 0);
-            document.getElementById('perf-winrate').textContent = data.win_rate ? `${(data.win_rate * 100).toFixed(1)}%` : '-';
-            document.getElementById('perf-profitfactor').textContent = data.profit_factor ? data.profit_factor.toFixed(2) : '-';
-            document.getElementById('perf-avgwin').textContent = data.avg_win ? formatCurrency(data.avg_win) : '-';
-            document.getElementById('perf-avgloss').textContent = data.avg_loss ? formatCurrency(data.avg_loss) : '-';
+            const updateElement = (id, value) => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = value;
+            };
+
+            updateElement('perf-total-return', formatPercent(data.total_return || 0));
+            updateElement('perf-sharpe', data.sharpe !== undefined ? data.sharpe.toFixed(2) : '-');
+            updateElement('perf-sortino', data.sortino !== undefined ? data.sortino.toFixed(2) : '-');
+            updateElement('perf-maxdd', formatPercent(data.max_drawdown || 0));
+            updateElement('perf-winrate', data.win_rate !== undefined ? `${(data.win_rate * 100).toFixed(1)}%` : '-');
+            updateElement('perf-profitfactor', data.profit_factor !== undefined ? data.profit_factor.toFixed(2) : '-');
+            updateElement('perf-avgwin', data.avg_win !== undefined ? formatCurrency(data.avg_win) : '-');
+            updateElement('perf-avgloss', data.avg_loss !== undefined ? formatCurrency(data.avg_loss) : '-');
+
+            // Update perf equity chart if we have equity history
+            if (data.equity_history && state.charts.perfEquity) {
+                const labels = data.equity_history.map(e => formatTime(e.timestamp));
+                const values = data.equity_history.map(e => e.value);
+
+                state.charts.perfEquity.data.labels = labels;
+                state.charts.perfEquity.data.datasets[0].data = values;
+
+                if (data.benchmark_history) {
+                    state.charts.perfEquity.data.datasets[1].data = data.benchmark_history.map(e => e.value);
+                }
+
+                try {
+                    state.charts.perfEquity.update();
+                } catch (e) {
+                    console.error('Error updating perf equity chart:', e);
+                }
+            }
+
+            // Update daily pnl chart if we have daily pnl history
+            if (data.daily_pnl_history && state.charts.dailyPnl) {
+                const labels = data.daily_pnl_history.map(e => e.date || formatTime(e.timestamp));
+                const values = data.daily_pnl_history.map(e => e.pnl || e.value);
+
+                state.charts.dailyPnl.data.labels = labels;
+                state.charts.dailyPnl.data.datasets[0].data = values;
+
+                try {
+                    state.charts.dailyPnl.update();
+                } catch (e) {
+                    console.error('Error updating daily pnl chart:', e);
+                }
+            }
         }
 
         function updateAlerts() {
@@ -2510,33 +2969,130 @@ Warnings:            0
         }
 
         function updateAgents(data) {
-            // Update agent cards with real data when available
-            // This is a placeholder for when agent status updates arrive
+            if (!data) return;
+
+            // Update agent cards with real data
+            const agentCards = document.querySelectorAll('#agents-list .agent-card');
+
+            // Map agent names to their data
+            const agentMap = {
+                'CIO Agent': data.cio || data.CIOAgent || {},
+                'Risk Agent': data.risk || data.RiskAgent || {},
+                'Compliance Agent': data.compliance || data.ComplianceAgent || {},
+                'Execution Agent': data.execution || data.ExecutionAgent || {},
+                'Macro Agent': data.macro || data.MacroAgent || {},
+                'StatArb Agent': data.stat_arb || data.StatArbAgent || {},
+                'Momentum Agent': data.momentum || data.MomentumAgent || {},
+                'MarketMaking Agent': data.market_making || data.MarketMakingAgent || {},
+                'OptionsVol Agent': data.options_vol || data.OptionsVolAgent || {}
+            };
+
+            agentCards.forEach(card => {
+                const nameEl = card.querySelector('.agent-name');
+                if (!nameEl) return;
+
+                const agentName = nameEl.textContent;
+                const agentData = agentMap[agentName];
+
+                if (agentData) {
+                    // Update status
+                    const statusDot = card.querySelector('.agent-status-dot');
+                    const statusText = card.querySelector('.agent-status span:last-child');
+
+                    if (statusDot && statusText) {
+                        const status = agentData.status || 'running';
+                        statusDot.className = `agent-status-dot ${status}`;
+                        statusText.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+                    }
+
+                    // Update metrics
+                    const metricsEl = card.querySelector('.agent-metrics');
+                    if (metricsEl && agentData.metrics) {
+                        const metrics = agentData.metrics;
+                        let metricsHTML = '';
+
+                        if (metrics.decisions !== undefined) metricsHTML += `<span>Decisions: ${metrics.decisions}</span>`;
+                        if (metrics.signals !== undefined) metricsHTML += `<span>Signals: ${metrics.signals}</span>`;
+                        if (metrics.validations !== undefined) metricsHTML += `<span>Validations: ${metrics.validations}</span>`;
+                        if (metrics.rejections !== undefined) metricsHTML += `<span>Rejections: ${metrics.rejections}</span>`;
+                        if (metrics.checks !== undefined) metricsHTML += `<span>Checks: ${metrics.checks}</span>`;
+                        if (metrics.blocks !== undefined) metricsHTML += `<span>Blocks: ${metrics.blocks}</span>`;
+                        if (metrics.orders !== undefined) metricsHTML += `<span>Orders: ${metrics.orders}</span>`;
+                        if (metrics.fill_rate !== undefined) metricsHTML += `<span>Fill Rate: ${(metrics.fill_rate * 100).toFixed(0)}%</span>`;
+                        if (metrics.conviction !== undefined) metricsHTML += `<span>Conviction: ${metrics.conviction.toFixed(2)}</span>`;
+
+                        if (metricsHTML) {
+                            metricsEl.innerHTML = metricsHTML;
+                        }
+                    }
+                }
+            });
         }
 
         function initSignalHeatmap() {
             const agents = ['Macro', 'StatArb', 'Momentum', 'MarketMaking', 'OptionsVol'];
             const symbols = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'TSLA'];
 
+            // Build signal lookup from actual data
+            const signalLookup = {};
+            (state.data.signals || []).forEach(signal => {
+                const key = `${signal.agent}-${signal.symbol}`;
+                // Keep most recent signal per agent-symbol pair
+                if (!signalLookup[key] || new Date(signal.timestamp) > new Date(signalLookup[key].timestamp)) {
+                    signalLookup[key] = signal;
+                }
+            });
+
             const heatmap = document.getElementById('signal-heatmap');
+            if (!heatmap) return;
+
             heatmap.innerHTML = agents.map(agent => {
                 const cells = symbols.map(symbol => {
-                    const value = (Math.random() * 2 - 1).toFixed(2);
+                    // Try to find matching signal data
+                    const agentVariants = [agent, `${agent}Agent`, agent.toLowerCase()];
+                    let signal = null;
+
+                    for (const agentName of agentVariants) {
+                        const key = `${agentName}-${symbol}`;
+                        if (signalLookup[key]) {
+                            signal = signalLookup[key];
+                            break;
+                        }
+                    }
+
+                    let value = 0;
+                    if (signal) {
+                        // Convert signal direction and strength to a value between -1 and 1
+                        const strength = signal.strength || 0.5;
+                        if (signal.direction === 'buy') {
+                            value = strength;
+                        } else if (signal.direction === 'sell') {
+                            value = -strength;
+                        } else {
+                            value = 0;
+                        }
+                    }
+
                     const cls = value > 0.5 ? 'strong-buy' : value > 0.2 ? 'buy' : value < -0.5 ? 'strong-sell' : value < -0.2 ? 'sell' : 'neutral';
-                    return `<div class="heatmap-cell ${cls}" data-tooltip="${agent}: ${symbol}">${value}</div>`;
+                    const displayValue = value.toFixed(2);
+                    return `<div class="heatmap-cell ${cls}" data-tooltip="${agent}: ${symbol}">${displayValue}</div>`;
                 }).join('');
                 return `<div class="heatmap-row"><div class="heatmap-label">${agent}</div>${cells}</div>`;
             }).join('');
         }
 
         function updateEquityChart(pnl) {
-            if (!state.charts.equity) return;
+            if (!state.charts.equity) {
+                initEquityChart();
+                if (!state.charts.equity) return;
+            }
 
             const chart = state.charts.equity;
             const now = new Date().toLocaleTimeString();
+            const equity = pnl.equity || pnl.total_equity || state.data.overview.equity || 100000;
 
             chart.data.labels.push(now);
-            chart.data.datasets[0].data.push(pnl.equity);
+            chart.data.datasets[0].data.push(equity);
 
             // Keep last 50 points
             if (chart.data.labels.length > 50) {
@@ -2544,7 +3100,36 @@ Warnings:            0
                 chart.data.datasets[0].data.shift();
             }
 
-            chart.update('none');
+            try {
+                chart.update('none');
+            } catch (e) {
+                console.error('Error updating equity chart:', e);
+            }
+        }
+
+        function updateDrawdownChart(drawdownValue) {
+            if (!state.charts.drawdown) {
+                initRiskCharts();
+                if (!state.charts.drawdown) return;
+            }
+
+            const chart = state.charts.drawdown;
+            const now = new Date().toLocaleTimeString();
+
+            chart.data.labels.push(now);
+            chart.data.datasets[0].data.push(drawdownValue * 100);
+
+            // Keep last 50 points
+            if (chart.data.labels.length > 50) {
+                chart.data.labels.shift();
+                chart.data.datasets[0].data.shift();
+            }
+
+            try {
+                chart.update('none');
+            } catch (e) {
+                console.error('Error updating drawdown chart:', e);
+            }
         }
 
         // ========================================
@@ -2617,10 +3202,48 @@ Warnings:            0
         }
 
         function updatePnLDisplay(pnl) {
-            // Update overview P&L displays
+            if (!pnl) return;
+
+            const dailyPnl = pnl.daily_pnl || pnl.pnl || 0;
+            const equity = pnl.equity || pnl.total_equity || state.data.overview.equity;
+
+            // Update header P&L
             const headerPnl = document.getElementById('header-pnl');
-            headerPnl.textContent = formatCurrency(pnl.daily_pnl || 0);
-            headerPnl.className = `header-metric-value ${(pnl.daily_pnl || 0) >= 0 ? 'positive' : 'negative'}`;
+            if (headerPnl) {
+                headerPnl.textContent = formatCurrency(dailyPnl);
+                headerPnl.className = `header-metric-value ${dailyPnl >= 0 ? 'positive' : 'negative'}`;
+            }
+
+            // Update overview P&L
+            const overviewDailyPnl = document.getElementById('overview-daily-pnl');
+            if (overviewDailyPnl) {
+                overviewDailyPnl.textContent = formatCurrency(dailyPnl);
+            }
+
+            // Update overview equity
+            if (equity) {
+                const overviewEquity = document.getElementById('overview-equity');
+                if (overviewEquity) {
+                    overviewEquity.textContent = formatCurrency(equity);
+                }
+                state.data.overview.equity = equity;
+            }
+
+            // Update P&L percentage if available
+            const pnlPct = pnl.daily_pnl_pct || pnl.pnl_pct;
+            if (pnlPct !== undefined) {
+                const overviewPnlPct = document.getElementById('overview-daily-pnl-pct');
+                if (overviewPnlPct) {
+                    overviewPnlPct.textContent = formatPercent(pnlPct);
+                    overviewPnlPct.className = `metric-change ${pnlPct >= 0 ? 'positive' : 'negative'}`;
+                }
+
+                const equityChange = document.getElementById('overview-equity-change');
+                if (equityChange) {
+                    equityChange.textContent = `${formatPercent(pnlPct)} today`;
+                    equityChange.className = `metric-change ${pnlPct >= 0 ? 'positive' : 'negative'}`;
+                }
+            }
         }
 
         // ========================================
@@ -2729,8 +3352,20 @@ Warnings:            0
         // Initialization
         // ========================================
         document.addEventListener('DOMContentLoaded', () => {
-            // Initialize charts for active tab
+            console.log('Dashboard initializing...');
+
+            // Initialize all charts upfront to avoid timing issues
             initEquityChart();
+
+            // Small delay to ensure chart canvases are ready
+            setTimeout(() => {
+                initPerformanceCharts();
+                initRiskCharts();
+                initSectorChart();
+                initDecisionsChart();
+                initSentimentChart();
+                console.log('All charts initialized');
+            }, 100);
 
             // Connect WebSocket
             connectWebSocket();
@@ -2739,12 +3374,15 @@ Warnings:            0
             fetchInitialData();
 
             // Set report date
-            document.getElementById('report-date').textContent = new Date().toLocaleDateString('en-US', {
-                weekday: 'long',
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric'
-            });
+            const reportDate = document.getElementById('report-date');
+            if (reportDate) {
+                reportDate.textContent = new Date().toLocaleDateString('en-US', {
+                    weekday: 'long',
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric'
+                });
+            }
 
             // Initialize signal heatmap
             initSignalHeatmap();
@@ -2752,7 +3390,7 @@ Warnings:            0
             // If no data after 3 seconds, use demo data
             setTimeout(() => {
                 if (!state.connected && Object.keys(state.data.overview).length === 0) {
-                    console.log('Loading demo data...');
+                    console.log('No connection, loading demo data...');
                     generateDemoData();
                 }
             }, 3000);

@@ -101,6 +101,10 @@ from agents.transaction_reporting_agent import TransactionReportingAgent
 
 from data.market_data import MarketDataManager, SymbolConfig
 
+# Dashboard integration for real-time monitoring
+from dashboard.server import DashboardServer, create_dashboard_server
+from dashboard.broker_sync import BrokerMetricsSync, create_broker_sync
+
 # SOLID Refactoring: AgentFactory for improved SRP
 from core.agent_factory import AgentFactory, AgentFactoryConfig
 
@@ -183,6 +187,10 @@ class TradingFirmOrchestrator:
 
         # Audit log backup manager
         self._backup_manager: AuditLogBackupManager | None = None
+
+        # Dashboard server for real-time monitoring
+        self._dashboard_server: DashboardServer | None = None
+        self._broker_sync: BrokerMetricsSync | None = None
 
         # Infrastructure components
         self._contract_specs: ContractSpecsManager | None = None
@@ -366,6 +374,9 @@ class TradingFirmOrchestrator:
             barrier_timeout=event_bus_config.get("sync_barrier_timeout_seconds", 10.0),
         )
 
+        # Initialize dashboard server (must be after event bus creation)
+        await self._initialize_dashboard()
+
         # Initialize broker connection
         await self._initialize_broker()
 
@@ -525,6 +536,113 @@ class TradingFirmOrchestrator:
             logger.info("=" * 50)
         else:
             logger.info("Health check server disabled in config")
+
+    async def _initialize_dashboard(self) -> None:
+        """
+        Initialize the real-time dashboard server.
+
+        The dashboard server shares the EventBus with the trading system,
+        enabling real-time streaming of events to WebSocket clients.
+        """
+        logger.info("Initializing dashboard server...")
+
+        dashboard_config = self._config.get("dashboard", {})
+
+        if not dashboard_config.get("enabled", True):
+            logger.info("Dashboard server disabled in config")
+            return
+
+        # Use a different port than health check to avoid conflicts
+        # Health check uses 8080, dashboard uses 8081 by default
+        dashboard_port = dashboard_config.get("port", 8081)
+        dashboard_host = dashboard_config.get("host", "0.0.0.0")
+
+        # Create dashboard server with shared EventBus
+        self._dashboard_server = create_dashboard_server(
+            event_bus=self._event_bus,
+            host=dashboard_host,
+            port=dashboard_port,
+        )
+
+        logger.info("=" * 50)
+        logger.info("DASHBOARD SERVER:")
+        logger.info(f"  Dashboard:  http://{dashboard_host}:{dashboard_port}/")
+        logger.info(f"  WebSocket:  ws://{dashboard_host}:{dashboard_port}/ws")
+        logger.info(f"  API:        http://{dashboard_host}:{dashboard_port}/api/status")
+        logger.info("=" * 50)
+
+    async def _start_dashboard(self) -> asyncio.Task | None:
+        """Start the dashboard server in background."""
+        if not self._dashboard_server:
+            return None
+
+        try:
+            import uvicorn
+
+            dashboard_config = self._config.get("dashboard", {})
+            dashboard_port = dashboard_config.get("port", 8081)
+            dashboard_host = dashboard_config.get("host", "0.0.0.0")
+
+            # Create uvicorn config for async server
+            config = uvicorn.Config(
+                self._dashboard_server.app,
+                host=dashboard_host,
+                port=dashboard_port,
+                log_level="warning",  # Reduce noise in logs
+                access_log=False,
+            )
+            server = uvicorn.Server(config)
+
+            # Start server in background task
+            task = asyncio.create_task(server.serve())
+            logger.info(f"Dashboard server started on http://{dashboard_host}:{dashboard_port}")
+            return task
+
+        except ImportError:
+            logger.warning(
+                "uvicorn not installed - dashboard server will not start. "
+                "Install with: pip install uvicorn"
+            )
+            return None
+        except Exception as e:
+            logger.exception(f"Failed to start dashboard server: {e}")
+            return None
+
+    async def _start_broker_sync(self) -> None:
+        """
+        Start broker metrics sync for real-time P&L in dashboard.
+
+        This bridges IB portfolio data to the dashboard, ensuring actual
+        account values, positions, and P&L are displayed correctly.
+        """
+        if not self._broker or not self._dashboard_server:
+            logger.debug("Broker sync skipped: broker or dashboard not available")
+            return
+
+        try:
+            dashboard_config = self._config.get("dashboard", {})
+            sync_config = dashboard_config.get("broker_sync", {})
+
+            # Create broker sync
+            self._broker_sync = create_broker_sync(
+                broker=self._broker,
+                dashboard_server=self._dashboard_server,
+                performance_metrics=None,  # Will integrate later if needed
+                position_view=None,  # Will integrate later if needed
+                portfolio_interval=sync_config.get("portfolio_interval_seconds", 2.0),
+                performance_interval=sync_config.get("performance_interval_seconds", 5.0),
+            )
+
+            # Start sync
+            await self._broker_sync.start()
+
+            logger.info(
+                "Broker metrics sync started - dashboard will show real IB P&L and positions"
+            )
+
+        except Exception as e:
+            logger.exception(f"Failed to start broker sync: {e}")
+            self._broker_sync = None
 
     async def _initialize_broker(self) -> None:
         """Initialize broker connection."""
@@ -723,6 +841,11 @@ class TradingFirmOrchestrator:
         if self._surveillance_agent and self._compliance_notifier:
             self._surveillance_agent.set_compliance_notifier(self._compliance_notifier)
             logger.info("  ComplianceOfficerNotifier -> SurveillanceAgent")
+
+        # Wire Dashboard Server to orchestrator for real-time data access
+        if self._dashboard_server:
+            self._dashboard_server.set_orchestrator(self)
+            logger.info("  Orchestrator -> DashboardServer (real-time data)")
 
         logger.info("Component wiring complete")
 
@@ -1015,19 +1138,34 @@ class TradingFirmOrchestrator:
             monitoring_task = asyncio.create_task(self._run_monitoring())
             agent_tasks.append(monitoring_task)
 
+        # Start dashboard server (after broker connection for event streaming)
+        dashboard_task = await self._start_dashboard()
+        if dashboard_task:
+            agent_tasks.append(dashboard_task)
+
+        # Start broker metrics sync for real P&L in dashboard
+        if self._broker and self._dashboard_server:
+            await self._start_broker_sync()
+
         self._audit_logger.log_system_event(
             "started",
             {
                 "signal_agents": [a.name for a in self._signal_agents],
                 "broker_connected": self._broker.is_connected,
                 "account_id": self._broker.account_id if self._broker.is_connected else None,
+                "dashboard_enabled": self._dashboard_server is not None,
             },
         )
+
+        dashboard_config = self._config.get("dashboard", {})
+        dashboard_port = dashboard_config.get("port", 8081)
 
         logger.info("=" * 60)
         logger.info("TRADING SYSTEM STARTED")
         logger.info(f"  Broker: {'CONNECTED' if self._broker.is_connected else 'SIMULATED'}")
         logger.info(f"  Mode: {self._config.get('firm', {}).get('mode', 'paper').upper()}")
+        if self._dashboard_server:
+            logger.info(f"  Dashboard: http://localhost:{dashboard_port}/")
         logger.info("  Waiting for market data events...")
         logger.info("=" * 60)
 
@@ -1136,6 +1274,15 @@ class TradingFirmOrchestrator:
         if self._health_server:
             self._health_server.stop()
             logger.info("  [OK] Health check server stopped")
+
+        # Stop broker sync first (before dashboard)
+        if self._broker_sync:
+            await _stop_with_timeout(self._broker_sync.stop(), "Broker metrics sync")
+
+        # Stop dashboard server
+        # The uvicorn server task will be cancelled when agent_tasks are cancelled
+        if self._dashboard_server:
+            logger.info("  [OK] Dashboard server stopping (task will be cancelled)")
 
         # Stop market data first
         if self._market_data:

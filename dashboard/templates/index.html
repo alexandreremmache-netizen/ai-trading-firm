@@ -490,6 +490,17 @@
 
         function handleUpdate(data) {
             switch(data.type) {
+                case 'initial':
+                    // Handle initial state payload on WebSocket connect
+                    if (data.payload.metrics) updateMetrics(data.payload.metrics);
+                    if (data.payload.agents) updateAgents(data.payload.agents);
+                    if (data.payload.positions) updatePositions(data.payload.positions);
+                    if (data.payload.signals) updateSignals(data.payload.signals);
+                    if (data.payload.decisions) updateDecisions(data.payload.decisions);
+                    if (data.payload.risk) updateRisk(data.payload.risk);
+                    if (data.payload.equity) updateEquityChart(data.payload.equity);
+                    console.log('Initial state loaded');
+                    break;
                 case 'metrics':
                     updateMetrics(data.payload);
                     break;
@@ -537,6 +548,12 @@
             const container = document.getElementById('agentList');
             let activeCount = 0;
 
+            if (!agents || agents.length === 0) {
+                container.innerHTML = '<div class="text-secondary">No agents registered</div>';
+                document.getElementById('activeAgentCount').textContent = '0 active';
+                return;
+            }
+
             container.innerHTML = agents.map(agent => {
                 if (agent.status === 'active') activeCount++;
                 return `
@@ -579,6 +596,12 @@
 
         function updatePositions(positions) {
             const container = document.getElementById('positionsList');
+
+            if (!positions || positions.length === 0) {
+                container.innerHTML = '<div class="text-secondary text-center py-3">No open positions</div>';
+                return;
+            }
+
             container.innerHTML = positions.map(pos => `
                 <div class="position-row">
                     <div><strong>${pos.symbol}</strong></div>
@@ -594,6 +617,12 @@
 
         function updateSignals(signals) {
             const container = document.getElementById('signalMatrix');
+
+            if (!signals || signals.length === 0) {
+                container.innerHTML = '<div class="text-secondary text-center py-3">No signals yet</div>';
+                return;
+            }
+
             container.innerHTML = signals.map(signal => {
                 const dirClass = signal.direction === 'LONG' ? 'signal-long' :
                                 signal.direction === 'SHORT' ? 'signal-short' : 'signal-flat';
@@ -609,6 +638,12 @@
 
         function updateDecisions(decisions) {
             const container = document.getElementById('decisionsList');
+
+            if (!decisions || decisions.length === 0) {
+                container.innerHTML = '<div class="text-secondary text-center py-3">No decisions yet</div>';
+                return;
+            }
+
             container.innerHTML = decisions.slice(0, 20).map(dec => `
                 <div class="event-item decision mb-2">
                     <div class="d-flex justify-content-between">
@@ -624,30 +659,36 @@
         function updateRisk(risk) {
             const container = document.getElementById('riskPanel');
             const statusBadge = document.getElementById('riskStatus');
+            const limits = risk.limits || [];
 
             let overallStatus = 'bg-success';
-            if (risk.limits.some(l => l.status === 'breach')) {
-                overallStatus = 'bg-danger';
-                statusBadge.textContent = 'BREACH';
-            } else if (risk.limits.some(l => l.status === 'warning')) {
-                overallStatus = 'bg-warning';
-                statusBadge.textContent = 'WARNING';
-            } else {
+            if (limits.length === 0) {
                 statusBadge.textContent = 'OK';
+                container.innerHTML = '<div class="text-secondary">No risk limits configured</div>';
+            } else {
+                if (limits.some(l => l.status === 'breach')) {
+                    overallStatus = 'bg-danger';
+                    statusBadge.textContent = 'BREACH';
+                } else if (limits.some(l => l.status === 'warning')) {
+                    overallStatus = 'bg-warning';
+                    statusBadge.textContent = 'WARNING';
+                } else {
+                    statusBadge.textContent = 'OK';
+                }
+
+                container.innerHTML = limits.map(limit => `
+                    <div class="mb-3 risk-${limit.status}">
+                        <div class="d-flex justify-content-between">
+                            <span>${limit.name}</span>
+                            <span>${limit.current.toFixed(1)}% / ${limit.limit.toFixed(1)}%</span>
+                        </div>
+                        <div class="risk-gauge">
+                            <div class="risk-gauge-fill" style="width: ${Math.min(limit.usage, 100)}%"></div>
+                        </div>
+                    </div>
+                `).join('');
             }
             statusBadge.className = `badge ${overallStatus}`;
-
-            container.innerHTML = risk.limits.map(limit => `
-                <div class="mb-3 risk-${limit.status}">
-                    <div class="d-flex justify-content-between">
-                        <span>${limit.name}</span>
-                        <span>${limit.current.toFixed(1)}% / ${limit.limit.toFixed(1)}%</span>
-                    </div>
-                    <div class="risk-gauge">
-                        <div class="risk-gauge-fill" style="width: ${Math.min(limit.usage, 100)}%"></div>
-                    </div>
-                </div>
-            `).join('');
         }
 
         function showAlert(alert) {

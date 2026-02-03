@@ -28,12 +28,23 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Callable, Coroutine, TYPE_CHECKING
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+# Import AgentStatusTracker for comprehensive agent monitoring
+from dashboard.components.agent_status import (
+    AgentStatusTracker,
+    AgentStatus as TrackerAgentStatus,
+    AgentType,
+    AGENT_TYPE_MAPPING,
+)
+
+# Import SignalAggregator for comprehensive signal tracking and consensus
+from dashboard.components.signal_aggregation import SignalAggregator
 
 if TYPE_CHECKING:
     from core.event_bus import EventBus
@@ -64,9 +75,21 @@ class AgentInfo:
     event_count: int = 0
     latency_ms: float = 0.0
     error_message: str | None = None
+    error_count: int = 0
+    uptime_seconds: float = 0.0
+    health_score: float = 100.0  # 0-100 scale for health display
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
+        # Calculate health score based on status and errors
+        health = self.health_score
+        if self.status == AgentStatus.ERROR:
+            health = max(0, 50 - self.error_count * 5)
+        elif self.status == AgentStatus.STOPPED:
+            health = 0
+        elif self.status == AgentStatus.IDLE:
+            health = max(50, health - 10)
+
         return {
             "name": self.name,
             "type": self.type,
@@ -75,6 +98,9 @@ class AgentInfo:
             "event_count": self.event_count,
             "latency_ms": round(self.latency_ms, 2),
             "error_message": self.error_message,
+            "error_count": self.error_count,
+            "uptime_seconds": round(self.uptime_seconds, 1),
+            "health_score": round(health, 1),
         }
 
 
@@ -360,6 +386,100 @@ class DashboardState:
         # Lock for thread safety
         self._lock = asyncio.Lock()
 
+        # Latest event record for broadcasting (set by _handle_event)
+        self._latest_event_record: dict | None = None
+
+        # Callback for broadcasting events to WebSocket clients
+        self._broadcast_callback: Callable[[dict], None] | None = None
+
+        # References to trading system components (set via set_orchestrator)
+        self._broker: Any = None
+        self._orchestrator: Any = None
+        self._risk_agent: Any = None
+        self._cio_agent: Any = None
+        self._signal_agents: list[Any] = []
+        self._execution_agent: Any = None
+        self._compliance_agent: Any = None
+
+        # Comprehensive agent status tracker for advanced health monitoring
+        self._agent_tracker = AgentStatusTracker(idle_threshold_seconds=30.0)
+
+        # Signal aggregator for comprehensive signal tracking and consensus
+        self._signal_aggregator = SignalAggregator()
+
+        # WebSocket broadcast callback for real-time signal updates
+        self._ws_broadcast: Callable[[dict], Coroutine[Any, Any, None]] | None = None
+
+    def set_ws_broadcast(self, broadcast_fn: Callable[[dict], Coroutine[Any, Any, None]]) -> None:
+        """Set the WebSocket broadcast callback for real-time updates."""
+        self._ws_broadcast = broadcast_fn
+
+    def set_orchestrator(self, orchestrator: Any) -> None:
+        """
+        Set the orchestrator reference for pulling real-time data.
+
+        Args:
+            orchestrator: TradingFirmOrchestrator instance
+        """
+        self._orchestrator = orchestrator
+        # Extract component references from orchestrator
+        if hasattr(orchestrator, '_broker'):
+            self._broker = orchestrator._broker
+        if hasattr(orchestrator, '_risk_agent'):
+            self._risk_agent = orchestrator._risk_agent
+        if hasattr(orchestrator, '_cio_agent'):
+            self._cio_agent = orchestrator._cio_agent
+        if hasattr(orchestrator, '_signal_agents'):
+            self._signal_agents = orchestrator._signal_agents
+        if hasattr(orchestrator, '_execution_agent'):
+            self._execution_agent = orchestrator._execution_agent
+        if hasattr(orchestrator, '_compliance_agent'):
+            self._compliance_agent = orchestrator._compliance_agent
+
+        # Pre-register agents if available
+        self._register_agents_from_orchestrator()
+        logger.info("Dashboard connected to orchestrator")
+
+    def _register_agents_from_orchestrator(self) -> None:
+        """Pre-register all agents from the orchestrator."""
+        # Register signal agents
+        for agent in self._signal_agents:
+            if hasattr(agent, 'name'):
+                self._agents[agent.name] = AgentInfo(
+                    name=agent.name,
+                    type="Signal",
+                    status=AgentStatus.IDLE,
+                )
+
+        # Register core agents
+        if self._cio_agent and hasattr(self._cio_agent, 'name'):
+            self._agents[self._cio_agent.name] = AgentInfo(
+                name=self._cio_agent.name,
+                type="Decision",
+                status=AgentStatus.IDLE,
+            )
+
+        if self._risk_agent and hasattr(self._risk_agent, 'name'):
+            self._agents[self._risk_agent.name] = AgentInfo(
+                name=self._risk_agent.name,
+                type="Validation",
+                status=AgentStatus.IDLE,
+            )
+
+        if self._compliance_agent and hasattr(self._compliance_agent, 'name'):
+            self._agents[self._compliance_agent.name] = AgentInfo(
+                name=self._compliance_agent.name,
+                type="Validation",
+                status=AgentStatus.IDLE,
+            )
+
+        if self._execution_agent and hasattr(self._execution_agent, 'name'):
+            self._agents[self._execution_agent.name] = AgentInfo(
+                name=self._execution_agent.name,
+                type="Execution",
+                status=AgentStatus.IDLE,
+            )
+
     async def initialize(self) -> None:
         """Initialize state and subscribe to events."""
         if self._event_bus:
@@ -427,6 +547,9 @@ class DashboardState:
                     self._handle_kill_switch_event(event)
                 elif event.event_type == EventType.MARKET_DATA:
                     self._handle_market_data_event(event)
+
+            # Store event record for broadcasting (outside lock)
+            self._latest_event_record = event_record
 
         except Exception as e:
             logger.exception(f"Error handling event: {e}")
@@ -636,11 +759,123 @@ class DashboardState:
         self._equity_curve.append((timestamp, value))
 
     def get_agents(self) -> list[dict]:
-        """Get all agent statuses."""
-        return [agent.to_dict() for agent in self._agents.values()]
+        """
+        Get all agent statuses from the orchestrator with comprehensive health data.
+
+        Returns real-time agent status including:
+        - Running state (active/idle/stopped/error)
+        - Events processed count
+        - Error count
+        - Last heartbeat time
+        - Uptime
+        - Health score
+        """
+        # Try to get live status from orchestrator
+        if self._orchestrator:
+            try:
+                orchestrator_status = self._orchestrator.get_status()
+                agents_data = orchestrator_status.get("agents", {})
+
+                # Helper function to update agent from status dict
+                def update_agent_from_status(agent: AgentInfo, agent_status: dict) -> None:
+                    """Update AgentInfo fields from orchestrator status dict."""
+                    running = agent_status.get("running", False)
+                    errors = agent_status.get("errors", 0)
+
+                    # Set status based on running state and errors
+                    if errors > 0 and not running:
+                        agent.status = AgentStatus.ERROR
+                        agent.error_message = f"{errors} errors occurred"
+                    elif running:
+                        agent.status = AgentStatus.ACTIVE
+                        agent.error_message = None
+                    else:
+                        agent.status = AgentStatus.STOPPED
+
+                    # Use correct field names from BaseAgent.get_status()
+                    agent.event_count = agent_status.get("events_processed", 0)
+                    agent.error_count = errors
+                    agent.uptime_seconds = agent_status.get("uptime_seconds", 0.0)
+
+                    # Parse last_heartbeat for display
+                    last_hb = agent_status.get("last_heartbeat")
+                    if last_hb:
+                        try:
+                            agent.last_event_time = datetime.fromisoformat(last_hb.replace("Z", "+00:00"))
+                        except (ValueError, TypeError):
+                            pass
+
+                # Update our tracked agents with live status from signal agents
+                for agent_status in agents_data.get("signal", []):
+                    if agent_status is None:
+                        continue
+                    name = agent_status.get("name")
+                    if name:
+                        if name not in self._agents:
+                            self._agents[name] = AgentInfo(name=name, type="Signal")
+                        update_agent_from_status(self._agents[name], agent_status)
+
+                # Update core agents with comprehensive status
+                for agent_type, type_label in [
+                    ("cio", "Decision"),
+                    ("risk", "Validation"),
+                    ("compliance", "Validation"),
+                    ("execution", "Execution"),
+                    ("surveillance", "Surveillance"),
+                    ("transaction_reporting", "Reporting"),
+                ]:
+                    agent_status = agents_data.get(agent_type)
+                    if agent_status:
+                        name = agent_status.get("name")
+                        if name:
+                            if name not in self._agents:
+                                self._agents[name] = AgentInfo(name=name, type=type_label)
+                            update_agent_from_status(self._agents[name], agent_status)
+
+            except Exception as e:
+                logger.warning(f"Error getting agent status from orchestrator: {e}")
+
+        # Sort agents by type for consistent display order
+        type_order = {"Decision": 0, "Signal": 1, "Validation": 2, "Execution": 3, "Surveillance": 4, "Reporting": 5}
+        sorted_agents = sorted(
+            self._agents.values(),
+            key=lambda a: (type_order.get(a.type, 99), a.name)
+        )
+        return [agent.to_dict() for agent in sorted_agents]
+
+    async def get_positions_async(self) -> list[dict]:
+        """Get all positions from broker asynchronously."""
+        positions = []
+
+        # Try to get positions from broker
+        if self._broker and hasattr(self._broker, 'is_connected') and self._broker.is_connected:
+            try:
+                portfolio_state = await self._broker.get_portfolio_state()
+                for symbol, pos in portfolio_state.positions.items():
+                    pnl_pct = 0.0
+                    if pos.avg_cost > 0:
+                        pnl_pct = ((pos.market_value / (pos.avg_cost * pos.quantity)) - 1) * 100 if pos.quantity != 0 else 0
+                    positions.append({
+                        "symbol": symbol,
+                        "quantity": pos.quantity,
+                        "entry_price": pos.avg_cost,
+                        "current_price": pos.market_value / pos.quantity if pos.quantity != 0 else 0,
+                        "pnl": round(pos.unrealized_pnl, 2),
+                        "pnl_pct": round(pnl_pct, 2),
+                        "market_value": round(pos.market_value, 2),
+                    })
+            except Exception as e:
+                logger.warning(f"Error getting positions from broker: {e}")
+
+        # Fall back to tracked positions if broker not available
+        if not positions:
+            positions = [pos.to_dict() for pos in self._positions.values()]
+
+        return positions
 
     def get_positions(self) -> list[dict]:
-        """Get all positions."""
+        """Get all positions (sync wrapper)."""
+        # Return tracked positions - async method is called by endpoint
         return [pos.to_dict() for pos in self._positions.values()]
 
     def get_signals(self) -> list[dict]:
@@ -651,12 +886,120 @@ class DashboardState:
         """Get recent decisions."""
         return [dec.to_dict() for dec in self._decisions]
 
+    async def get_metrics_async(self) -> dict:
+        """Get portfolio metrics from broker asynchronously."""
+        metrics = self._metrics.to_dict()
+
+        # Try to get real metrics from broker
+        if self._broker and hasattr(self._broker, 'is_connected') and self._broker.is_connected:
+            try:
+                portfolio_state = await self._broker.get_portfolio_state()
+
+                # Update with real data
+                metrics["today_pnl"] = round(portfolio_state.daily_pnl, 2)
+                metrics["position_count"] = len(portfolio_state.positions)
+
+                # Calculate total unrealized P&L
+                total_pnl = sum(pos.unrealized_pnl for pos in portfolio_state.positions.values())
+                metrics["total_pnl"] = round(total_pnl, 2)
+
+            except Exception as e:
+                logger.warning(f"Error getting metrics from broker: {e}")
+
+        # Try to get risk metrics from risk agent
+        if self._risk_agent and hasattr(self._risk_agent, 'get_status'):
+            try:
+                risk_status = self._risk_agent.get_status()
+                risk_state = risk_status.get("risk_state", {})
+                if "max_drawdown_pct" in risk_state:
+                    metrics["drawdown"] = round(risk_state.get("max_drawdown_pct", 0), 4)
+            except Exception as e:
+                logger.warning(f"Error getting metrics from risk agent: {e}")
+
+        return metrics
+
     def get_metrics(self) -> dict:
-        """Get portfolio metrics."""
+        """Get portfolio metrics (sync wrapper)."""
         return self._metrics.to_dict()
 
     def get_risk_limits(self) -> list[dict]:
-        """Get risk limit statuses."""
+        """Get risk limit statuses from the risk agent."""
+        # Try to get real limits from risk agent
+        if self._risk_agent and hasattr(self._risk_agent, 'get_status'):
+            try:
+                risk_status = self._risk_agent.get_status()
+                risk_state = risk_status.get("risk_state", {})
+                limits = risk_status.get("limits", {})
+
+                # Build risk limits from actual agent state
+                result = []
+
+                # Position size limit
+                max_pos_pct = limits.get("max_position_size_pct", 5.0)
+                current_pos_pct = risk_state.get("largest_position_pct", 0.0)
+                usage = (current_pos_pct / max_pos_pct * 100) if max_pos_pct > 0 else 0
+                result.append({
+                    "name": "Position Size",
+                    "current": round(current_pos_pct, 2),
+                    "limit": round(max_pos_pct, 2),
+                    "usage": round(usage, 1),
+                    "status": "breach" if usage >= 100 else "warning" if usage >= 75 else "ok",
+                })
+
+                # Leverage limit
+                max_leverage = limits.get("max_leverage", 2.0)
+                current_leverage = risk_state.get("leverage", 0.0)
+                usage = (current_leverage / max_leverage * 100) if max_leverage > 0 else 0
+                result.append({
+                    "name": "Leverage",
+                    "current": round(current_leverage, 2),
+                    "limit": round(max_leverage, 2),
+                    "usage": round(usage, 1),
+                    "status": "breach" if usage >= 100 else "warning" if usage >= 75 else "ok",
+                })
+
+                # Daily loss limit
+                max_daily_loss = limits.get("max_daily_loss_pct", 3.0)
+                current_daily_loss = abs(risk_state.get("daily_pnl_pct", 0.0))
+                usage = (current_daily_loss / max_daily_loss * 100) if max_daily_loss > 0 else 0
+                result.append({
+                    "name": "Daily Loss",
+                    "current": round(current_daily_loss, 2),
+                    "limit": round(max_daily_loss, 2),
+                    "usage": round(usage, 1),
+                    "status": "breach" if usage >= 100 else "warning" if usage >= 75 else "ok",
+                })
+
+                # Drawdown limit
+                max_drawdown = limits.get("max_drawdown_pct", 10.0)
+                current_drawdown = risk_state.get("max_drawdown_pct", 0.0)
+                usage = (current_drawdown / max_drawdown * 100) if max_drawdown > 0 else 0
+                result.append({
+                    "name": "Drawdown",
+                    "current": round(current_drawdown, 2),
+                    "limit": round(max_drawdown, 2),
+                    "usage": round(usage, 1),
+                    "status": "breach" if usage >= 100 else "warning" if usage >= 75 else "ok",
+                })
+
+                # VaR limit
+                max_var = limits.get("max_portfolio_var_pct", 2.0)
+                current_var = risk_state.get("var_95", 0.0)
+                usage = (current_var / max_var * 100) if max_var > 0 else 0
+                result.append({
+                    "name": "VaR 95%",
+                    "current": round(current_var, 2),
+                    "limit": round(max_var, 2),
+                    "usage": round(usage, 1),
+                    "status": "breach" if usage >= 100 else "warning" if usage >= 75 else "ok",
+                })
+
+                return result
+
+            except Exception as e:
+                logger.warning(f"Error getting risk limits from agent: {e}")
+
+        # Fall back to event-tracked limits
         return [limit.to_dict() for limit in self._risk_limits.values()]
 
     def get_equity_curve(self) -> dict:
@@ -679,6 +1022,104 @@ class DashboardState:
     def is_kill_switch_active(self) -> bool:
         """Check if kill switch is active."""
         return self._kill_switch_active
+
+    def set_broadcast_callback(
+        self, callback: Callable[[dict], Coroutine[Any, Any, None]]
+    ) -> None:
+        """Set callback for broadcasting events to WebSocket clients."""
+        self._broadcast_callback = callback
+
+    def get_latest_event_record(self) -> dict | None:
+        """Get and clear the latest event record for broadcasting."""
+        record = self._latest_event_record
+        self._latest_event_record = None
+        return record
+
+    async def get_agent_health_summary(self) -> dict[str, Any]:
+        """
+        Get comprehensive agent health summary using AgentStatusTracker.
+
+        Returns system-wide health metrics including:
+        - Total, active, idle, error, stopped agent counts
+        - Average and minimum health scores
+        - System health status (healthy/degraded/critical)
+        """
+        # Update tracker with current orchestrator data
+        if self._orchestrator:
+            try:
+                orchestrator_status = self._orchestrator.get_status()
+                agents_data = orchestrator_status.get("agents", {})
+
+                # Register and update all agents in the tracker
+                for agent_status in agents_data.get("signal", []):
+                    if agent_status:
+                        name = agent_status.get("name")
+                        if name:
+                            self._agent_tracker.register_agent_sync(name, AgentType.SIGNAL)
+                            # Update status based on running state
+                            running = agent_status.get("running", False)
+                            if running:
+                                await self._agent_tracker.update_status(
+                                    name, TrackerAgentStatus.ACTIVE
+                                )
+                            else:
+                                await self._agent_tracker.update_status(
+                                    name, TrackerAgentStatus.STOPPED
+                                )
+                            # Record events
+                            events_processed = agent_status.get("events_processed", 0)
+                            if events_processed > 0:
+                                await self._agent_tracker.record_event_processed(name)
+
+                # Update core agents
+                agent_type_map = {
+                    "cio": AgentType.DECISION,
+                    "risk": AgentType.VALIDATION,
+                    "compliance": AgentType.VALIDATION,
+                    "execution": AgentType.EXECUTION,
+                    "surveillance": AgentType.SURVEILLANCE,
+                    "transaction_reporting": AgentType.REPORTING,
+                }
+                for agent_key, agent_type in agent_type_map.items():
+                    agent_status = agents_data.get(agent_key)
+                    if agent_status:
+                        name = agent_status.get("name")
+                        if name:
+                            self._agent_tracker.register_agent_sync(name, agent_type)
+                            running = agent_status.get("running", False)
+                            if running:
+                                await self._agent_tracker.update_status(
+                                    name, TrackerAgentStatus.ACTIVE
+                                )
+                            else:
+                                await self._agent_tracker.update_status(
+                                    name, TrackerAgentStatus.STOPPED
+                                )
+
+            except Exception as e:
+                logger.warning(f"Error updating agent tracker: {e}")
+
+        # Get system health from tracker
+        system_health = await self._agent_tracker.get_system_health()
+
+        return {
+            "total_agents": system_health.total_agents,
+            "active_agents": system_health.active_agents,
+            "idle_agents": system_health.idle_agents,
+            "error_agents": system_health.error_agents,
+            "stopped_agents": system_health.stopped_agents,
+            "avg_health_score": system_health.avg_health_score,
+            "min_health_score": system_health.min_health_score,
+            "min_health_agent": system_health.min_health_agent,
+            "total_events_processed": system_health.total_events_processed,
+            "total_errors": system_health.total_errors,
+            "system_health": system_health.system_health,
+            "last_updated": system_health.last_updated.isoformat(),
+        }
+
+    def get_agent_tracker(self) -> AgentStatusTracker:
+        """Get the agent status tracker for advanced monitoring."""
+        return self._agent_tracker
 
 
 # =============================================================================
@@ -802,13 +1243,14 @@ class DashboardServer:
 
         @app.get("/api/agents")
         async def get_agents():
-            """Get all agent statuses."""
+            """Get all agent statuses from the trading system."""
             return JSONResponse({"agents": self._state.get_agents()})
 
         @app.get("/api/positions")
         async def get_positions():
-            """Get all open positions."""
-            return JSONResponse({"positions": self._state.get_positions()})
+            """Get all open positions from IB broker."""
+            positions = await self._state.get_positions_async()
+            return JSONResponse({"positions": positions})
 
         @app.get("/api/signals")
         async def get_signals():
@@ -822,12 +1264,13 @@ class DashboardServer:
 
         @app.get("/api/metrics")
         async def get_metrics():
-            """Get portfolio metrics."""
-            return JSONResponse({"metrics": self._state.get_metrics()})
+            """Get portfolio metrics including real P&L from broker."""
+            metrics = await self._state.get_metrics_async()
+            return JSONResponse({"metrics": metrics})
 
         @app.get("/api/risk")
         async def get_risk():
-            """Get risk limit statuses."""
+            """Get risk limit statuses from risk agent."""
             return JSONResponse({
                 "limits": self._state.get_risk_limits(),
                 "kill_switch_active": self._state.is_kill_switch_active(),
@@ -963,6 +1406,7 @@ class DashboardServer:
 
         Updates are pushed every 500ms to provide real-time feedback.
         """
+        update_counter = 0
         while self._running:
             try:
                 await asyncio.sleep(0.5)  # 500ms update interval
@@ -970,13 +1414,23 @@ class DashboardServer:
                 if self._connection_manager.connection_count == 0:
                     continue
 
-                # Broadcast metrics
+                update_counter += 1
+
+                # Broadcast metrics on every update
                 await self._connection_manager.broadcast({
                     "type": "metrics",
                     "payload": self._state.get_metrics(),
                 })
 
-                # Broadcast agents (less frequently)
+                # Broadcast latest event if available
+                latest_event = self._state.get_latest_event_record()
+                if latest_event:
+                    await self._connection_manager.broadcast({
+                        "type": "event",
+                        "payload": latest_event,
+                    })
+
+                # Broadcast agents every update
                 await self._connection_manager.broadcast({
                     "type": "agents",
                     "payload": self._state.get_agents(),
@@ -994,6 +1448,13 @@ class DashboardServer:
                     "payload": self._state.get_signals(),
                 })
 
+                # Broadcast decisions (every 2nd update to reduce load)
+                if update_counter % 2 == 0:
+                    await self._connection_manager.broadcast({
+                        "type": "decisions",
+                        "payload": self._state.get_decisions(),
+                    })
+
                 # Broadcast risk
                 await self._connection_manager.broadcast({
                     "type": "risk",
@@ -1001,6 +1462,13 @@ class DashboardServer:
                         "limits": self._state.get_risk_limits(),
                     }
                 })
+
+                # Broadcast equity curve (every 4th update to reduce load)
+                if update_counter % 4 == 0:
+                    await self._connection_manager.broadcast({
+                        "type": "equity",
+                        "payload": self._state.get_equity_curve(),
+                    })
 
             except asyncio.CancelledError:
                 break
@@ -1023,6 +1491,22 @@ class DashboardServer:
         """Get the WebSocket connection manager."""
         return self._connection_manager
 
+    def set_orchestrator(self, orchestrator: Any) -> None:
+        """
+        Connect the dashboard to the trading system orchestrator.
+
+        This enables the dashboard to pull real-time data from:
+        - Broker (positions, P&L)
+        - Risk Agent (limits, VaR)
+        - Signal Agents (status)
+        - CIO Agent (decisions)
+
+        Args:
+            orchestrator: TradingFirmOrchestrator instance
+        """
+        self._state.set_orchestrator(orchestrator)
+        logger.info("Dashboard server connected to orchestrator")
+
     async def broadcast_event(self, event_type: str, payload: dict) -> None:
         """Broadcast a custom event to all WebSocket clients."""
         await self._connection_manager.broadcast({
@@ -1037,6 +1521,7 @@ class DashboardServer:
 
 def create_dashboard_server(
     event_bus: "EventBus | None" = None,
+    orchestrator: Any = None,
     host: str = "0.0.0.0",
     port: int = 8080,
     templates_dir: str | None = None,
@@ -1046,6 +1531,7 @@ def create_dashboard_server(
 
     Args:
         event_bus: Optional EventBus instance for real-time updates
+        orchestrator: Optional TradingFirmOrchestrator for real data
         host: Host to bind to (default: 0.0.0.0)
         port: Port to listen on (default: 8080)
         templates_dir: Optional custom templates directory
@@ -1064,12 +1550,18 @@ def create_dashboard_server(
         # Run with uvicorn
         uvicorn.run(server.app, host="0.0.0.0", port=8080)
     """
-    return DashboardServer(
+    server = DashboardServer(
         event_bus=event_bus,
         host=host,
         port=port,
         templates_dir=templates_dir,
     )
+
+    # Connect to orchestrator if provided
+    if orchestrator is not None:
+        server.set_orchestrator(orchestrator)
+
+    return server
 
 
 # =============================================================================

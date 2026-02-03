@@ -58,6 +58,13 @@ orchestrator:
   heartbeat_interval_seconds: 30.0
   shutdown_timeout_seconds: 60.0
 
+# Dashboard Configuration (Real-time monitoring UI)
+# The dashboard provides a WebSocket-based real-time view of trading activity
+dashboard:
+  enabled: true                       # [bool] Enable/disable dashboard server
+  host: "0.0.0.0"                     # [string] Host to bind (0.0.0.0 for all interfaces)
+  port: 8081                          # [int] Dashboard port (different from health check port 8080)
+
 # =============================================================================
 # === REVIEW CAREFULLY - Risk Management ===
 # These settings protect your capital. Understand before changing.
