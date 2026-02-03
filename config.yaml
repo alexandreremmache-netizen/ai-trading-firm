@@ -245,7 +245,7 @@ logging:
 health_check:
   enabled: true
   host: "127.0.0.1"
-  port: 8081  # Changed from 8080 to avoid conflict with dashboard
+  port: 8080  # Health check on 8080, dashboard on 8081
   max_event_queue_pct: 90.0
   max_latency_ms: 1000.0
   min_active_agents: 3
