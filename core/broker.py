@@ -825,6 +825,7 @@ class IBBroker:
         self._fill_callbacks: list[Callable[[FillEvent], None]] = []
         self._last_portfolio_state: PortfolioState | None = None
         self._order_tracking: dict[int, OrderStatus] = {}
+        self._active_orders: dict[int, Any] = {}  # broker_order_id -> Trade object
         self._account_id: str = ""
 
         # Optional components
