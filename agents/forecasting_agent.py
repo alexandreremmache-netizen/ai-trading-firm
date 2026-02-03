@@ -137,27 +137,55 @@ Be conservative with confidence scores. Use >0.7 only for clear technical setups
         self._price_history_length = params.get("price_history_length", 100)
         self._symbols = params.get("symbols", [])
 
+        # Backend selection: "llm" (default), "tft" (local neural network), or "hybrid"
+        self._backend = params.get("backend", "llm")
+        self._tft_forecaster = None
+
         # State per symbol
         self._states: dict[str, ForecastingState] = {}
 
         # Accuracy tracking
         self._total_forecasts = 0
         self._accurate_forecasts = 0
+        self._llm_forecasts = 0
+        self._tft_forecasts = 0
 
     async def initialize(self) -> None:
         """Initialize the forecasting agent."""
         logger.info(
             f"ForecastingAgent initializing with horizons: {self._forecast_horizons}, "
-            f"symbols: {self._symbols}"
+            f"symbols: {self._symbols}, backend: {self._backend}"
         )
 
-        # Initialize LLM client if not injected
-        if self._llm_client is None:
-            from core.llm_client import LLMClient
-            llm_config = self._config.parameters.get("llm", {})
-            self._llm_client = LLMClient(config=llm_config)
+        # Initialize TFT if using neural network backend
+        if self._backend in ("tft", "hybrid"):
+            try:
+                from core.tft_model import TFTForecaster, TFTConfig
 
-        await self._llm_client.initialize()
+                tft_config = self._config.parameters.get("tft", {})
+                config = TFTConfig(
+                    hidden_size=tft_config.get("hidden_size", 64),
+                    max_encoder_length=tft_config.get("max_encoder_length", 60),
+                    max_prediction_length=tft_config.get("max_prediction_length", 24),
+                )
+                self._tft_forecaster = TFTForecaster(config)
+                if await self._tft_forecaster.initialize():
+                    logger.info("TFT Forecaster initialized successfully")
+                else:
+                    logger.warning("TFT initialization failed, falling back to LLM")
+                    self._backend = "llm"
+            except ImportError as e:
+                logger.warning(f"TFT not available ({e}), using LLM backend")
+                self._backend = "llm"
+
+        # Initialize LLM client if needed
+        if self._backend in ("llm", "hybrid"):
+            if self._llm_client is None:
+                from core.llm_client import LLMClient
+                llm_config = self._config.parameters.get("llm", {})
+                self._llm_client = LLMClient(config=llm_config)
+
+            await self._llm_client.initialize()
 
         # Initialize states for configured symbols
         for symbol in self._symbols:
@@ -229,22 +257,96 @@ Be conservative with confidence scores. Use >0.7 only for clear technical setups
         symbol: str,
         state: ForecastingState,
     ) -> PriceForecast | None:
-        """Generate a price forecast using LLM."""
+        """Generate a price forecast using configured backend (LLM or TFT)."""
+        horizon = self._forecast_horizons[0] if self._forecast_horizons else "1h"
+
+        # Try TFT first if available
+        if self._backend in ("tft", "hybrid") and self._tft_forecaster is not None:
+            try:
+                forecast = await self._generate_tft_forecast(symbol, state, horizon)
+                if forecast is not None:
+                    self._tft_forecasts += 1
+                    return forecast
+                elif self._backend == "tft":
+                    # TFT-only mode, don't fall back
+                    return None
+            except Exception as e:
+                logger.warning(f"TFT forecast failed for {symbol}: {e}")
+                if self._backend == "tft":
+                    return None
+
+        # Fall back to LLM
         if self._llm_client is None:
             return None
 
         # Build price context
         price_data = self._format_price_history(state)
 
-        # Use first horizon
-        horizon = self._forecast_horizons[0] if self._forecast_horizons else "1h"
-
         try:
             result = await self._call_llm_forecast(symbol, price_data, horizon)
+            if result:
+                self._llm_forecasts += 1
             return result
         except Exception as e:
-            logger.exception(f"Forecast generation error for {symbol}: {e}")
+            logger.exception(f"LLM forecast generation error for {symbol}: {e}")
             return None
+
+    async def _generate_tft_forecast(
+        self,
+        symbol: str,
+        state: ForecastingState,
+        horizon: str,
+    ) -> PriceForecast | None:
+        """Generate forecast using Temporal Fusion Transformer."""
+        if self._tft_forecaster is None:
+            return None
+
+        from core.tft_model import ForecastHorizon
+
+        # Map horizon string to enum
+        horizon_map = {
+            "1h": ForecastHorizon.HOUR_1,
+            "4h": ForecastHorizon.HOUR_4,
+            "1d": ForecastHorizon.DAY_1,
+        }
+        tft_horizon = horizon_map.get(horizon, ForecastHorizon.HOUR_4)
+
+        # Update TFT with latest price history
+        for ts, price in state.price_history[-60:]:
+            self._tft_forecaster.update_price(
+                symbol=symbol,
+                price=price,
+                timestamp=ts,
+            )
+
+        # Generate forecast
+        tft_result = await self._tft_forecaster.predict(symbol, tft_horizon)
+        if tft_result is None:
+            return None
+
+        # Map TFT confidence to direction
+        price_change_pct = (tft_result.predicted_price - state.last_price) / state.last_price * 100
+
+        if price_change_pct > 0.5:
+            direction = SignalDirection.LONG
+        elif price_change_pct < -0.5:
+            direction = SignalDirection.SHORT
+        else:
+            direction = SignalDirection.FLAT
+
+        return PriceForecast(
+            symbol=symbol,
+            timestamp=tft_result.timestamp,
+            forecast_horizon=horizon,
+            target_time=tft_result.target_time,
+            predicted_price=tft_result.predicted_price,
+            lower_bound=tft_result.lower_bound,
+            upper_bound=tft_result.upper_bound,
+            confidence=tft_result.confidence,
+            direction=direction,
+            rationale=f"TFT neural network forecast (attention-based)",
+            supporting_context=["tft_model", "technical_indicators"],
+        )
 
     def _format_price_history(self, state: ForecastingState) -> str:
         """Format price history for LLM context."""
@@ -447,9 +549,13 @@ Provide your forecast in the specified JSON format."""
         )
 
         return {
+            "backend": self._backend,
             "total_forecasts": self._total_forecasts,
+            "llm_forecasts": self._llm_forecasts,
+            "tft_forecasts": self._tft_forecasts,
             "accurate_forecasts": self._accurate_forecasts,
             "accuracy": accuracy,
+            "tft_available": self._tft_forecaster is not None and self._tft_forecaster.is_available,
             "symbols_tracked": list(self._states.keys()),
             "states": {
                 symbol: {
