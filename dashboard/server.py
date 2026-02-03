@@ -499,6 +499,28 @@ class DashboardState:
             "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
         })
 
+        # Add sample closed positions for demo (will be replaced by real data)
+        self._closed_positions.appendleft({
+            "symbol": "GOOGL",
+            "quantity": 50,
+            "entry_price": 175.50,
+            "exit_price": 178.25,
+            "pnl": 137.50,
+            "pnl_pct": 1.57,
+            "closed_at": datetime.now(timezone.utc).isoformat(),
+            "side": "LONG",
+        })
+        self._closed_positions.appendleft({
+            "symbol": "AMZN",
+            "quantity": -25,
+            "entry_price": 185.00,
+            "exit_price": 182.50,
+            "pnl": 62.50,
+            "pnl_pct": 1.35,
+            "closed_at": datetime.now(timezone.utc).isoformat(),
+            "side": "SHORT",
+        })
+
         logger.info("Dashboard state initialized")
 
     async def _subscribe_to_events(self) -> None:
