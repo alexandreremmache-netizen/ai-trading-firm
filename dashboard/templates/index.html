@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trading Firm - Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-dark: #1a1a2e;
+            --bg-card: #16213e;
+            --bg-card-hover: #1f3460;
+            --accent-green: #00d4aa;
+            --accent-red: #ff6b6b;
+            --accent-yellow: #ffd93d;
+            --accent-blue: #4dabf7;
+            --text-primary: #e8e8e8;
+            --text-secondary: #a0a0a0;
+        }
+
+        body {
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            min-height: 100vh;
+        }
+
+        .navbar-brand {
+            font-weight: 700;
+            font-size: 1.5rem;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 12px;
+            transition: all 0.3s ease;
+        }
+
+        .card:hover {
+            background: var(--bg-card-hover);
+            transform: translateY(-2px);
+        }
+
+        .card-header {
+            background: transparent;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+
+        .status-active { background: var(--accent-green); box-shadow: 0 0 10px var(--accent-green); }
+        .status-idle { background: var(--accent-yellow); }
+        .status-error { background: var(--accent-red); box-shadow: 0 0 10px var(--accent-red); }
+
+        .metric-card {
+            text-align: center;
+            padding: 1rem;
+        }
+
+        .metric-value {
+            font-size: 2rem;
+            font-weight: 700;
+        }
+
+        .metric-label {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            text-transform: uppercase;
+        }
+
+        .positive { color: var(--accent-green); }
+        .negative { color: var(--accent-red); }
+        .neutral { color: var(--accent-yellow); }
+
+        .agent-row {
+            display: flex;
+            align-items: center;
+            padding: 0.75rem;
+            border-radius: 8px;
+            margin-bottom: 0.5rem;
+            background: rgba(255,255,255,0.03);
+        }
+
+        .agent-row:hover {
+            background: rgba(255,255,255,0.08);
+        }
+
+        .agent-name {
+            flex: 1;
+            font-weight: 500;
+        }
+
+        .agent-type {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            margin-left: 0.5rem;
+        }
+
+        .event-stream {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .event-item {
+            padding: 0.5rem;
+            border-left: 3px solid var(--accent-blue);
+            margin-bottom: 0.5rem;
+            background: rgba(255,255,255,0.02);
+            font-size: 0.85rem;
+        }
+
+        .event-item.signal { border-color: var(--accent-green); }
+        .event-item.decision { border-color: var(--accent-yellow); }
+        .event-item.risk { border-color: var(--accent-red); }
+
+        .signal-matrix {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+            gap: 0.5rem;
+        }
+
+        .signal-cell {
+            padding: 0.75rem;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 0.85rem;
+        }
+
+        .signal-long { background: rgba(0, 212, 170, 0.2); border: 1px solid var(--accent-green); }
+        .signal-short { background: rgba(255, 107, 107, 0.2); border: 1px solid var(--accent-red); }
+        .signal-flat { background: rgba(255, 217, 61, 0.1); border: 1px solid var(--accent-yellow); }
+
+        .position-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
+            padding: 0.75rem;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            align-items: center;
+        }
+
+        .position-row:hover {
+            background: rgba(255,255,255,0.05);
+        }
+
+        .alert-toast {
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            z-index: 1050;
+            max-width: 400px;
+        }
+
+        .risk-gauge {
+            height: 8px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 0.5rem;
+        }
+
+        .risk-gauge-fill {
+            height: 100%;
+            transition: width 0.3s ease;
+        }
+
+        .risk-ok .risk-gauge-fill { background: var(--accent-green); }
+        .risk-warning .risk-gauge-fill { background: var(--accent-yellow); }
+        .risk-breach .risk-gauge-fill { background: var(--accent-red); }
+
+        .chart-container {
+            position: relative;
+            height: 250px;
+        }
+
+        #connectionStatus {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--accent-red);
+            transition: background 0.3s;
+        }
+
+        #connectionStatus.connected {
+            background: var(--accent-green);
+            box-shadow: 0 0 10px var(--accent-green);
+        }
+
+        .tab-content {
+            padding-top: 1rem;
+        }
+
+        .nav-pills .nav-link {
+            color: var(--text-secondary);
+            border-radius: 8px;
+        }
+
+        .nav-pills .nav-link.active {
+            background: var(--accent-blue);
+            color: white;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-dark);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--bg-card-hover);
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Navbar -->
+    <nav class="navbar navbar-dark bg-dark sticky-top">
+        <div class="container-fluid">
+            <span class="navbar-brand">
+                <i class="fas fa-chart-line me-2"></i>AI Trading Firm
+            </span>
+            <div class="d-flex align-items-center gap-3">
+                <span class="text-secondary" id="currentTime"></span>
+                <div class="d-flex align-items-center gap-2">
+                    <div id="connectionStatus"></div>
+                    <span class="text-secondary" id="connectionText">Disconnected</span>
+                </div>
+                <button class="btn btn-outline-light btn-sm" onclick="generateReport()">
+                    <i class="fas fa-file-pdf me-1"></i>Daily Report
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Alert Container -->
+    <div id="alertContainer" class="alert-toast"></div>
+
+    <div class="container-fluid py-4">
+        <!-- Top Metrics Row -->
+        <div class="row g-3 mb-4">
+            <div class="col-md-2">
+                <div class="card metric-card">
+                    <div class="metric-value" id="totalPnl">$0</div>
+                    <div class="metric-label">Total P&L</div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="card metric-card">
+                    <div class="metric-value" id="todayPnl">$0</div>
+                    <div class="metric-label">Today's P&L</div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="card metric-card">
+                    <div class="metric-value" id="sharpeRatio">0.00</div>
+                    <div class="metric-label">Sharpe Ratio</div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="card metric-card">
+                    <div class="metric-value" id="winRate">0%</div>
+                    <div class="metric-label">Win Rate</div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="card metric-card">
+                    <div class="metric-value negative" id="drawdown">0%</div>
+                    <div class="metric-label">Drawdown</div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="card metric-card">
+                    <div class="metric-value" id="activePositions">0</div>
+                    <div class="metric-label">Positions</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row g-3">
+            <!-- Left Column - Agents & Events -->
+            <div class="col-lg-3">
+                <!-- Agent Status -->
+                <div class="card mb-3">
+                    <div class="card-header">
+                        <span><i class="fas fa-robot me-2"></i>Agents</span>
+                        <span class="badge bg-success" id="activeAgentCount">0 active</span>
+                    </div>
+                    <div class="card-body" id="agentList">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+
+                <!-- Event Stream -->
+                <div class="card">
+                    <div class="card-header">
+                        <span><i class="fas fa-stream me-2"></i>Event Stream</span>
+                        <span class="badge bg-info" id="eventCount">0</span>
+                    </div>
+                    <div class="card-body event-stream" id="eventStream">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Center Column - Charts & Positions -->
+            <div class="col-lg-6">
+                <!-- Tabs -->
+                <ul class="nav nav-pills mb-3">
+                    <li class="nav-item">
+                        <a class="nav-link active" data-bs-toggle="pill" href="#performanceTab">Performance</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-bs-toggle="pill" href="#positionsTab">Positions</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-bs-toggle="pill" href="#signalsTab">Signals</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-bs-toggle="pill" href="#decisionsTab">Decisions</a>
+                    </li>
+                </ul>
+
+                <div class="tab-content">
+                    <!-- Performance Tab -->
+                    <div class="tab-pane fade show active" id="performanceTab">
+                        <div class="card">
+                            <div class="card-header">
+                                <span><i class="fas fa-chart-area me-2"></i>Equity Curve</span>
+                            </div>
+                            <div class="card-body">
+                                <div class="chart-container">
+                                    <canvas id="equityChart"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Positions Tab -->
+                    <div class="tab-pane fade" id="positionsTab">
+                        <div class="card">
+                            <div class="card-header">
+                                <span><i class="fas fa-wallet me-2"></i>Open Positions</span>
+                            </div>
+                            <div class="card-body">
+                                <div class="position-row fw-bold text-secondary">
+                                    <div>Symbol</div>
+                                    <div>Qty</div>
+                                    <div>Entry</div>
+                                    <div>Current</div>
+                                    <div>P&L</div>
+                                </div>
+                                <div id="positionsList">
+                                    <!-- Populated by JS -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Signals Tab -->
+                    <div class="tab-pane fade" id="signalsTab">
+                        <div class="card">
+                            <div class="card-header">
+                                <span><i class="fas fa-signal me-2"></i>Signal Matrix</span>
+                            </div>
+                            <div class="card-body">
+                                <div class="signal-matrix" id="signalMatrix">
+                                    <!-- Populated by JS -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Decisions Tab -->
+                    <div class="tab-pane fade" id="decisionsTab">
+                        <div class="card">
+                            <div class="card-header">
+                                <span><i class="fas fa-gavel me-2"></i>CIO Decisions</span>
+                            </div>
+                            <div class="card-body" style="max-height: 400px; overflow-y: auto;">
+                                <div id="decisionsList">
+                                    <!-- Populated by JS -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column - Risk & Alerts -->
+            <div class="col-lg-3">
+                <!-- Risk Monitor -->
+                <div class="card mb-3">
+                    <div class="card-header">
+                        <span><i class="fas fa-shield-alt me-2"></i>Risk Monitor</span>
+                        <span class="badge" id="riskStatus">OK</span>
+                    </div>
+                    <div class="card-body" id="riskPanel">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+
+                <!-- Kill Switch -->
+                <div class="card mb-3">
+                    <div class="card-header">
+                        <span><i class="fas fa-power-off me-2"></i>Kill Switch</span>
+                    </div>
+                    <div class="card-body text-center">
+                        <button class="btn btn-lg" id="killSwitchBtn" onclick="toggleKillSwitch()">
+                            <i class="fas fa-power-off fa-2x"></i>
+                        </button>
+                        <div class="mt-2" id="killSwitchStatus">Inactive</div>
+                    </div>
+                </div>
+
+                <!-- Recent Alerts -->
+                <div class="card">
+                    <div class="card-header">
+                        <span><i class="fas fa-bell me-2"></i>Alerts</span>
+                        <span class="badge bg-danger" id="alertCount">0</span>
+                    </div>
+                    <div class="card-body" style="max-height: 300px; overflow-y: auto;" id="alertsList">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // WebSocket connection
+        let ws = null;
+        let equityChart = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 10;
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            initWebSocket();
+            initCharts();
+            updateTime();
+            setInterval(updateTime, 1000);
+        });
+
+        function initWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                document.getElementById('connectionStatus').classList.add('connected');
+                document.getElementById('connectionText').textContent = 'Connected';
+                reconnectAttempts = 0;
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                document.getElementById('connectionStatus').classList.remove('connected');
+                document.getElementById('connectionText').textContent = 'Disconnected';
+
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    setTimeout(initWebSocket, 2000 * reconnectAttempts);
+                }
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleUpdate(data);
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+        }
+
+        function handleUpdate(data) {
+            switch(data.type) {
+                case 'metrics':
+                    updateMetrics(data.payload);
+                    break;
+                case 'agents':
+                    updateAgents(data.payload);
+                    break;
+                case 'event':
+                    addEvent(data.payload);
+                    break;
+                case 'positions':
+                    updatePositions(data.payload);
+                    break;
+                case 'signals':
+                    updateSignals(data.payload);
+                    break;
+                case 'decisions':
+                    updateDecisions(data.payload);
+                    break;
+                case 'risk':
+                    updateRisk(data.payload);
+                    break;
+                case 'alert':
+                    showAlert(data.payload);
+                    break;
+                case 'equity':
+                    updateEquityChart(data.payload);
+                    break;
+            }
+        }
+
+        function updateMetrics(metrics) {
+            document.getElementById('totalPnl').textContent = formatCurrency(metrics.total_pnl);
+            document.getElementById('totalPnl').className = `metric-value ${metrics.total_pnl >= 0 ? 'positive' : 'negative'}`;
+
+            document.getElementById('todayPnl').textContent = formatCurrency(metrics.today_pnl);
+            document.getElementById('todayPnl').className = `metric-value ${metrics.today_pnl >= 0 ? 'positive' : 'negative'}`;
+
+            document.getElementById('sharpeRatio').textContent = metrics.sharpe_ratio.toFixed(2);
+            document.getElementById('winRate').textContent = `${(metrics.win_rate * 100).toFixed(0)}%`;
+            document.getElementById('drawdown').textContent = `${(metrics.drawdown * 100).toFixed(1)}%`;
+            document.getElementById('activePositions').textContent = metrics.position_count;
+        }
+
+        function updateAgents(agents) {
+            const container = document.getElementById('agentList');
+            let activeCount = 0;
+
+            container.innerHTML = agents.map(agent => {
+                if (agent.status === 'active') activeCount++;
+                return `
+                    <div class="agent-row">
+                        <span class="status-dot status-${agent.status}"></span>
+                        <span class="agent-name">${agent.name}<span class="agent-type">${agent.type}</span></span>
+                        <span class="text-secondary">${agent.latency_ms}ms</span>
+                    </div>
+                `;
+            }).join('');
+
+            document.getElementById('activeAgentCount').textContent = `${activeCount} active`;
+        }
+
+        function addEvent(event) {
+            const container = document.getElementById('eventStream');
+            const eventClass = event.type.includes('SIGNAL') ? 'signal' :
+                              event.type.includes('DECISION') ? 'decision' :
+                              event.type.includes('RISK') ? 'risk' : '';
+
+            const eventHtml = `
+                <div class="event-item ${eventClass}">
+                    <div class="d-flex justify-content-between">
+                        <strong>${event.type}</strong>
+                        <small class="text-secondary">${event.time}</small>
+                    </div>
+                    <div class="text-secondary">${event.source} → ${event.summary}</div>
+                </div>
+            `;
+
+            container.insertAdjacentHTML('afterbegin', eventHtml);
+
+            // Keep only last 100 events
+            while (container.children.length > 100) {
+                container.removeChild(container.lastChild);
+            }
+
+            document.getElementById('eventCount').textContent = container.children.length;
+        }
+
+        function updatePositions(positions) {
+            const container = document.getElementById('positionsList');
+            container.innerHTML = positions.map(pos => `
+                <div class="position-row">
+                    <div><strong>${pos.symbol}</strong></div>
+                    <div>${pos.quantity > 0 ? '+' : ''}${pos.quantity}</div>
+                    <div>$${pos.entry_price.toFixed(2)}</div>
+                    <div>$${pos.current_price.toFixed(2)}</div>
+                    <div class="${pos.pnl >= 0 ? 'positive' : 'negative'}">
+                        ${formatCurrency(pos.pnl)} (${pos.pnl_pct.toFixed(1)}%)
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function updateSignals(signals) {
+            const container = document.getElementById('signalMatrix');
+            container.innerHTML = signals.map(signal => {
+                const dirClass = signal.direction === 'LONG' ? 'signal-long' :
+                                signal.direction === 'SHORT' ? 'signal-short' : 'signal-flat';
+                return `
+                    <div class="signal-cell ${dirClass}">
+                        <div class="fw-bold">${signal.agent}</div>
+                        <div>${signal.direction}</div>
+                        <div class="text-secondary">${(signal.confidence * 100).toFixed(0)}%</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function updateDecisions(decisions) {
+            const container = document.getElementById('decisionsList');
+            container.innerHTML = decisions.slice(0, 20).map(dec => `
+                <div class="event-item decision mb-2">
+                    <div class="d-flex justify-content-between">
+                        <strong>${dec.symbol} - ${dec.direction}</strong>
+                        <span class="${dec.pnl >= 0 ? 'positive' : 'negative'}">${formatCurrency(dec.pnl)}</span>
+                    </div>
+                    <div>Conviction: ${(dec.conviction * 100).toFixed(0)}% | Qty: ${dec.quantity}</div>
+                    <div class="text-secondary small">${dec.rationale}</div>
+                </div>
+            `).join('');
+        }
+
+        function updateRisk(risk) {
+            const container = document.getElementById('riskPanel');
+            const statusBadge = document.getElementById('riskStatus');
+
+            let overallStatus = 'bg-success';
+            if (risk.limits.some(l => l.status === 'breach')) {
+                overallStatus = 'bg-danger';
+                statusBadge.textContent = 'BREACH';
+            } else if (risk.limits.some(l => l.status === 'warning')) {
+                overallStatus = 'bg-warning';
+                statusBadge.textContent = 'WARNING';
+            } else {
+                statusBadge.textContent = 'OK';
+            }
+            statusBadge.className = `badge ${overallStatus}`;
+
+            container.innerHTML = risk.limits.map(limit => `
+                <div class="mb-3 risk-${limit.status}">
+                    <div class="d-flex justify-content-between">
+                        <span>${limit.name}</span>
+                        <span>${limit.current.toFixed(1)}% / ${limit.limit.toFixed(1)}%</span>
+                    </div>
+                    <div class="risk-gauge">
+                        <div class="risk-gauge-fill" style="width: ${Math.min(limit.usage, 100)}%"></div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function showAlert(alert) {
+            const container = document.getElementById('alertContainer');
+            const alertClass = alert.severity === 'critical' ? 'danger' :
+                              alert.severity === 'warning' ? 'warning' : 'info';
+
+            const alertHtml = `
+                <div class="alert alert-${alertClass} alert-dismissible fade show" role="alert">
+                    <strong>${alert.title}</strong><br>
+                    ${alert.message}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+            `;
+
+            container.insertAdjacentHTML('beforeend', alertHtml);
+
+            // Auto-dismiss after 10 seconds
+            setTimeout(() => {
+                const alerts = container.querySelectorAll('.alert');
+                if (alerts.length > 0) {
+                    alerts[0].remove();
+                }
+            }, 10000);
+
+            // Update alert count
+            const alertsList = document.getElementById('alertsList');
+            alertsList.insertAdjacentHTML('afterbegin', `
+                <div class="event-item ${alert.severity === 'critical' ? 'risk' : ''}">
+                    <strong>${alert.title}</strong>
+                    <div class="text-secondary small">${alert.message}</div>
+                    <div class="text-secondary small">${alert.time}</div>
+                </div>
+            `);
+
+            const count = parseInt(document.getElementById('alertCount').textContent) + 1;
+            document.getElementById('alertCount').textContent = count;
+        }
+
+        function initCharts() {
+            const ctx = document.getElementById('equityChart').getContext('2d');
+            equityChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Portfolio Value',
+                        data: [],
+                        borderColor: '#4dabf7',
+                        backgroundColor: 'rgba(77, 171, 247, 0.1)',
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        x: {
+                            grid: { color: 'rgba(255,255,255,0.05)' },
+                            ticks: { color: '#a0a0a0' }
+                        },
+                        y: {
+                            grid: { color: 'rgba(255,255,255,0.05)' },
+                            ticks: {
+                                color: '#a0a0a0',
+                                callback: (value) => '$' + value.toLocaleString()
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateEquityChart(data) {
+            equityChart.data.labels = data.labels;
+            equityChart.data.datasets[0].data = data.values;
+            equityChart.update('none');
+        }
+
+        function toggleKillSwitch() {
+            const btn = document.getElementById('killSwitchBtn');
+            const status = document.getElementById('killSwitchStatus');
+            const isActive = btn.classList.contains('btn-danger');
+
+            if (isActive) {
+                btn.classList.remove('btn-danger');
+                btn.classList.add('btn-outline-danger');
+                status.textContent = 'Inactive';
+            } else {
+                btn.classList.remove('btn-outline-danger');
+                btn.classList.add('btn-danger');
+                status.textContent = 'ACTIVE - All trading halted';
+            }
+
+            // Send to server
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: 'kill_switch', active: !isActive }));
+            }
+        }
+
+        function generateReport() {
+            window.open('/api/report/daily', '_blank');
+        }
+
+        function updateTime() {
+            const now = new Date();
+            document.getElementById('currentTime').textContent = now.toLocaleString();
+        }
+
+        function formatCurrency(value) {
+            return new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD',
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 0
+            }).format(value);
+        }
+
+        // Initialize kill switch button
+        document.getElementById('killSwitchBtn').classList.add('btn-outline-danger');
+    </script>
+</body>
+</html>

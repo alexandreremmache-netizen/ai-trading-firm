@@ -46,3 +46,8 @@ ruff>=0.0.270
 # LLM Integration (Sentiment Agent)
 anthropic>=0.18.0
 feedparser>=6.0.0
+
+# Dashboard Server
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+websockets>=12.0
