@@ -487,6 +487,15 @@ class DashboardState:
         """Initialize state and subscribe to events."""
         if self._event_bus:
             await self._subscribe_to_events()
+
+        # Add startup alert
+        self._alerts.appendleft({
+            "title": "System Started",
+            "message": "AI Trading Firm dashboard connected and monitoring",
+            "severity": "info",
+            "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+        })
+
         logger.info("Dashboard state initialized")
 
     async def _subscribe_to_events(self) -> None:
@@ -911,9 +920,19 @@ class DashboardState:
         """Get recent decisions."""
         return [dec.to_dict() for dec in self._decisions]
 
-    async def get_metrics_async(self) -> dict:
-        """Get portfolio metrics from broker asynchronously."""
+    async def get_metrics_async(self, positions: list[dict] | None = None) -> dict:
+        """Get portfolio metrics from broker asynchronously.
+
+        Args:
+            positions: Optional pre-fetched positions to calculate P&L from (for consistency)
+        """
         metrics = self._metrics.to_dict()
+
+        # If positions provided, calculate P&L from them (ensures consistency with display)
+        if positions:
+            total_pnl = sum(pos.get("pnl", 0) for pos in positions)
+            metrics["total_pnl"] = round(total_pnl, 2)
+            metrics["position_count"] = len(positions)
 
         # Try to get real metrics from broker
         if self._broker and hasattr(self._broker, 'is_connected') and self._broker.is_connected:
@@ -922,11 +941,13 @@ class DashboardState:
 
                 # Update with real data
                 metrics["today_pnl"] = round(portfolio_state.daily_pnl, 2)
-                metrics["position_count"] = len(portfolio_state.positions)
 
-                # Calculate total unrealized P&L
-                total_pnl = sum(pos.unrealized_pnl for pos in portfolio_state.positions.values())
-                metrics["total_pnl"] = round(total_pnl, 2)
+                # Only use broker P&L if we didn't get positions passed in
+                if not positions:
+                    metrics["position_count"] = len(portfolio_state.positions)
+                    # Calculate total unrealized P&L
+                    total_pnl = sum(pos.unrealized_pnl for pos in portfolio_state.positions.values())
+                    metrics["total_pnl"] = round(total_pnl, 2)
 
             except Exception as e:
                 logger.warning(f"Error getting metrics from broker: {e}")
@@ -1350,16 +1371,20 @@ class DashboardServer:
             await self._connection_manager.connect(websocket)
 
             try:
-                # Send initial state
+                # Send initial state (use async methods for broker data)
+                # Fetch positions first, then calculate metrics from them for consistency
+                initial_positions = await self._state.get_positions_async()
+                initial_metrics = await self._state.get_metrics_async(positions=initial_positions)
                 await websocket.send_json({
                     "type": "initial",
                     "payload": {
-                        "metrics": self._state.get_metrics(),
+                        "metrics": initial_metrics,
                         "agents": self._state.get_agents(),
-                        "positions": self._state.get_positions(),
+                        "positions": initial_positions,
                         "closed_positions": self._state.get_closed_positions(),
                         "signals": self._state.get_signals(),
                         "decisions": self._state.get_decisions(),
+                        "alerts": self._state.get_alerts(),
                         "risk": {
                             "limits": self._state.get_risk_limits(),
                         },
@@ -1451,10 +1476,18 @@ class DashboardServer:
 
                 update_counter += 1
 
-                # Broadcast metrics on every update
+                # Broadcast positions first (use async to get from broker)
+                positions = await self._state.get_positions_async()
+                await self._connection_manager.broadcast({
+                    "type": "positions",
+                    "payload": positions,
+                })
+
+                # Broadcast metrics (calculated from positions for consistency)
+                metrics = await self._state.get_metrics_async(positions=positions)
                 await self._connection_manager.broadcast({
                     "type": "metrics",
-                    "payload": self._state.get_metrics(),
+                    "payload": metrics,
                 })
 
                 # Broadcast latest event if available
@@ -1469,13 +1502,6 @@ class DashboardServer:
                 await self._connection_manager.broadcast({
                     "type": "agents",
                     "payload": self._state.get_agents(),
-                })
-
-                # Broadcast positions (use async to get from broker)
-                positions = await self._state.get_positions_async()
-                await self._connection_manager.broadcast({
-                    "type": "positions",
-                    "payload": positions,
                 })
 
                 # Broadcast closed positions (every 4th update)

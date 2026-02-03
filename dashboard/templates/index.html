@@ -574,6 +574,7 @@
                     if (data.payload.closed_positions) updateClosedPositions(data.payload.closed_positions);
                     if (data.payload.signals) updateSignals(data.payload.signals);
                     if (data.payload.decisions) updateDecisions(data.payload.decisions);
+                    if (data.payload.alerts) loadAlerts(data.payload.alerts);
                     if (data.payload.risk) updateRisk(data.payload.risk);
                     if (data.payload.equity) updateEquityChart(data.payload.equity);
                     console.log('Initial state loaded');
@@ -835,6 +836,26 @@
 
             const count = parseInt(document.getElementById('alertCount').textContent) + 1;
             document.getElementById('alertCount').textContent = count;
+        }
+
+        function loadAlerts(alerts) {
+            const alertsList = document.getElementById('alertsList');
+
+            if (!alerts || alerts.length === 0) {
+                alertsList.innerHTML = '<div class="text-secondary text-center py-3">No alerts</div>';
+                document.getElementById('alertCount').textContent = '0';
+                return;
+            }
+
+            alertsList.innerHTML = alerts.map(alert => `
+                <div class="event-item ${alert.severity === 'critical' ? 'risk' : ''}">
+                    <strong>${alert.title}</strong>
+                    <div class="text-secondary small">${alert.message}</div>
+                    <div class="text-secondary small">${alert.time}</div>
+                </div>
+            `).join('');
+
+            document.getElementById('alertCount').textContent = alerts.length;
         }
 
         function initCharts() {
