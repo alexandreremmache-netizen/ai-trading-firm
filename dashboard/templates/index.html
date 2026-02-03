@@ -351,9 +351,10 @@
 
                     <!-- Positions Tab -->
                     <div class="tab-pane fade" id="positionsTab">
-                        <div class="card">
+                        <div class="card mb-3">
                             <div class="card-header">
                                 <span><i class="fas fa-wallet me-2"></i>Open Positions</span>
+                                <span class="badge bg-primary ms-2" id="openPositionsCount">0</span>
                             </div>
                             <div class="card-body">
                                 <div class="position-row fw-bold text-secondary">
@@ -364,6 +365,24 @@
                                     <div>P&L</div>
                                 </div>
                                 <div id="positionsList">
+                                    <!-- Populated by JS -->
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <div class="card-header">
+                                <span><i class="fas fa-history me-2"></i>Closed Positions</span>
+                                <span class="badge bg-secondary ms-2" id="closedPositionsCount">0</span>
+                            </div>
+                            <div class="card-body">
+                                <div class="position-row fw-bold text-secondary">
+                                    <div>Symbol</div>
+                                    <div>Qty</div>
+                                    <div>Entry</div>
+                                    <div>Exit</div>
+                                    <div>P&L</div>
+                                </div>
+                                <div id="closedPositionsList">
                                     <!-- Populated by JS -->
                                 </div>
                             </div>
@@ -528,6 +547,9 @@
                 case 'equity':
                     updateEquityChart(data.payload);
                     break;
+                case 'closed_positions':
+                    updateClosedPositions(data.payload);
+                    break;
             }
         }
 
@@ -596,18 +618,47 @@
 
         function updatePositions(positions) {
             const container = document.getElementById('positionsList');
+            const countBadge = document.getElementById('openPositionsCount');
 
             if (!positions || positions.length === 0) {
                 container.innerHTML = '<div class="text-secondary text-center py-3">No open positions</div>';
+                if (countBadge) countBadge.textContent = '0';
                 return;
             }
+
+            if (countBadge) countBadge.textContent = positions.length;
 
             container.innerHTML = positions.map(pos => `
                 <div class="position-row">
                     <div><strong>${pos.symbol}</strong></div>
-                    <div>${pos.quantity > 0 ? '+' : ''}${pos.quantity}</div>
+                    <div class="${pos.quantity > 0 ? 'positive' : 'negative'}">${pos.quantity > 0 ? '+' : ''}${pos.quantity}</div>
                     <div>$${pos.entry_price.toFixed(2)}</div>
                     <div>$${pos.current_price.toFixed(2)}</div>
+                    <div class="${pos.pnl >= 0 ? 'positive' : 'negative'}">
+                        ${formatCurrency(pos.pnl)} (${pos.pnl_pct.toFixed(1)}%)
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function updateClosedPositions(positions) {
+            const container = document.getElementById('closedPositionsList');
+            const countBadge = document.getElementById('closedPositionsCount');
+
+            if (!positions || positions.length === 0) {
+                container.innerHTML = '<div class="text-secondary text-center py-3">No closed positions yet</div>';
+                if (countBadge) countBadge.textContent = '0';
+                return;
+            }
+
+            if (countBadge) countBadge.textContent = positions.length;
+
+            container.innerHTML = positions.map(pos => `
+                <div class="position-row">
+                    <div><strong>${pos.symbol}</strong> <span class="badge ${pos.side === 'LONG' ? 'bg-success' : 'bg-danger'}">${pos.side}</span></div>
+                    <div>${pos.quantity}</div>
+                    <div>$${pos.entry_price.toFixed(2)}</div>
+                    <div>$${pos.exit_price.toFixed(2)}</div>
                     <div class="${pos.pnl >= 0 ? 'positive' : 'negative'}">
                         ${formatCurrency(pos.pnl)} (${pos.pnl_pct.toFixed(1)}%)
                     </div>

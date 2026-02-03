@@ -383,6 +383,9 @@ class DashboardState:
         # Alerts
         self._alerts: deque[dict] = deque(maxlen=100)
 
+        # Closed positions history
+        self._closed_positions: deque[dict] = deque(maxlen=100)
+
         # Lock for thread safety
         self._lock = asyncio.Lock()
 
@@ -640,7 +643,7 @@ class DashboardState:
         self._decisions.appendleft(decision)
 
     def _handle_fill_event(self, event: "Event") -> None:
-        """Handle fill event - update positions."""
+        """Handle fill event - update positions and track closed positions."""
         audit_dict = event.to_audit_dict()
         symbol = audit_dict.get("symbol", "")
         if not symbol:
@@ -653,19 +656,41 @@ class DashboardState:
         # Update or create position
         if symbol in self._positions:
             pos = self._positions[symbol]
+            old_qty = pos.quantity
+
             if side == "buy":
                 # Add to position
-                total_cost = (pos.entry_price * pos.quantity) + (fill_price * fill_qty)
+                total_cost = (pos.entry_price * abs(pos.quantity)) + (fill_price * fill_qty)
                 pos.quantity += fill_qty
-                if pos.quantity > 0:
-                    pos.entry_price = total_cost / pos.quantity
+                if pos.quantity != 0:
+                    pos.entry_price = total_cost / abs(pos.quantity)
             else:
                 # Reduce position
                 pos.quantity -= fill_qty
-                if pos.quantity <= 0:
-                    del self._positions[symbol]
-                    return
+
             pos.current_price = fill_price
+
+            # Check if position was closed
+            if pos.quantity == 0 or (old_qty > 0 and pos.quantity < 0) or (old_qty < 0 and pos.quantity > 0):
+                # Position closed - calculate realized P&L
+                realized_pnl = (fill_price - pos.entry_price) * abs(old_qty)
+                if old_qty < 0:  # Short position
+                    realized_pnl = -realized_pnl
+
+                self._closed_positions.appendleft({
+                    "symbol": symbol,
+                    "quantity": old_qty,
+                    "entry_price": round(pos.entry_price, 2),
+                    "exit_price": round(fill_price, 2),
+                    "pnl": round(realized_pnl, 2),
+                    "pnl_pct": round((realized_pnl / (pos.entry_price * abs(old_qty))) * 100, 2) if pos.entry_price != 0 else 0,
+                    "closed_at": event.timestamp.isoformat(),
+                    "side": "LONG" if old_qty > 0 else "SHORT",
+                })
+
+                # Remove fully closed position
+                if pos.quantity == 0:
+                    del self._positions[symbol]
         else:
             self._positions[symbol] = PositionInfo(
                 symbol=symbol,
@@ -1019,6 +1044,10 @@ class DashboardState:
         """Get recent alerts."""
         return list(self._alerts)
 
+    def get_closed_positions(self) -> list[dict]:
+        """Get recently closed positions with realized P&L."""
+        return list(self._closed_positions)
+
     def is_kill_switch_active(self) -> bool:
         """Check if kill switch is active."""
         return self._kill_switch_active
@@ -1286,6 +1315,11 @@ class DashboardServer:
             """Get recent alerts."""
             return JSONResponse({"alerts": self._state.get_alerts()})
 
+        @app.get("/api/closed_positions")
+        async def get_closed_positions():
+            """Get recently closed positions with realized P&L."""
+            return JSONResponse({"closed_positions": self._state.get_closed_positions()})
+
         @app.get("/api/equity")
         async def get_equity():
             """Get equity curve data."""
@@ -1436,11 +1470,19 @@ class DashboardServer:
                     "payload": self._state.get_agents(),
                 })
 
-                # Broadcast positions
+                # Broadcast positions (use async to get from broker)
+                positions = await self._state.get_positions_async()
                 await self._connection_manager.broadcast({
                     "type": "positions",
-                    "payload": self._state.get_positions(),
+                    "payload": positions,
                 })
+
+                # Broadcast closed positions (every 4th update)
+                if update_counter % 4 == 0:
+                    await self._connection_manager.broadcast({
+                        "type": "closed_positions",
+                        "payload": self._state.get_closed_positions(),
+                    })
 
                 # Broadcast signals
                 await self._connection_manager.broadcast({
