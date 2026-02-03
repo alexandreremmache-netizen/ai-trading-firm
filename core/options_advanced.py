@@ -14,7 +14,7 @@ import logging
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -65,7 +65,7 @@ class OptionContract:
     @property
     def time_to_expiry(self) -> float:
         """Calculate time to expiry in years."""
-        delta = self.expiry - datetime.now()
+        delta = self.expiry - datetime.now(timezone.utc)
         return max(delta.total_seconds() / (365.25 * 24 * 3600), 0.0)
 
 
@@ -159,25 +159,101 @@ class BasePricingModel(ABC):
         contract: OptionContract,
         market_data: MarketData,
         market_price: float,
+        max_iterations: int = 100,
+        tolerance: float = 1e-8,
         **kwargs
     ) -> float:
-        """Calculate implied volatility from market price."""
+        """
+        Calculate implied volatility from market price.
+
+        Uses Brent's method with fallback to Newton-Raphson for robustness.
+        Handles edge cases near expiration and extreme market prices.
+        """
+        # Edge case: near expiration or zero/negative market price
+        T = contract.time_to_expiry
+        if T <= 1e-6 or market_price <= 0:
+            logger.warning("IV calculation: T near zero or invalid market price")
+            return 0.0
+
+        # Calculate intrinsic value bounds
+        S = market_data.spot
+        K = contract.strike
+        r = market_data.rate
+        q = market_data.dividend_yield
+
+        if contract.option_type == OptionType.CALL:
+            intrinsic = max(0, S * math.exp(-q * T) - K * math.exp(-r * T))
+        else:
+            intrinsic = max(0, K * math.exp(-r * T) - S * math.exp(-q * T))
+
+        # Market price below intrinsic is arbitrage - no valid IV
+        if market_price < intrinsic - 1e-6:
+            logger.warning(f"IV calculation: market price {market_price} below intrinsic {intrinsic}")
+            return 0.0
+
         def objective(vol: float) -> float:
+            if vol <= 0:
+                return -market_price
             md = MarketData(
                 spot=market_data.spot,
                 rate=market_data.rate,
                 dividend_yield=market_data.dividend_yield,
                 volatility=vol
             )
-            result = self.price(contract, md, **kwargs)
-            return result.price - market_price
+            try:
+                result = self.price(contract, md, **kwargs)
+                return result.price - market_price
+            except Exception:
+                return float('inf')
 
         try:
-            result = optimize.brentq(objective, 0.001, 5.0)
-            return result
-        except ValueError:
-            logger.warning("Could not find implied volatility")
-            return 0.0
+            # Try Brent's method first (robust root-finding)
+            result = optimize.brentq(objective, 0.001, 5.0, xtol=tolerance, maxiter=max_iterations)
+            if np.isfinite(result) and result > 0:
+                return result
+        except (ValueError, RuntimeError):
+            pass  # Fall through to Newton-Raphson
+
+        # Fallback: Newton-Raphson with damping
+        vol = 0.20  # Initial guess
+        for i in range(max_iterations):
+            md = MarketData(
+                spot=market_data.spot,
+                rate=market_data.rate,
+                dividend_yield=market_data.dividend_yield,
+                volatility=vol
+            )
+            try:
+                result = self.price(contract, md, **kwargs)
+                price_diff = result.price - market_price
+                vega = result.vega * 100  # Vega is per 1% vol
+
+                if abs(price_diff) < tolerance:
+                    return vol
+
+                # Guard against zero vega (near zero or very deep ITM/OTM)
+                if abs(vega) < 1e-10:
+                    logger.warning("IV Newton-Raphson: zero vega, cannot converge")
+                    break
+
+                # Damped Newton step
+                step = price_diff / vega
+                step = max(-0.5, min(0.5, step))  # Limit step size
+                new_vol = vol - step
+
+                # Keep vol in reasonable bounds
+                new_vol = max(0.001, min(5.0, new_vol))
+
+                if abs(new_vol - vol) < tolerance:
+                    return new_vol
+
+                vol = new_vol
+            except Exception as e:
+                logger.warning(f"IV Newton-Raphson iteration failed: {e}")
+                break
+
+        logger.warning("Could not find implied volatility after max iterations")
+        return 0.0
 
 
 # =============================================================================
@@ -197,7 +273,7 @@ class BlackScholesModel(BasePricingModel):
         **kwargs
     ) -> PricingResult:
         """Price option using Black-Scholes."""
-        start_time = datetime.now()
+        start_time = datetime.now(timezone.utc)
 
         S = market_data.spot
         K = contract.strike
@@ -206,16 +282,44 @@ class BlackScholesModel(BasePricingModel):
         q = market_data.dividend_yield
         sigma = market_data.volatility
 
+        # OPT-P0-1: Handle near-expiry delta discontinuity
+        # When T < 1 day, use digital delta (0 or 1 for calls, -1 or 0 for puts)
+        one_day_in_years = 1.0 / 365.0
+
         if T <= 0 or sigma <= 0:
             # Expired or zero vol
             if contract.option_type == OptionType.CALL:
                 intrinsic = max(S - K, 0)
+                # Digital delta: 1 if ITM, 0 if OTM
+                delta = 1.0 if S > K else 0.0
             else:
                 intrinsic = max(K - S, 0)
+                # Digital delta: -1 if ITM, 0 if OTM
+                delta = -1.0 if S < K else 0.0
             return PricingResult(
                 model=self.model_type(),
                 price=intrinsic,
-                delta=1.0 if intrinsic > 0 else 0.0,
+                delta=delta,
+                gamma=0.0,
+                vega=0.0,
+                theta=0.0,
+                rho=0.0,
+                computation_time_ms=0.0
+            )
+
+        # OPT-P0-1: Near expiry (< 1 day) - use digital delta
+        if T < one_day_in_years:
+            if contract.option_type == OptionType.CALL:
+                intrinsic = max(S - K, 0)
+                # Digital delta based on moneyness
+                delta = 1.0 if S > K else 0.0
+            else:
+                intrinsic = max(K - S, 0)
+                delta = -1.0 if S < K else 0.0
+            return PricingResult(
+                model=self.model_type(),
+                price=intrinsic,
+                delta=delta,
                 gamma=0.0,
                 vega=0.0,
                 theta=0.0,
@@ -224,8 +328,45 @@ class BlackScholesModel(BasePricingModel):
             )
 
         # d1 and d2
-        d1 = (math.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
+        # Guard against invalid inputs
+        if K <= 0 or S <= 0:
+            logger.warning(f"Invalid S={S} or K={K} for Black-Scholes")
+            return PricingResult(
+                model=self.model_type(),
+                price=0.0,
+                delta=0.0,
+                gamma=0.0,
+                vega=0.0,
+                theta=0.0,
+                rho=0.0,
+                computation_time_ms=0.0
+            )
+
+        sqrt_T = math.sqrt(T)
+        sigma_sqrt_T = sigma * sqrt_T
+
+        # Guard against division by zero in d1/d2 calculation
+        if sigma_sqrt_T < 1e-12:
+            # Very low vol or very short time - use intrinsic value
+            if contract.option_type == OptionType.CALL:
+                intrinsic = max(S - K, 0)
+                delta = 1.0 if S > K else 0.0
+            else:
+                intrinsic = max(K - S, 0)
+                delta = -1.0 if S < K else 0.0
+            return PricingResult(
+                model=self.model_type(),
+                price=intrinsic,
+                delta=delta,
+                gamma=0.0,
+                vega=0.0,
+                theta=0.0,
+                rho=0.0,
+                computation_time_ms=0.0
+            )
+
+        d1 = (math.log(S / K) + (r - q + 0.5 * sigma**2) * T) / sigma_sqrt_T
+        d2 = d1 - sigma_sqrt_T
 
         # Price and Greeks
         if contract.option_type == OptionType.CALL:
@@ -238,15 +379,24 @@ class BlackScholesModel(BasePricingModel):
             rho = -K * T * math.exp(-r * T) * norm.cdf(-d2) / 100
 
         # Common Greeks
-        gamma = math.exp(-q * T) * norm.pdf(d1) / (S * sigma * math.sqrt(T))
-        vega = S * math.exp(-q * T) * norm.pdf(d1) * math.sqrt(T) / 100
+        # Guard against division by zero in gamma
+        if S * sigma_sqrt_T < 1e-12:
+            gamma = 0.0
+        else:
+            gamma = math.exp(-q * T) * norm.pdf(d1) / (S * sigma_sqrt_T)
+        vega = S * math.exp(-q * T) * norm.pdf(d1) * sqrt_T / 100
         theta = self._calculate_theta(S, K, T, r, q, sigma, d1, d2, contract.option_type)
 
         # Higher order Greeks
-        vanna = -math.exp(-q * T) * norm.pdf(d1) * d2 / sigma
-        volga = vega * d1 * d2 / sigma
+        # Guard against division by zero
+        if sigma < 1e-12:
+            vanna = 0.0
+            volga = 0.0
+        else:
+            vanna = -math.exp(-q * T) * norm.pdf(d1) * d2 / sigma
+            volga = vega * d1 * d2 / sigma
 
-        computation_time = (datetime.now() - start_time).total_seconds() * 1000
+        computation_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
 
         return PricingResult(
             model=self.model_type(),
@@ -268,7 +418,9 @@ class BlackScholesModel(BasePricingModel):
         d1: float, d2: float, option_type: OptionType
     ) -> float:
         """Calculate theta (time decay)."""
-        term1 = -S * math.exp(-q * T) * norm.pdf(d1) * sigma / (2 * math.sqrt(T))
+        # Guard against division by zero when T is very small
+        sqrt_T = math.sqrt(T) if T > 1e-12 else 1e-6
+        term1 = -S * math.exp(-q * T) * norm.pdf(d1) * sigma / (2 * sqrt_T)
 
         if option_type == OptionType.CALL:
             term2 = q * S * math.exp(-q * T) * norm.cdf(d1)
@@ -329,7 +481,7 @@ class MertonJumpDiffusionModel(BasePricingModel):
 
         Uses series expansion of BS prices weighted by Poisson probabilities.
         """
-        start_time = datetime.now()
+        start_time = datetime.now(timezone.utc)
 
         if jump_params is None:
             # Default parameters if not provided
@@ -418,7 +570,7 @@ class MertonJumpDiffusionModel(BasePricingModel):
         # Approximate theta
         theta = -price * 0.01 / T if T > 0.01 else 0.0  # Rough approximation
 
-        computation_time = (datetime.now() - start_time).total_seconds() * 1000
+        computation_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
 
         return PricingResult(
             model=self.model_type(),
@@ -531,7 +683,7 @@ class HestonModel(BasePricingModel):
 
         Uses Carr-Madan FFT approach or direct integration.
         """
-        start_time = datetime.now()
+        start_time = datetime.now(timezone.utc)
 
         if heston_params is None:
             # Default parameters
@@ -579,7 +731,7 @@ class HestonModel(BasePricingModel):
         gamma = self._numerical_gamma(S, K, T, r, q, heston_params, contract.option_type)
         vega = self._numerical_vega(S, K, T, r, q, heston_params, contract.option_type)
 
-        computation_time = (datetime.now() - start_time).total_seconds() * 1000
+        computation_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
 
         return PricingResult(
             model=self.model_type(),
@@ -817,8 +969,9 @@ class HestonModel(BasePricingModel):
                     if contract.option_type == OptionType.PUT:
                         model_price = model_price - S * math.exp(-q * T) + K * math.exp(-r * T)
                     total_error += (model_price - market_price)**2
-                except Exception:
-                    total_error += 1e6
+                except Exception as e:
+                    logger.warning(f"Heston pricing failed for K={K}, T={T}: {e}")
+                    total_error += 1e6  # Penalize failed calibration
 
             return total_error
 
@@ -1022,9 +1175,9 @@ class PricingModelComparator:
                     continue
 
                 market_price = market_prices[key]
-                expiry_date = datetime.now().replace(
-                    year=datetime.now().year + int(expiry),
-                    month=int((expiry % 1) * 12) + 1 if expiry % 1 > 0 else datetime.now().month
+                expiry_date = datetime.now(timezone.utc).replace(
+                    year=datetime.now(timezone.utc).year + int(expiry),
+                    month=int((expiry % 1) * 12) + 1 if expiry % 1 > 0 else datetime.now(timezone.utc).month
                 )
 
                 contract = OptionContract(
@@ -1137,7 +1290,7 @@ class OptionMarketMaker:
             ask_price=round(ask_price, 2),
             bid_size=bid_size if side in [QuoteSide.BID, QuoteSide.TWO_WAY] else 0,
             ask_size=ask_size if side in [QuoteSide.ASK, QuoteSide.TWO_WAY] else 0,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             theo_price=theo_price,
             edge=edge,
             inventory_adjustment=inventory_adj
@@ -1292,10 +1445,20 @@ class OptionMarketMaker:
         hedges = []
 
         # Delta hedge with underlying
+        # OPT-P0-3: Use floor/ceil based on hedge direction to avoid residual exposure
         if abs(portfolio_greeks["delta"]) > 100:
+            delta_to_hedge = portfolio_greeks["delta"]
+            # If delta > 0, we need to sell shares (negative hedge)
+            # Use floor to not over-hedge: floor(155.7) = 155 -> hedge = -155
+            # If delta < 0, we need to buy shares (positive hedge)
+            # Use ceiling of absolute value: ceil(155.7) = 156 -> hedge = 156
+            if delta_to_hedge > 0:
+                hedge_quantity = -math.floor(delta_to_hedge)
+            else:
+                hedge_quantity = math.ceil(abs(delta_to_hedge))
             hedges.append({
                 "instrument": "underlying",
-                "quantity": -int(portfolio_greeks["delta"]),
+                "quantity": hedge_quantity,
                 "rationale": "Delta neutralization"
             })
 
@@ -1323,6 +1486,599 @@ class OptionMarketMaker:
 # Module Integration
 # =============================================================================
 
+# =============================================================================
+# VEGA CONVEXITY (VOLGA) CALCULATION (P2)
+# =============================================================================
+
+class VolgaCalculator:
+    """
+    Vega convexity (Volga) calculator (P2).
+
+    Volga measures the sensitivity of vega to changes in implied volatility.
+    It's crucial for:
+    - Understanding P&L from vol of vol
+    - Pricing exotic options
+    - Managing volatility smile risk
+    """
+
+    def __init__(self, pricing_model: BasePricingModel | None = None):
+        """Initialize with pricing model."""
+        self.pricing_model = pricing_model or BlackScholesModel()
+
+    def calculate_volga(
+        self,
+        contract: OptionContract,
+        market_data: MarketData,
+        vol_bump: float = 0.01,
+    ) -> Dict[str, float]:
+        """
+        Calculate volga (vega convexity) numerically (P2).
+
+        Volga = d(Vega)/d(sigma) = d^2(Price)/d(sigma)^2
+
+        Args:
+            contract: Option contract
+            market_data: Market data with volatility
+            vol_bump: Volatility bump size for numerical differentiation
+
+        Returns:
+            Dictionary with volga and related metrics
+        """
+        sigma = market_data.volatility
+
+        # Price at current vol
+        result_mid = self.pricing_model.price(contract, market_data)
+        price_mid = result_mid.price
+        vega_mid = result_mid.vega
+
+        # Price at vol + bump
+        md_up = MarketData(
+            spot=market_data.spot,
+            rate=market_data.rate,
+            dividend_yield=market_data.dividend_yield,
+            volatility=sigma + vol_bump,
+        )
+        result_up = self.pricing_model.price(contract, md_up)
+        vega_up = result_up.vega
+
+        # Price at vol - bump
+        md_down = MarketData(
+            spot=market_data.spot,
+            rate=market_data.rate,
+            dividend_yield=market_data.dividend_yield,
+            volatility=max(0.001, sigma - vol_bump),
+        )
+        result_down = self.pricing_model.price(contract, md_down)
+        vega_down = result_down.vega
+
+        # Numerical volga (central difference)
+        volga = (vega_up - vega_down) / (2 * vol_bump)
+
+        # Second derivative of price w.r.t. vol
+        # Using three-point formula
+        volga_price = (result_up.price - 2 * price_mid + result_down.price) / (vol_bump ** 2)
+
+        # Vega decay rate (how vega changes as vol moves)
+        vega_decay_up = (vega_up - vega_mid) / vol_bump
+        vega_decay_down = (vega_mid - vega_down) / vol_bump
+
+        return {
+            "volga": volga,
+            "volga_dollar": volga * 100,  # Per 1% vol move
+            "vega_mid": vega_mid,
+            "vega_up": vega_up,
+            "vega_down": vega_down,
+            "vega_convexity": volga_price,
+            "vega_decay_rate_up": vega_decay_up,
+            "vega_decay_rate_down": vega_decay_down,
+            "vega_skew": vega_decay_up - vega_decay_down,
+            "vol_bump_used": vol_bump,
+            "interpretation": (
+                "Positive volga: benefits from vol of vol"
+                if volga > 0
+                else "Negative volga: hurt by vol of vol"
+            ),
+        }
+
+    def calculate_volga_surface(
+        self,
+        underlying: str,
+        spot: float,
+        rate: float,
+        strikes: List[float],
+        expiries_days: List[int],
+        base_vol: float = 0.20,
+    ) -> Dict[Tuple[float, int], float]:
+        """
+        Calculate volga across strike/expiry grid (P2).
+
+        Args:
+            underlying: Underlying symbol
+            spot: Spot price
+            rate: Risk-free rate
+            strikes: List of strikes
+            expiries_days: List of expiries in days
+            base_vol: Base volatility
+
+        Returns:
+            Dictionary of (strike, expiry_days) -> volga
+        """
+        from datetime import timedelta
+
+        volga_surface = {}
+
+        for strike in strikes:
+            for expiry_days in expiries_days:
+                expiry = datetime.now(timezone.utc) + timedelta(days=expiry_days)
+                contract = OptionContract(
+                    underlying=underlying,
+                    strike=strike,
+                    expiry=expiry,
+                    option_type=OptionType.CALL,
+                )
+
+                market_data = MarketData(
+                    spot=spot,
+                    rate=rate,
+                    volatility=base_vol,
+                )
+
+                result = self.calculate_volga(contract, market_data)
+                volga_surface[(strike, expiry_days)] = result["volga"]
+
+        return volga_surface
+
+
+# =============================================================================
+# CROSS-GAMMA FOR MULTI-ASSET (P2)
+# =============================================================================
+
+@dataclass
+class CrossGammaResult:
+    """Result of cross-gamma calculation (P2)."""
+    asset1: str
+    asset2: str
+    cross_gamma: float
+    correlation: float
+    delta1: float
+    delta2: float
+    gamma1: float
+    gamma2: float
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "asset1": self.asset1,
+            "asset2": self.asset2,
+            "cross_gamma": self.cross_gamma,
+            "correlation": self.correlation,
+            "delta1": self.delta1,
+            "delta2": self.delta2,
+            "gamma1": self.gamma1,
+            "gamma2": self.gamma2,
+        }
+
+
+class CrossGammaCalculator:
+    """
+    Cross-gamma calculator for multi-asset options (P2).
+
+    Cross-gamma measures sensitivity of delta in one asset to
+    price changes in another asset. Critical for:
+    - Basket options
+    - Spread options
+    - Correlation products
+    """
+
+    def __init__(self, pricing_model: BasePricingModel | None = None):
+        """Initialize with pricing model."""
+        self.pricing_model = pricing_model or BlackScholesModel()
+
+    def calculate_cross_gamma(
+        self,
+        contract: OptionContract,
+        market_data: MarketData,
+        asset1_name: str,
+        asset2_name: str,
+        spot1: float,
+        spot2: float,
+        correlation: float,
+        weight1: float = 0.5,
+        weight2: float = 0.5,
+        spot_bump_pct: float = 0.01,
+    ) -> CrossGammaResult:
+        """
+        Calculate cross-gamma between two assets (P2).
+
+        Cross-gamma = d^2(V) / (dS1 * dS2)
+
+        For a basket option with S_basket = w1*S1 + w2*S2,
+        the cross-gamma captures how delta1 changes when S2 moves.
+
+        Args:
+            contract: Option contract (basket/spread)
+            market_data: Base market data
+            asset1_name: Name of first asset
+            asset2_name: Name of second asset
+            spot1: Spot price of asset 1
+            spot2: Spot price of asset 2
+            correlation: Correlation between assets
+            weight1: Weight of asset 1 in basket
+            weight2: Weight of asset 2 in basket
+            spot_bump_pct: Percentage bump for numerical calculation
+
+        Returns:
+            CrossGammaResult with cross-gamma and related metrics
+        """
+        # Calculate basket spot for base case
+        basket_spot = weight1 * spot1 + weight2 * spot2
+        h1 = spot1 * spot_bump_pct
+        h2 = spot2 * spot_bump_pct
+
+        # Create market data for different scenarios
+        def get_basket_price(s1: float, s2: float) -> float:
+            basket = weight1 * s1 + weight2 * s2
+            md = MarketData(
+                spot=basket,
+                rate=market_data.rate,
+                dividend_yield=market_data.dividend_yield,
+                volatility=market_data.volatility,
+            )
+            result = self.pricing_model.price(contract, md)
+            return result.price
+
+        # Four-point cross-gamma calculation
+        # Cross-gamma = [V(S1+h1, S2+h2) - V(S1+h1, S2-h2) - V(S1-h1, S2+h2) + V(S1-h1, S2-h2)] / (4*h1*h2)
+        V_pp = get_basket_price(spot1 + h1, spot2 + h2)  # ++
+        V_pm = get_basket_price(spot1 + h1, spot2 - h2)  # +-
+        V_mp = get_basket_price(spot1 - h1, spot2 + h2)  # -+
+        V_mm = get_basket_price(spot1 - h1, spot2 - h2)  # --
+
+        cross_gamma = (V_pp - V_pm - V_mp + V_mm) / (4 * h1 * h2)
+
+        # Calculate individual deltas and gammas
+        V_base = get_basket_price(spot1, spot2)
+        V_1p = get_basket_price(spot1 + h1, spot2)
+        V_1m = get_basket_price(spot1 - h1, spot2)
+        V_2p = get_basket_price(spot1, spot2 + h2)
+        V_2m = get_basket_price(spot1, spot2 - h2)
+
+        delta1 = (V_1p - V_1m) / (2 * h1)
+        delta2 = (V_2p - V_2m) / (2 * h2)
+        gamma1 = (V_1p - 2 * V_base + V_1m) / (h1 ** 2)
+        gamma2 = (V_2p - 2 * V_base + V_2m) / (h2 ** 2)
+
+        return CrossGammaResult(
+            asset1=asset1_name,
+            asset2=asset2_name,
+            cross_gamma=cross_gamma,
+            correlation=correlation,
+            delta1=delta1,
+            delta2=delta2,
+            gamma1=gamma1,
+            gamma2=gamma2,
+        )
+
+    def calculate_cross_gamma_matrix(
+        self,
+        assets: List[str],
+        spots: Dict[str, float],
+        weights: Dict[str, float],
+        correlations: Dict[Tuple[str, str], float],
+        contract: OptionContract,
+        market_data: MarketData,
+    ) -> Dict[str, Any]:
+        """
+        Calculate full cross-gamma matrix for multiple assets (P2).
+
+        Args:
+            assets: List of asset names
+            spots: Dictionary of asset -> spot price
+            weights: Dictionary of asset -> weight in basket
+            correlations: Dictionary of (asset1, asset2) -> correlation
+            contract: Option contract
+            market_data: Base market data
+
+        Returns:
+            Dictionary with cross-gamma matrix and analysis
+        """
+        n = len(assets)
+        cross_gamma_matrix = np.zeros((n, n))
+        results = {}
+
+        for i, asset1 in enumerate(assets):
+            for j, asset2 in enumerate(assets):
+                if i == j:
+                    # Diagonal is regular gamma
+                    basket_spot = sum(
+                        weights.get(a, 0) * spots.get(a, 0) for a in assets
+                    )
+                    md = MarketData(
+                        spot=basket_spot,
+                        rate=market_data.rate,
+                        dividend_yield=market_data.dividend_yield,
+                        volatility=market_data.volatility,
+                    )
+                    result = self.pricing_model.price(contract, md)
+                    cross_gamma_matrix[i, j] = result.gamma * (weights.get(asset1, 0) ** 2)
+                elif j > i:
+                    corr = correlations.get((asset1, asset2), 0.5)
+                    if (asset2, asset1) in correlations:
+                        corr = correlations[(asset2, asset1)]
+
+                    cg_result = self.calculate_cross_gamma(
+                        contract=contract,
+                        market_data=market_data,
+                        asset1_name=asset1,
+                        asset2_name=asset2,
+                        spot1=spots.get(asset1, 100),
+                        spot2=spots.get(asset2, 100),
+                        correlation=corr,
+                        weight1=weights.get(asset1, 0.5),
+                        weight2=weights.get(asset2, 0.5),
+                    )
+                    cross_gamma_matrix[i, j] = cg_result.cross_gamma
+                    cross_gamma_matrix[j, i] = cg_result.cross_gamma
+                    results[f"{asset1}_{asset2}"] = cg_result.to_dict()
+
+        # Total portfolio cross-gamma exposure
+        total_cross_gamma = np.sum(cross_gamma_matrix) - np.trace(cross_gamma_matrix)
+
+        return {
+            "assets": assets,
+            "cross_gamma_matrix": cross_gamma_matrix.tolist(),
+            "pairwise_results": results,
+            "total_cross_gamma": total_cross_gamma,
+            "max_cross_gamma_pair": max(
+                results.keys(),
+                key=lambda k: abs(results[k]["cross_gamma"]),
+                default=None,
+            ) if results else None,
+        }
+
+
+# =============================================================================
+# THETA DECAY CURVE PROJECTION (P2)
+# =============================================================================
+
+@dataclass
+class ThetaProjection:
+    """Single point in theta decay projection (P2)."""
+    days_forward: int
+    option_value: float
+    theta_daily: float
+    theta_cumulative: float
+    time_to_expiry: float
+
+
+class ThetaDecayCurveCalculator:
+    """
+    Theta decay curve projection calculator (P2).
+
+    Projects the theta decay over time, showing how option
+    value and theta change as expiration approaches.
+    Critical for:
+    - Timing option trades
+    - Understanding decay acceleration
+    - Rolling strategy decisions
+    """
+
+    def __init__(self, pricing_model: BasePricingModel | None = None):
+        """Initialize with pricing model."""
+        self.pricing_model = pricing_model or BlackScholesModel()
+
+    def project_theta_decay(
+        self,
+        contract: OptionContract,
+        market_data: MarketData,
+        projection_days: int = 30,
+        step_days: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Project theta decay curve forward in time (P2).
+
+        Args:
+            contract: Option contract
+            market_data: Current market data
+            projection_days: Number of days to project forward
+            step_days: Days between projection points
+
+        Returns:
+            Dictionary with theta decay projections and analysis
+        """
+        projections: List[ThetaProjection] = []
+        current_tte = contract.time_to_expiry
+
+        if current_tte <= 0:
+            return {
+                "error": "Option has expired",
+                "projections": [],
+            }
+
+        # Maximum projection is until 1 day before expiry
+        max_days = int(current_tte * 365) - 1
+        projection_days = min(projection_days, max_days)
+
+        cumulative_theta = 0.0
+
+        for day in range(0, projection_days + 1, step_days):
+            # Create contract with adjusted time to expiry
+            days_remaining = current_tte * 365 - day
+            if days_remaining <= 0:
+                break
+
+            tte_years = days_remaining / 365.0
+
+            # Create a new contract with shifted expiry
+            shifted_expiry = datetime.now(timezone.utc) + timedelta(days=days_remaining)
+            shifted_contract = OptionContract(
+                underlying=contract.underlying,
+                strike=contract.strike,
+                expiry=shifted_expiry,
+                option_type=contract.option_type,
+                multiplier=contract.multiplier,
+            )
+
+            # Price option
+            result = self.pricing_model.price(shifted_contract, market_data)
+
+            # Daily theta (already in per-day terms from model)
+            daily_theta = result.theta
+
+            if day > 0:
+                cumulative_theta += daily_theta * step_days
+
+            projections.append(ThetaProjection(
+                days_forward=day,
+                option_value=result.price,
+                theta_daily=daily_theta,
+                theta_cumulative=cumulative_theta,
+                time_to_expiry=tte_years,
+            ))
+
+        # Analyze decay pattern
+        if len(projections) >= 2:
+            values = [p.option_value for p in projections]
+            thetas = [p.theta_daily for p in projections]
+
+            # Find acceleration point (where theta decay rate increases significantly)
+            theta_changes = [
+                thetas[i + 1] - thetas[i]
+                for i in range(len(thetas) - 1)
+            ]
+            max_acceleration_idx = (
+                theta_changes.index(min(theta_changes))
+                if theta_changes
+                else 0
+            )
+
+            # Calculate decay metrics
+            initial_value = values[0]
+            half_value_day = None
+            for i, v in enumerate(values):
+                if v <= initial_value / 2:
+                    half_value_day = projections[i].days_forward
+                    break
+
+            decay_rate_first_half = (
+                (values[0] - values[len(values) // 2]) / values[0] * 100
+                if len(values) > 1 and values[0] > 0
+                else 0
+            )
+
+            decay_rate_second_half = (
+                (values[len(values) // 2] - values[-1]) / values[0] * 100
+                if len(values) > 1 and values[0] > 0
+                else 0
+            )
+
+            analysis = {
+                "initial_value": initial_value,
+                "final_value": values[-1],
+                "total_decay": initial_value - values[-1],
+                "total_decay_pct": (initial_value - values[-1]) / initial_value * 100
+                if initial_value > 0
+                else 0,
+                "half_value_day": half_value_day,
+                "max_theta_day": projections[thetas.index(min(thetas))].days_forward
+                if thetas
+                else 0,
+                "max_theta_value": min(thetas) if thetas else 0,
+                "acceleration_day": projections[max_acceleration_idx].days_forward,
+                "decay_rate_first_half_pct": decay_rate_first_half,
+                "decay_rate_second_half_pct": decay_rate_second_half,
+                "decay_accelerates": decay_rate_second_half > decay_rate_first_half,
+            }
+        else:
+            analysis = {}
+
+        return {
+            "contract": {
+                "underlying": contract.underlying,
+                "strike": contract.strike,
+                "option_type": contract.option_type.value,
+                "current_tte_days": current_tte * 365,
+            },
+            "market_data": {
+                "spot": market_data.spot,
+                "volatility": market_data.volatility,
+                "rate": market_data.rate,
+            },
+            "projections": [
+                {
+                    "days_forward": p.days_forward,
+                    "option_value": p.option_value,
+                    "theta_daily": p.theta_daily,
+                    "theta_cumulative": p.theta_cumulative,
+                    "time_to_expiry_years": p.time_to_expiry,
+                }
+                for p in projections
+            ],
+            "analysis": analysis,
+            "recommendation": self._generate_theta_recommendation(analysis),
+        }
+
+    def _generate_theta_recommendation(self, analysis: Dict[str, Any]) -> str:
+        """Generate trading recommendation based on theta analysis."""
+        if not analysis:
+            return "Insufficient data for recommendation"
+
+        if analysis.get("decay_accelerates"):
+            accel_day = analysis.get("acceleration_day", 0)
+            if accel_day < 7:
+                return "URGENT: Significant theta acceleration imminent. Consider rolling or closing position."
+            elif accel_day < 14:
+                return "CAUTION: Theta decay will accelerate soon. Monitor position closely."
+            else:
+                return "OK: Theta decay still relatively stable. Continue monitoring."
+        else:
+            return "STABLE: Linear decay pattern. Normal theta profile."
+
+    def compare_theta_curves(
+        self,
+        contracts: List[OptionContract],
+        market_data: MarketData,
+        projection_days: int = 30,
+    ) -> Dict[str, Any]:
+        """
+        Compare theta decay curves for multiple contracts (P2).
+
+        Useful for:
+        - Calendar spread analysis
+        - Selecting optimal expiry
+        - Rolling decision support
+        """
+        curves = {}
+
+        for contract in contracts:
+            key = f"{contract.strike}_{contract.expiry.strftime('%Y%m%d')}"
+            projection = self.project_theta_decay(
+                contract, market_data, projection_days
+            )
+            curves[key] = projection
+
+        # Find best theta profile
+        best_theta_ratio = None
+        best_contract = None
+
+        for key, curve in curves.items():
+            if "analysis" in curve and curve["analysis"]:
+                initial = curve["analysis"].get("initial_value", 0)
+                if initial > 0:
+                    total_decay_pct = curve["analysis"].get("total_decay_pct", 0)
+                    theta_ratio = total_decay_pct / projection_days  # Daily decay rate
+                    if best_theta_ratio is None or theta_ratio < best_theta_ratio:
+                        best_theta_ratio = theta_ratio
+                        best_contract = key
+
+        return {
+            "curves": curves,
+            "comparison": {
+                "best_theta_profile": best_contract,
+                "lowest_daily_decay_pct": best_theta_ratio,
+            },
+        }
+
+
 def create_pricing_suite() -> Dict[str, Any]:
     """
     Create a complete pricing suite with all models.
@@ -1335,7 +2091,10 @@ def create_pricing_suite() -> Dict[str, Any]:
         "merton_jump": MertonJumpDiffusionModel(),
         "heston": HestonModel(),
         "comparator": PricingModelComparator(),
-        "market_maker": OptionMarketMaker(BlackScholesModel())
+        "market_maker": OptionMarketMaker(BlackScholesModel()),
+        "volga_calculator": VolgaCalculator(),  # P2: Vega convexity
+        "cross_gamma_calculator": CrossGammaCalculator(),  # P2: Multi-asset
+        "theta_decay_calculator": ThetaDecayCurveCalculator(),  # P2: Theta projection
     }
 
 

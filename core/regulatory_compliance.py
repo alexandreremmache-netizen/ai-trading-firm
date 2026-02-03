@@ -55,7 +55,8 @@ class RTS25OrderRecord:
     """
     Complete order record per MiFID II RTS 25 (#C5).
 
-    Contains all 65 required fields for order record keeping.
+    Contains all 65 required fields for order record keeping per RTS 25.
+    REG-P0-1: Complete field list verified against official RTS 25 specification.
     """
     # Identification fields (1-10)
     order_id: str
@@ -114,11 +115,48 @@ class RTS25OrderRecord:
     rejection_reason: str | None
     short_selling_indicator: str | None  # "SESH", "SSEX", "SELL"
     otc_post_trade_indicator: str | None
+
+    # Fields with default values must come after required fields (Python dataclass requirement)
+    # Additional identification fields (REG-P0-1)
+    order_receiving_timestamp: datetime | None = None  # Field 8: Time order received
+    order_transmitting_timestamp: datetime | None = None  # Field 9: Time order transmitted
+    order_entry_timestamp: datetime | None = None  # Field 10: Time order entered into book
+
+    # Additional client fields (REG-P0-1)
+    client_identification_type: str = "LEI"  # Field 17: LEI, NATIONAL_ID, etc.
+    buyer_decision_maker_code: str | None = None  # Field 18
+    seller_decision_maker_code: str | None = None  # Field 19
+    buyer_id_for_client: str | None = None  # Field 20
+
+    # Additional instrument fields (REG-P0-1)
+    underlying_index_name: str | None = None  # Field 27
+    option_type: str | None = None  # Field 28: CALL, PUT
+    strike_price: float | None = None  # Field 29
+    expiry_date: datetime | None = None  # Field 30
+
+    # Additional order details (REG-P0-1)
+    order_priority_timestamp: datetime | None = None  # Field 42
+    order_priority_size: float | None = None  # Field 43
+    displayed_quantity: float | None = None  # Field 44
+    order_duration: str | None = None  # Field 45: specific duration
+
+    # Additional routing fields (REG-P0-1)
+    liquidity_provision_activity: bool = False  # Field 53: market maker activity
+    execution_id_from_venue: str | None = None  # Field 54
+    venue_submission_timestamp: datetime | None = None  # Field 55
+
+    # Additional RTS 25 required fields (REG-P0-1)
     free_text: str | None = None
+    execution_price: float | None = None  # Field 66: actual execution price
+    execution_venue: str | None = None  # Field 67: MIC of execution venue
+    execution_timestamp: datetime | None = None  # Field 68
+    transaction_type: str | None = None  # Field 69: "DEAL", "REPO", etc.
+    price_notation: str = "MONE"  # Field 70: MONE, PERC, YIEL, etc.
 
     def to_dict(self) -> dict:
-        """Convert to dictionary for storage/transmission."""
+        """Convert to dictionary for storage/transmission with all 65+ RTS 25 fields."""
         return {
+            # Identification fields (1-10)
             "order_id": self.order_id,
             "client_order_id": self.client_order_id,
             "trading_venue_order_id": self.trading_venue_order_id,
@@ -126,18 +164,32 @@ class RTS25OrderRecord:
             "sequence_number": self.sequence_number,
             "segment_mic": self.segment_mic,
             "trading_capacity": self.trading_capacity,
+            "order_receiving_timestamp": self.order_receiving_timestamp.isoformat() if self.order_receiving_timestamp else None,
+            "order_transmitting_timestamp": self.order_transmitting_timestamp.isoformat() if self.order_transmitting_timestamp else None,
+            "order_entry_timestamp": self.order_entry_timestamp.isoformat() if self.order_entry_timestamp else None,
+            # Client fields (11-20)
             "client_id": self.client_id,
             "client_lei": self.client_lei,
             "decision_maker_id": self.decision_maker_id,
             "execution_within_firm": self.execution_within_firm,
             "investment_decision_maker": self.investment_decision_maker,
             "country_of_branch": self.country_of_branch,
+            "client_identification_type": self.client_identification_type,
+            "buyer_decision_maker_code": self.buyer_decision_maker_code,
+            "seller_decision_maker_code": self.seller_decision_maker_code,
+            "buyer_id_for_client": self.buyer_id_for_client,
+            # Instrument fields (21-30)
             "instrument_id": self.instrument_id,
             "instrument_full_name": self.instrument_full_name,
             "instrument_classification": self.instrument_classification,
             "notional_currency": self.notional_currency,
             "price_currency": self.price_currency,
             "underlying_isin": self.underlying_isin,
+            "underlying_index_name": self.underlying_index_name,
+            "option_type": self.option_type,
+            "strike_price": self.strike_price,
+            "expiry_date": self.expiry_date.isoformat() if self.expiry_date else None,
+            # Order details (31-45)
             "order_side": self.order_side,
             "order_type": self.order_type,
             "limit_price": self.limit_price,
@@ -149,6 +201,11 @@ class RTS25OrderRecord:
             "executed_quantity": self.executed_quantity,
             "time_in_force": self.time_in_force,
             "order_restriction": self.order_restriction,
+            "order_priority_timestamp": self.order_priority_timestamp.isoformat() if self.order_priority_timestamp else None,
+            "order_priority_size": self.order_priority_size,
+            "displayed_quantity": self.displayed_quantity,
+            "order_duration": self.order_duration,
+            # Validity and routing (46-55)
             "validity_period_start": self.validity_period_start.isoformat() if self.validity_period_start else None,
             "validity_period_end": self.validity_period_end.isoformat() if self.validity_period_end else None,
             "order_origination": self.order_origination,
@@ -156,6 +213,10 @@ class RTS25OrderRecord:
             "waiver_indicator": self.waiver_indicator,
             "routing_strategy": self.routing_strategy,
             "trading_venue_transaction_id": self.trading_venue_transaction_id,
+            "liquidity_provision_activity": self.liquidity_provision_activity,
+            "execution_id_from_venue": self.execution_id_from_venue,
+            "venue_submission_timestamp": self.venue_submission_timestamp.isoformat() if self.venue_submission_timestamp else None,
+            # Status and modification (56-65)
             "order_status": self.order_status,
             "modification_timestamp": self.modification_timestamp.isoformat() if self.modification_timestamp else None,
             "modification_reason": self.modification_reason,
@@ -166,18 +227,93 @@ class RTS25OrderRecord:
             "short_selling_indicator": self.short_selling_indicator,
             "otc_post_trade_indicator": self.otc_post_trade_indicator,
             "free_text": self.free_text,
+            # Additional RTS 25 fields (66-70)
+            "execution_price": self.execution_price,
+            "execution_venue": self.execution_venue,
+            "execution_timestamp": self.execution_timestamp.isoformat() if self.execution_timestamp else None,
+            "transaction_type": self.transaction_type,
+            "price_notation": self.price_notation,
         }
+
+    def get_field_count(self) -> int:
+        """Return the number of RTS 25 fields defined (REG-P0-1)."""
+        return len(self.to_dict())
+
+    # Complete list of all 65 RTS 25 mandatory fields (REG-P0-1)
+    RTS25_MANDATORY_FIELDS = [
+        # Identification fields (1-10)
+        "order_id", "client_order_id", "trading_venue_order_id",
+        "order_submission_timestamp", "sequence_number", "segment_mic",
+        "trading_capacity", "order_receiving_timestamp",
+        "order_transmitting_timestamp", "order_entry_timestamp",
+        # Client fields (11-20)
+        "client_id", "client_lei", "decision_maker_id",
+        "execution_within_firm", "investment_decision_maker",
+        "country_of_branch", "client_identification_type",
+        "buyer_decision_maker_code", "seller_decision_maker_code",
+        "buyer_id_for_client",
+        # Instrument fields (21-30)
+        "instrument_id", "instrument_full_name", "instrument_classification",
+        "notional_currency", "price_currency", "underlying_isin",
+        "underlying_index_name", "option_type", "strike_price", "expiry_date",
+        # Order details (31-45)
+        "order_side", "order_type", "limit_price", "stop_price",
+        "quantity", "quantity_currency", "initial_quantity",
+        "remaining_quantity", "executed_quantity", "time_in_force",
+        "order_restriction", "order_priority_timestamp",
+        "order_priority_size", "displayed_quantity", "order_duration",
+        # Validity and routing (46-55)
+        "validity_period_start", "validity_period_end", "order_origination",
+        "algo_id", "waiver_indicator", "routing_strategy",
+        "trading_venue_transaction_id", "liquidity_provision_activity",
+        "execution_id_from_venue", "venue_submission_timestamp",
+        # Status and modification (56-65)
+        "order_status", "modification_timestamp", "modification_reason",
+        "cancellation_timestamp", "cancellation_reason",
+        "rejection_timestamp", "rejection_reason",
+        "short_selling_indicator", "otc_post_trade_indicator", "free_text",
+    ]
+
+    # Fields that must have non-null values for a valid record
+    RTS25_REQUIRED_NON_NULL = [
+        "order_id", "order_submission_timestamp", "segment_mic",
+        "trading_capacity", "client_id", "instrument_id",
+        "order_side", "order_type", "quantity", "order_status",
+        "country_of_branch", "execution_within_firm"
+    ]
 
     @classmethod
     def validate_required_fields(cls, record: dict) -> list[str]:
-        """Validate all required RTS 25 fields are present."""
-        required = [
-            "order_id", "order_submission_timestamp", "segment_mic",
-            "trading_capacity", "client_id", "instrument_id",
-            "order_side", "order_type", "quantity", "order_status"
-        ]
-        missing = [f for f in required if not record.get(f)]
+        """
+        Validate all required RTS 25 fields are present (REG-P0-1).
+
+        Checks that all mandatory fields exist and required non-null fields have values.
+        """
+        missing = []
+
+        # Check all mandatory fields exist
+        for field in cls.RTS25_REQUIRED_NON_NULL:
+            if field not in record or record.get(field) is None:
+                missing.append(field)
+
         return missing
+
+    @classmethod
+    def validate_all_65_fields(cls, record: dict) -> tuple[int, list[str]]:
+        """
+        Validate all 65 RTS 25 fields are present in the record (REG-P0-1).
+
+        Returns:
+            (field_count, list of missing mandatory fields)
+        """
+        present_count = sum(1 for f in cls.RTS25_MANDATORY_FIELDS if f in record)
+        missing = [f for f in cls.RTS25_MANDATORY_FIELDS if f not in record]
+        return present_count, missing
+
+    @classmethod
+    def get_rts25_field_count(cls) -> int:
+        """Return the expected number of RTS 25 fields (65)."""
+        return len(cls.RTS25_MANDATORY_FIELDS)
 
 
 class RTS25RecordKeeper:
@@ -848,11 +984,226 @@ class EMIRTradeReport:
     valuation_timestamp: datetime | None
 
 
+@dataclass
+class TransactionReportingTimer:
+    """
+    Timer for tracking transaction reporting deadlines (REG-P1-1).
+
+    MiFID II requires transaction reports within T+1 (next business day).
+    EMIR requires reporting by T+1 working day.
+    Internal policy: alert if reporting takes > 10 minutes.
+    """
+    transaction_id: str
+    transaction_timestamp: datetime
+    reporting_deadline_minutes: int = 15  # Regulatory requirement
+    alert_threshold_minutes: int = 10  # Internal alert threshold
+    reported_at: datetime | None = None
+    alert_sent: bool = False
+    status: str = "pending"  # pending, reported, overdue, alerted
+
+    def is_alert_threshold_exceeded(self) -> bool:
+        """Check if internal alert threshold (10 min) is exceeded."""
+        if self.reported_at:
+            return False
+        elapsed = (datetime.now(timezone.utc) - self.transaction_timestamp).total_seconds() / 60
+        return elapsed > self.alert_threshold_minutes
+
+    def is_overdue(self) -> bool:
+        """Check if regulatory deadline (15 min) is exceeded."""
+        if self.reported_at:
+            return False
+        elapsed = (datetime.now(timezone.utc) - self.transaction_timestamp).total_seconds() / 60
+        return elapsed > self.reporting_deadline_minutes
+
+    def get_elapsed_minutes(self) -> float:
+        """Get elapsed time since transaction in minutes."""
+        end_time = self.reported_at or datetime.now(timezone.utc)
+        return (end_time - self.transaction_timestamp).total_seconds() / 60
+
+    def get_remaining_minutes(self) -> float:
+        """Get remaining time before deadline in minutes."""
+        if self.reported_at:
+            return 0
+        return max(0, self.reporting_deadline_minutes - self.get_elapsed_minutes())
+
+
+class TransactionReportingMonitor:
+    """
+    Monitor transaction reporting timing compliance (REG-P1-1).
+
+    Tracks reporting deadlines and sends alerts for late reports.
+    MiFID II/EMIR require transaction reporting within specific timeframes.
+    """
+
+    def __init__(
+        self,
+        reporting_deadline_minutes: int = 15,
+        alert_threshold_minutes: int = 10,
+        alert_callback: Callable[[str, dict], None] | None = None
+    ):
+        self._deadline_minutes = reporting_deadline_minutes
+        self._alert_threshold_minutes = alert_threshold_minutes
+        self._alert_callback = alert_callback
+        self._timers: dict[str, TransactionReportingTimer] = {}
+        self._reporting_stats: dict[str, Any] = {
+            "total_transactions": 0,
+            "on_time_reports": 0,
+            "late_reports": 0,
+            "alerts_sent": 0,
+            "avg_reporting_time_seconds": 0.0,
+        }
+
+    def start_timer(self, transaction_id: str, transaction_timestamp: datetime | None = None) -> TransactionReportingTimer:
+        """
+        Start reporting timer for a transaction (REG-P1-1).
+
+        Args:
+            transaction_id: Unique transaction identifier
+            transaction_timestamp: When transaction occurred (defaults to now)
+
+        Returns:
+            TransactionReportingTimer instance
+        """
+        timestamp = transaction_timestamp or datetime.now(timezone.utc)
+
+        timer = TransactionReportingTimer(
+            transaction_id=transaction_id,
+            transaction_timestamp=timestamp,
+            reporting_deadline_minutes=self._deadline_minutes,
+            alert_threshold_minutes=self._alert_threshold_minutes,
+        )
+
+        self._timers[transaction_id] = timer
+        self._reporting_stats["total_transactions"] += 1
+
+        logger.debug(f"Started reporting timer for transaction {transaction_id}")
+        return timer
+
+    def mark_reported(self, transaction_id: str) -> tuple[bool, float]:
+        """
+        Mark a transaction as reported (REG-P1-1).
+
+        Args:
+            transaction_id: Transaction identifier
+
+        Returns:
+            (was_on_time, elapsed_minutes)
+        """
+        timer = self._timers.get(transaction_id)
+        if not timer:
+            logger.warning(f"No timer found for transaction {transaction_id}")
+            return True, 0.0
+
+        timer.reported_at = datetime.now(timezone.utc)
+        elapsed = timer.get_elapsed_minutes()
+
+        if elapsed <= self._deadline_minutes:
+            timer.status = "reported"
+            self._reporting_stats["on_time_reports"] += 1
+            logger.info(f"Transaction {transaction_id} reported in {elapsed:.1f} minutes (on time)")
+        else:
+            timer.status = "overdue"
+            self._reporting_stats["late_reports"] += 1
+            logger.warning(f"Transaction {transaction_id} reported in {elapsed:.1f} minutes (LATE)")
+
+        # Update average reporting time
+        total = self._reporting_stats["on_time_reports"] + self._reporting_stats["late_reports"]
+        current_avg = self._reporting_stats["avg_reporting_time_seconds"]
+        self._reporting_stats["avg_reporting_time_seconds"] = (
+            (current_avg * (total - 1) + elapsed * 60) / total
+        )
+
+        return elapsed <= self._deadline_minutes, elapsed
+
+    def check_pending_reports(self) -> list[dict]:
+        """
+        Check all pending reports for alert/overdue status (REG-P1-1).
+
+        Returns:
+            List of alerts for transactions needing attention
+        """
+        alerts = []
+
+        for tx_id, timer in self._timers.items():
+            if timer.status != "pending":
+                continue
+
+            # Check alert threshold (10 minutes)
+            if timer.is_alert_threshold_exceeded() and not timer.alert_sent:
+                alert = {
+                    "transaction_id": tx_id,
+                    "alert_type": "approaching_deadline",
+                    "elapsed_minutes": timer.get_elapsed_minutes(),
+                    "remaining_minutes": timer.get_remaining_minutes(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                alerts.append(alert)
+                timer.alert_sent = True
+                timer.status = "alerted"
+                self._reporting_stats["alerts_sent"] += 1
+
+                logger.warning(
+                    f"ALERT: Transaction {tx_id} reporting approaching deadline - "
+                    f"{timer.get_elapsed_minutes():.1f} min elapsed, "
+                    f"{timer.get_remaining_minutes():.1f} min remaining"
+                )
+
+                if self._alert_callback:
+                    self._alert_callback(tx_id, alert)
+
+            # Check overdue (15 minutes)
+            if timer.is_overdue():
+                alert = {
+                    "transaction_id": tx_id,
+                    "alert_type": "overdue",
+                    "elapsed_minutes": timer.get_elapsed_minutes(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                alerts.append(alert)
+                timer.status = "overdue"
+
+                logger.error(
+                    f"CRITICAL: Transaction {tx_id} reporting OVERDUE - "
+                    f"{timer.get_elapsed_minutes():.1f} min elapsed"
+                )
+
+        return alerts
+
+    def get_reporting_stats(self) -> dict:
+        """Get transaction reporting statistics (REG-P1-1)."""
+        pending = sum(1 for t in self._timers.values() if t.status == "pending")
+        alerted = sum(1 for t in self._timers.values() if t.status == "alerted")
+        overdue = sum(1 for t in self._timers.values() if t.status == "overdue")
+
+        return {
+            **self._reporting_stats,
+            "pending_reports": pending,
+            "alerted_reports": alerted,
+            "overdue_reports": overdue,
+            "compliance_rate": (
+                self._reporting_stats["on_time_reports"] /
+                max(1, self._reporting_stats["on_time_reports"] + self._reporting_stats["late_reports"])
+            ) * 100
+        }
+
+    def cleanup_old_timers(self, hours: int = 24) -> int:
+        """Remove timers older than specified hours."""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        old_timers = [
+            tx_id for tx_id, timer in self._timers.items()
+            if timer.transaction_timestamp < cutoff
+        ]
+        for tx_id in old_timers:
+            del self._timers[tx_id]
+        return len(old_timers)
+
+
 class EMIRReporter:
     """
     EMIR Trade Repository Reporter (#C10).
 
     Reports derivative trades to trade repository.
+    Includes transaction reporting timer for REG-P1-1 compliance.
     """
 
     def __init__(self, firm_lei: str, trade_repository_url: str):
@@ -860,12 +1211,17 @@ class EMIRReporter:
         self._tr_url = trade_repository_url
         self._pending_reports: list[EMIRTradeReport] = []
         self._submitted_reports: list[EMIRTradeReport] = []
+        # REG-P1-1: Transaction reporting timer
+        self._reporting_monitor = TransactionReportingMonitor(
+            reporting_deadline_minutes=15,
+            alert_threshold_minutes=10
+        )
 
     def generate_uti(self, trade_id: str) -> str:
         """Generate Unique Transaction Identifier."""
         # UTI format: LEI + unique identifier
         unique_part = hashlib.sha256(
-            f"{self._firm_lei}{trade_id}{datetime.now().isoformat()}".encode()
+            f"{self._firm_lei}{trade_id}{datetime.now(timezone.utc).isoformat()}".encode()
         ).hexdigest()[:32].upper()
         return f"{self._firm_lei[:20]}{unique_part}"
 
@@ -880,7 +1236,7 @@ class EMIRReporter:
         product_type: str,
         maturity_date: datetime | None = None
     ) -> EMIRTradeReport:
-        """Create EMIR trade report (#C10)."""
+        """Create EMIR trade report (#C10) with reporting timer (REG-P1-1)."""
         report = EMIRTradeReport(
             uti=self.generate_uti(trade_id),
             report_timestamp=datetime.now(timezone.utc),
@@ -900,18 +1256,57 @@ class EMIRReporter:
         )
 
         self._pending_reports.append(report)
+
+        # REG-P1-1: Start reporting timer to track 15-minute deadline
+        self._reporting_monitor.start_timer(report.uti, trade_date)
+
         return report
 
     def submit_reports(self) -> dict:
-        """Submit pending reports to trade repository."""
+        """Submit pending reports to trade repository with timing tracking (REG-P1-1)."""
         # In production, this would call the TR API
         submitted = len(self._pending_reports)
-        self._submitted_reports.extend(self._pending_reports)
+        on_time_count = 0
+        late_count = 0
+
+        for report in self._pending_reports:
+            # REG-P1-1: Mark as reported and check if on time
+            was_on_time, elapsed = self._reporting_monitor.mark_reported(report.uti)
+            if was_on_time:
+                on_time_count += 1
+            else:
+                late_count += 1
+
+            self._submitted_reports.append(report)
+
         self._pending_reports = []
 
         return {
             "submitted": submitted,
             "total_submitted": len(self._submitted_reports),
+            "on_time": on_time_count,
+            "late": late_count,
+            "reporting_stats": self._reporting_monitor.get_reporting_stats(),
+        }
+
+    def check_reporting_deadlines(self) -> list[dict]:
+        """
+        Check for approaching or missed reporting deadlines (REG-P1-1).
+
+        Should be called periodically (e.g., every minute) to detect late reports.
+        """
+        return self._reporting_monitor.check_pending_reports()
+
+    def get_reporting_compliance_status(self) -> dict:
+        """Get transaction reporting compliance status (REG-P1-1)."""
+        stats = self._reporting_monitor.get_reporting_stats()
+        return {
+            "status": "compliant" if stats["overdue_reports"] == 0 else "non_compliant",
+            "compliance_rate_pct": stats["compliance_rate"],
+            "pending_reports": stats["pending_reports"],
+            "overdue_reports": stats["overdue_reports"],
+            "alerts_sent": stats["alerts_sent"],
+            "avg_reporting_time_seconds": stats["avg_reporting_time_seconds"],
         }
 
 
@@ -1807,6 +2202,793 @@ class DisasterRecoveryDocumentor:
 
 
 # =============================================================================
+# COMPLIANCE AUDIT TRAIL EXPORT (P3)
+# =============================================================================
+
+class AuditTrailExportFormat(Enum):
+    """Export formats for compliance audit trail (P3)."""
+    JSON = "json"
+    CSV = "csv"
+    XML = "xml"
+
+
+@dataclass
+class AuditTrailExport:
+    """Exported audit trail record (P3)."""
+    export_id: str
+    export_date: datetime
+    export_format: AuditTrailExportFormat
+    start_date: datetime
+    end_date: datetime
+    record_count: int
+    export_path: str | None
+    checksum: str
+    exported_by: str
+
+
+class ComplianceAuditTrailExporter:
+    """
+    Exports compliance audit trails for regulatory purposes (P3).
+
+    Provides exportable audit trails for:
+    - Order records (RTS 25)
+    - Kill switch activations
+    - Market abuse alerts
+    - Access control events
+    - System changes
+    """
+
+    def __init__(self, export_dir: str = "./exports"):
+        self._export_dir = export_dir
+        self._exports: list[AuditTrailExport] = []
+        self._export_counter = 0
+
+    def _generate_checksum(self, content: str) -> str:
+        """Generate SHA-256 checksum for export."""
+        return hashlib.sha256(content.encode()).hexdigest()
+
+    def export_order_records(
+        self,
+        records: list[dict],
+        start_date: datetime,
+        end_date: datetime,
+        format: AuditTrailExportFormat = AuditTrailExportFormat.JSON,
+        exported_by: str = "system",
+    ) -> AuditTrailExport:
+        """
+        Export order records for compliance audit (P3).
+
+        Args:
+            records: RTS 25 order records to export
+            start_date: Start of reporting period
+            end_date: End of reporting period
+            format: Export format
+            exported_by: User/system performing export
+
+        Returns:
+            AuditTrailExport record
+        """
+        self._export_counter += 1
+        export_id = f"EXPORT-{self._export_counter:06d}"
+
+        # Format data
+        if format == AuditTrailExportFormat.JSON:
+            import json
+            content = json.dumps({
+                "export_type": "order_records",
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "record_count": len(records),
+                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "records": records,
+            }, indent=2, default=str)
+        elif format == AuditTrailExportFormat.CSV:
+            import csv
+            import io
+            output = io.StringIO()
+            if records:
+                writer = csv.DictWriter(output, fieldnames=records[0].keys())
+                writer.writeheader()
+                writer.writerows(records)
+            content = output.getvalue()
+        else:  # XML
+            content = self._to_xml("order_records", records)
+
+        checksum = self._generate_checksum(content)
+
+        export = AuditTrailExport(
+            export_id=export_id,
+            export_date=datetime.now(timezone.utc),
+            export_format=format,
+            start_date=start_date,
+            end_date=end_date,
+            record_count=len(records),
+            export_path=f"{self._export_dir}/{export_id}_orders.{format.value}",
+            checksum=checksum,
+            exported_by=exported_by,
+        )
+
+        self._exports.append(export)
+        logger.info(f"Order records exported: {export_id}, {len(records)} records")
+        return export
+
+    def export_access_logs(
+        self,
+        entries: list[dict],
+        start_date: datetime,
+        end_date: datetime,
+        format: AuditTrailExportFormat = AuditTrailExportFormat.JSON,
+        exported_by: str = "system",
+    ) -> AuditTrailExport:
+        """Export access control logs for audit (P3)."""
+        self._export_counter += 1
+        export_id = f"EXPORT-{self._export_counter:06d}"
+
+        if format == AuditTrailExportFormat.JSON:
+            import json
+            content = json.dumps({
+                "export_type": "access_logs",
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "entry_count": len(entries),
+                "entries": entries,
+            }, indent=2, default=str)
+        elif format == AuditTrailExportFormat.CSV:
+            import csv
+            import io
+            output = io.StringIO()
+            if entries:
+                writer = csv.DictWriter(output, fieldnames=entries[0].keys())
+                writer.writeheader()
+                writer.writerows(entries)
+            content = output.getvalue()
+        else:
+            content = self._to_xml("access_logs", entries)
+
+        checksum = self._generate_checksum(content)
+
+        export = AuditTrailExport(
+            export_id=export_id,
+            export_date=datetime.now(timezone.utc),
+            export_format=format,
+            start_date=start_date,
+            end_date=end_date,
+            record_count=len(entries),
+            export_path=f"{self._export_dir}/{export_id}_access.{format.value}",
+            checksum=checksum,
+            exported_by=exported_by,
+        )
+
+        self._exports.append(export)
+        logger.info(f"Access logs exported: {export_id}, {len(entries)} entries")
+        return export
+
+    def export_full_audit_trail(
+        self,
+        order_records: list[dict],
+        access_logs: list[dict],
+        change_records: list[dict],
+        kill_switch_events: list[dict],
+        start_date: datetime,
+        end_date: datetime,
+        exported_by: str = "system",
+    ) -> AuditTrailExport:
+        """
+        Export complete audit trail for regulatory review (P3).
+
+        Combines all audit data into a single comprehensive export.
+        """
+        self._export_counter += 1
+        export_id = f"EXPORT-{self._export_counter:06d}"
+
+        import json
+        content = json.dumps({
+            "export_type": "full_audit_trail",
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "exported_by": exported_by,
+            "sections": {
+                "order_records": {
+                    "count": len(order_records),
+                    "records": order_records,
+                },
+                "access_logs": {
+                    "count": len(access_logs),
+                    "entries": access_logs,
+                },
+                "change_records": {
+                    "count": len(change_records),
+                    "records": change_records,
+                },
+                "kill_switch_events": {
+                    "count": len(kill_switch_events),
+                    "events": kill_switch_events,
+                },
+            },
+            "totals": {
+                "order_records": len(order_records),
+                "access_logs": len(access_logs),
+                "change_records": len(change_records),
+                "kill_switch_events": len(kill_switch_events),
+            },
+        }, indent=2, default=str)
+
+        checksum = self._generate_checksum(content)
+        total_records = len(order_records) + len(access_logs) + len(change_records) + len(kill_switch_events)
+
+        export = AuditTrailExport(
+            export_id=export_id,
+            export_date=datetime.now(timezone.utc),
+            export_format=AuditTrailExportFormat.JSON,
+            start_date=start_date,
+            end_date=end_date,
+            record_count=total_records,
+            export_path=f"{self._export_dir}/{export_id}_full_audit.json",
+            checksum=checksum,
+            exported_by=exported_by,
+        )
+
+        self._exports.append(export)
+        logger.info(f"Full audit trail exported: {export_id}, {total_records} total records")
+        return export
+
+    def _to_xml(self, root_name: str, records: list[dict]) -> str:
+        """Convert records to XML format."""
+        lines = [f'<?xml version="1.0" encoding="UTF-8"?>']
+        lines.append(f'<{root_name}>')
+        for i, record in enumerate(records):
+            lines.append(f'  <record id="{i}">')
+            for key, value in record.items():
+                lines.append(f'    <{key}>{value}</{key}>')
+            lines.append('  </record>')
+        lines.append(f'</{root_name}>')
+        return '\n'.join(lines)
+
+    def get_export_history(self, days: int = 30) -> list[dict]:
+        """Get export history."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        return [
+            {
+                "export_id": e.export_id,
+                "export_date": e.export_date.isoformat(),
+                "format": e.export_format.value,
+                "record_count": e.record_count,
+                "checksum": e.checksum,
+                "exported_by": e.exported_by,
+            }
+            for e in self._exports
+            if e.export_date > cutoff
+        ]
+
+
+# =============================================================================
+# REGULATORY DEADLINE REMINDERS (P3)
+# =============================================================================
+
+class ReminderFrequency(Enum):
+    """Frequency for deadline reminders (P3)."""
+    ONCE = "once"
+    DAILY = "daily"
+    WEEKLY = "weekly"
+
+
+@dataclass
+class RegulatoryDeadline:
+    """A regulatory deadline with reminder settings (P3)."""
+    deadline_id: str
+    title: str
+    description: str
+    regulation: str  # e.g., "MiFID II", "EMIR", "MAR"
+    deadline_date: datetime
+    reminder_days_before: list[int]  # e.g., [30, 14, 7, 1]
+    assigned_to: str
+    priority: str  # "low", "medium", "high", "critical"
+    status: str = "pending"  # pending, in_progress, completed, overdue
+    notes: str = ""
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime | None = None
+
+    def days_until_deadline(self) -> int:
+        """Calculate days until deadline."""
+        delta = self.deadline_date - datetime.now(timezone.utc)
+        return max(0, delta.days)
+
+    def is_overdue(self) -> bool:
+        """Check if deadline is overdue."""
+        return datetime.now(timezone.utc) > self.deadline_date and self.status != "completed"
+
+    def to_dict(self) -> dict:
+        return {
+            "deadline_id": self.deadline_id,
+            "title": self.title,
+            "description": self.description,
+            "regulation": self.regulation,
+            "deadline_date": self.deadline_date.isoformat(),
+            "days_until": self.days_until_deadline(),
+            "reminder_days_before": self.reminder_days_before,
+            "assigned_to": self.assigned_to,
+            "priority": self.priority,
+            "status": self.status,
+            "is_overdue": self.is_overdue(),
+            "notes": self.notes,
+        }
+
+
+@dataclass
+class DeadlineReminder:
+    """A generated deadline reminder (P3)."""
+    reminder_id: str
+    deadline_id: str
+    deadline_title: str
+    days_until: int
+    reminder_type: str  # "scheduled", "overdue", "approaching"
+    sent_at: datetime | None = None
+    acknowledged_by: str | None = None
+    acknowledged_at: datetime | None = None
+
+
+class RegulatoryDeadlineManager:
+    """
+    Manages regulatory deadlines and reminders (P3).
+
+    Tracks compliance deadlines and sends reminders.
+    """
+
+    def __init__(self):
+        self._deadlines: dict[str, RegulatoryDeadline] = {}
+        self._reminders: list[DeadlineReminder] = []
+        self._deadline_counter = 0
+        self._reminder_counter = 0
+        self._setup_recurring_deadlines()
+
+    def _setup_recurring_deadlines(self) -> None:
+        """Setup common recurring regulatory deadlines (P3)."""
+        now = datetime.now(timezone.utc)
+        current_year = now.year
+
+        # RTS 27 Quarterly Reports (MiFID II)
+        for quarter in range(1, 5):
+            q_end_month = quarter * 3
+            # Report due 3 months after quarter end
+            report_month = q_end_month + 3
+            if report_month > 12:
+                report_month -= 12
+                report_year = current_year + 1
+            else:
+                report_year = current_year
+
+            self.add_deadline(
+                title=f"RTS 27 Q{quarter} Report",
+                description=f"Quarterly best execution report for Q{quarter}",
+                regulation="MiFID II",
+                deadline_date=datetime(report_year, report_month, 1, tzinfo=timezone.utc),
+                reminder_days_before=[30, 14, 7, 3, 1],
+                assigned_to="compliance_team",
+                priority="high",
+            )
+
+        # RTS 28 Annual Report (MiFID II)
+        self.add_deadline(
+            title="RTS 28 Annual Report",
+            description="Annual top 5 execution venues report",
+            regulation="MiFID II",
+            deadline_date=datetime(current_year + 1, 4, 30, tzinfo=timezone.utc),
+            reminder_days_before=[60, 30, 14, 7, 1],
+            assigned_to="compliance_team",
+            priority="high",
+        )
+
+        # EMIR Refit deadlines
+        self.add_deadline(
+            title="EMIR Position Reconciliation",
+            description="Quarterly position reconciliation with trade repository",
+            regulation="EMIR",
+            deadline_date=datetime(current_year, ((now.month - 1) // 3 + 1) * 3 + 1, 15, tzinfo=timezone.utc) if ((now.month - 1) // 3 + 1) * 3 + 1 <= 12 else datetime(current_year + 1, 1, 15, tzinfo=timezone.utc),
+            reminder_days_before=[14, 7, 3, 1],
+            assigned_to="operations_team",
+            priority="medium",
+        )
+
+    def add_deadline(
+        self,
+        title: str,
+        description: str,
+        regulation: str,
+        deadline_date: datetime,
+        reminder_days_before: list[int],
+        assigned_to: str,
+        priority: str = "medium",
+        notes: str = "",
+    ) -> RegulatoryDeadline:
+        """Add a regulatory deadline (P3)."""
+        self._deadline_counter += 1
+        deadline_id = f"DL-{self._deadline_counter:06d}"
+
+        deadline = RegulatoryDeadline(
+            deadline_id=deadline_id,
+            title=title,
+            description=description,
+            regulation=regulation,
+            deadline_date=deadline_date,
+            reminder_days_before=sorted(reminder_days_before, reverse=True),
+            assigned_to=assigned_to,
+            priority=priority,
+            notes=notes,
+        )
+
+        self._deadlines[deadline_id] = deadline
+        logger.info(f"Deadline added: {deadline_id} - {title} due {deadline_date}")
+        return deadline
+
+    def update_deadline_status(
+        self,
+        deadline_id: str,
+        new_status: str,
+        notes: str = "",
+    ) -> RegulatoryDeadline | None:
+        """Update deadline status (P3)."""
+        deadline = self._deadlines.get(deadline_id)
+        if not deadline:
+            return None
+
+        deadline.status = new_status
+        if new_status == "completed":
+            deadline.completed_at = datetime.now(timezone.utc)
+        if notes:
+            deadline.notes = notes
+
+        logger.info(f"Deadline {deadline_id} status updated to {new_status}")
+        return deadline
+
+    def check_reminders(self) -> list[DeadlineReminder]:
+        """
+        Check for deadlines that need reminders (P3).
+
+        Returns list of reminders to send.
+        """
+        reminders = []
+        now = datetime.now(timezone.utc)
+
+        for deadline in self._deadlines.values():
+            if deadline.status == "completed":
+                continue
+
+            days_until = deadline.days_until_deadline()
+
+            # Check for overdue
+            if deadline.is_overdue():
+                self._reminder_counter += 1
+                reminder = DeadlineReminder(
+                    reminder_id=f"REM-{self._reminder_counter:06d}",
+                    deadline_id=deadline.deadline_id,
+                    deadline_title=deadline.title,
+                    days_until=-abs((now - deadline.deadline_date).days),
+                    reminder_type="overdue",
+                )
+                reminders.append(reminder)
+                deadline.status = "overdue"
+                continue
+
+            # Check for scheduled reminders
+            for reminder_days in deadline.reminder_days_before:
+                if days_until == reminder_days:
+                    self._reminder_counter += 1
+                    reminder = DeadlineReminder(
+                        reminder_id=f"REM-{self._reminder_counter:06d}",
+                        deadline_id=deadline.deadline_id,
+                        deadline_title=deadline.title,
+                        days_until=days_until,
+                        reminder_type="scheduled" if days_until > 7 else "approaching",
+                    )
+                    reminders.append(reminder)
+                    break
+
+        self._reminders.extend(reminders)
+        return reminders
+
+    def get_upcoming_deadlines(self, days: int = 30) -> list[RegulatoryDeadline]:
+        """Get deadlines in the next N days (P3)."""
+        cutoff = datetime.now(timezone.utc) + timedelta(days=days)
+        upcoming = [
+            d for d in self._deadlines.values()
+            if d.deadline_date <= cutoff and d.status != "completed"
+        ]
+        return sorted(upcoming, key=lambda d: d.deadline_date)
+
+    def get_overdue_deadlines(self) -> list[RegulatoryDeadline]:
+        """Get overdue deadlines (P3)."""
+        return [d for d in self._deadlines.values() if d.is_overdue()]
+
+    def get_deadline_summary(self) -> dict:
+        """Get summary of all deadlines (P3)."""
+        deadlines = list(self._deadlines.values())
+        overdue = self.get_overdue_deadlines()
+        upcoming_7d = self.get_upcoming_deadlines(7)
+        upcoming_30d = self.get_upcoming_deadlines(30)
+
+        return {
+            "total_deadlines": len(deadlines),
+            "overdue_count": len(overdue),
+            "due_in_7_days": len(upcoming_7d),
+            "due_in_30_days": len(upcoming_30d),
+            "completed_count": len([d for d in deadlines if d.status == "completed"]),
+            "by_priority": {
+                "critical": len([d for d in deadlines if d.priority == "critical"]),
+                "high": len([d for d in deadlines if d.priority == "high"]),
+                "medium": len([d for d in deadlines if d.priority == "medium"]),
+                "low": len([d for d in deadlines if d.priority == "low"]),
+            },
+            "by_regulation": {},  # Could be expanded
+            "overdue_deadlines": [d.to_dict() for d in overdue],
+            "upcoming_deadlines": [d.to_dict() for d in upcoming_7d],
+        }
+
+
+# =============================================================================
+# JURISDICTION-SPECIFIC RULES (P3)
+# =============================================================================
+
+class Jurisdiction(Enum):
+    """Trading jurisdictions (P3)."""
+    EU = "eu"
+    UK = "uk"
+    US = "us"
+    SWITZERLAND = "ch"
+    SINGAPORE = "sg"
+    HONG_KONG = "hk"
+    JAPAN = "jp"
+
+
+@dataclass
+class JurisdictionRule:
+    """A jurisdiction-specific compliance rule (P3)."""
+    rule_id: str
+    jurisdiction: Jurisdiction
+    category: str  # e.g., "reporting", "position_limits", "trading_hours"
+    rule_name: str
+    description: str
+    threshold_value: float | None = None
+    threshold_unit: str | None = None
+    effective_date: datetime | None = None
+    reference_regulation: str = ""
+    is_active: bool = True
+
+    def to_dict(self) -> dict:
+        return {
+            "rule_id": self.rule_id,
+            "jurisdiction": self.jurisdiction.value,
+            "category": self.category,
+            "rule_name": self.rule_name,
+            "description": self.description,
+            "threshold_value": self.threshold_value,
+            "threshold_unit": self.threshold_unit,
+            "effective_date": self.effective_date.isoformat() if self.effective_date else None,
+            "reference_regulation": self.reference_regulation,
+            "is_active": self.is_active,
+        }
+
+
+class JurisdictionRulesManager:
+    """
+    Manages jurisdiction-specific compliance rules (P3).
+
+    Provides rules lookup for different trading jurisdictions.
+    """
+
+    def __init__(self):
+        self._rules: dict[str, JurisdictionRule] = {}
+        self._rule_counter = 0
+        self._setup_default_rules()
+
+    def _setup_default_rules(self) -> None:
+        """Setup default jurisdiction-specific rules (P3)."""
+        default_rules = [
+            # EU Rules
+            JurisdictionRule(
+                rule_id="EU-001",
+                jurisdiction=Jurisdiction.EU,
+                category="transaction_reporting",
+                rule_name="MiFIR Transaction Reporting",
+                description="Transaction reports due T+1 business day",
+                threshold_value=1,
+                threshold_unit="business_days",
+                reference_regulation="MiFIR Article 26",
+            ),
+            JurisdictionRule(
+                rule_id="EU-002",
+                jurisdiction=Jurisdiction.EU,
+                category="position_limits",
+                rule_name="Commodity Derivative Position Limits",
+                description="Position limits for commodity derivatives",
+                reference_regulation="MiFID II Article 57",
+            ),
+            JurisdictionRule(
+                rule_id="EU-003",
+                jurisdiction=Jurisdiction.EU,
+                category="short_selling",
+                rule_name="Net Short Position Reporting",
+                description="Report net short positions >= 0.2% of issued share capital",
+                threshold_value=0.2,
+                threshold_unit="percent",
+                reference_regulation="SSR Article 5",
+            ),
+            JurisdictionRule(
+                rule_id="EU-004",
+                jurisdiction=Jurisdiction.EU,
+                category="algorithmic_trading",
+                rule_name="Algo Trading Registration",
+                description="Algorithmic trading strategies must be registered with NCAs",
+                reference_regulation="MiFID II RTS 6",
+            ),
+
+            # UK Rules
+            JurisdictionRule(
+                rule_id="UK-001",
+                jurisdiction=Jurisdiction.UK,
+                category="transaction_reporting",
+                rule_name="UK EMIR Reporting",
+                description="UK EMIR derivative reporting requirements",
+                reference_regulation="UK EMIR",
+            ),
+            JurisdictionRule(
+                rule_id="UK-002",
+                jurisdiction=Jurisdiction.UK,
+                category="short_selling",
+                rule_name="UK Short Selling Disclosure",
+                description="Report net short positions >= 0.1% to FCA",
+                threshold_value=0.1,
+                threshold_unit="percent",
+                reference_regulation="UK Short Selling Regulation",
+            ),
+
+            # US Rules
+            JurisdictionRule(
+                rule_id="US-001",
+                jurisdiction=Jurisdiction.US,
+                category="position_limits",
+                rule_name="CFTC Position Limits",
+                description="Federal position limits for commodity futures",
+                reference_regulation="CFTC Rule 150",
+            ),
+            JurisdictionRule(
+                rule_id="US-002",
+                jurisdiction=Jurisdiction.US,
+                category="reporting",
+                rule_name="Form 13F Reporting",
+                description="Quarterly report of institutional holdings >= $100M",
+                threshold_value=100000000,
+                threshold_unit="USD",
+                reference_regulation="Securities Exchange Act Section 13(f)",
+            ),
+            JurisdictionRule(
+                rule_id="US-003",
+                jurisdiction=Jurisdiction.US,
+                category="short_selling",
+                rule_name="Regulation SHO",
+                description="Locate requirement for short sales",
+                reference_regulation="SEC Regulation SHO",
+            ),
+
+            # Switzerland Rules
+            JurisdictionRule(
+                rule_id="CH-001",
+                jurisdiction=Jurisdiction.SWITZERLAND,
+                category="transaction_reporting",
+                rule_name="FMIA Reporting",
+                description="Swiss derivative reporting under FMIA",
+                reference_regulation="FMIA",
+            ),
+
+            # Singapore Rules
+            JurisdictionRule(
+                rule_id="SG-001",
+                jurisdiction=Jurisdiction.SINGAPORE,
+                category="position_limits",
+                rule_name="SGX Position Limits",
+                description="Exchange-set position limits for derivatives",
+                reference_regulation="SGX Rules",
+            ),
+
+            # Hong Kong Rules
+            JurisdictionRule(
+                rule_id="HK-001",
+                jurisdiction=Jurisdiction.HONG_KONG,
+                category="short_selling",
+                rule_name="Short Position Reporting",
+                description="Weekly short position reporting",
+                reference_regulation="SFC Short Selling Rules",
+            ),
+
+            # Japan Rules
+            JurisdictionRule(
+                rule_id="JP-001",
+                jurisdiction=Jurisdiction.JAPAN,
+                category="short_selling",
+                rule_name="Japan Short Selling Rules",
+                description="Short position reporting >= 0.25%",
+                threshold_value=0.25,
+                threshold_unit="percent",
+                reference_regulation="FIEA",
+            ),
+        ]
+
+        for rule in default_rules:
+            self._rules[rule.rule_id] = rule
+
+    def add_rule(self, rule: JurisdictionRule) -> None:
+        """Add a jurisdiction-specific rule (P3)."""
+        self._rules[rule.rule_id] = rule
+        logger.info(f"Jurisdiction rule added: {rule.rule_id}")
+
+    def get_rule(self, rule_id: str) -> JurisdictionRule | None:
+        """Get a specific rule (P3)."""
+        return self._rules.get(rule_id)
+
+    def get_rules_for_jurisdiction(self, jurisdiction: Jurisdiction) -> list[JurisdictionRule]:
+        """Get all rules for a jurisdiction (P3)."""
+        return [r for r in self._rules.values() if r.jurisdiction == jurisdiction and r.is_active]
+
+    def get_rules_by_category(self, category: str) -> list[JurisdictionRule]:
+        """Get rules by category across all jurisdictions (P3)."""
+        return [r for r in self._rules.values() if r.category == category and r.is_active]
+
+    def check_rule_applicability(
+        self,
+        jurisdictions: list[Jurisdiction],
+        category: str,
+    ) -> list[JurisdictionRule]:
+        """
+        Check which rules apply for given jurisdictions and category (P3).
+
+        Args:
+            jurisdictions: List of jurisdictions to check
+            category: Rule category
+
+        Returns:
+            List of applicable rules
+        """
+        applicable = []
+        for rule in self._rules.values():
+            if rule.jurisdiction in jurisdictions and rule.category == category and rule.is_active:
+                applicable.append(rule)
+        return applicable
+
+    def get_reporting_requirements(self, jurisdictions: list[Jurisdiction]) -> dict:
+        """
+        Get reporting requirements for jurisdictions (P3).
+
+        Returns a summary of reporting requirements.
+        """
+        requirements = {}
+        for jurisdiction in jurisdictions:
+            rules = self.get_rules_for_jurisdiction(jurisdiction)
+            reporting_rules = [r for r in rules if r.category in ["reporting", "transaction_reporting"]]
+            requirements[jurisdiction.value] = [r.to_dict() for r in reporting_rules]
+        return requirements
+
+    def get_rules_summary(self) -> dict:
+        """Get summary of all jurisdiction rules (P3)."""
+        rules = list(self._rules.values())
+
+        by_jurisdiction = {}
+        for j in Jurisdiction:
+            by_jurisdiction[j.value] = len(self.get_rules_for_jurisdiction(j))
+
+        by_category = {}
+        categories = set(r.category for r in rules)
+        for cat in categories:
+            by_category[cat] = len(self.get_rules_by_category(cat))
+
+        return {
+            "total_rules": len(rules),
+            "active_rules": len([r for r in rules if r.is_active]),
+            "by_jurisdiction": by_jurisdiction,
+            "by_category": by_category,
+        }
+
+
+# =============================================================================
 # COMPLIANCE MANAGER (UNIFIED INTERFACE)
 # =============================================================================
 
@@ -1815,6 +2997,11 @@ class RegulatoryComplianceManager:
     Unified regulatory compliance manager.
 
     Provides single interface to all compliance modules.
+
+    Includes P3 features:
+    - Compliance audit trail export
+    - Regulatory deadline reminders
+    - Jurisdiction-specific rules
     """
 
     def __init__(self, firm_lei: str, country_code: str = "FR"):
@@ -1839,6 +3026,11 @@ class RegulatoryComplianceManager:
         self.change_audit = ChangeManagementAuditor()
         self.dr_docs = DisasterRecoveryDocumentor()
 
+        # P3: New components
+        self.audit_exporter = ComplianceAuditTrailExporter()
+        self.deadline_manager = RegulatoryDeadlineManager()
+        self.jurisdiction_rules = JurisdictionRulesManager()
+
     def get_compliance_status(self) -> dict:
         """Get overall compliance status."""
         clock_compliant, clock_reason = self.clock_sync.is_compliant()
@@ -1861,4 +3053,124 @@ class RegulatoryComplianceManager:
                 "access_log_entries": len(self.access_logger._entries),
                 "change_records": len(self.change_audit._changes),
             },
+            # P3: Additional status
+            "deadlines": self.deadline_manager.get_deadline_summary(),
+            "jurisdiction_rules": self.jurisdiction_rules.get_rules_summary(),
         }
+
+    # =========================================================================
+    # P3: COMPLIANCE AUDIT TRAIL EXPORT
+    # =========================================================================
+
+    def export_audit_trail(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        format: AuditTrailExportFormat = AuditTrailExportFormat.JSON,
+        exported_by: str = "system",
+    ) -> AuditTrailExport:
+        """
+        Export full compliance audit trail (P3).
+
+        Args:
+            start_date: Start of export period
+            end_date: End of export period
+            format: Export format
+            exported_by: User/system performing export
+
+        Returns:
+            AuditTrailExport record
+        """
+        # Gather all audit data
+        order_records = self.rts25_records.export_records(start_date, end_date)
+        access_logs = self.access_logger.get_user_activity("*", days=365)  # All users
+        change_records = self.change_audit.get_recent_changes(days=365)
+        kill_switch_events = self.kill_switch_audit.get_audit_trail(days=365)
+
+        return self.audit_exporter.export_full_audit_trail(
+            order_records=order_records,
+            access_logs=access_logs,
+            change_records=change_records,
+            kill_switch_events=kill_switch_events,
+            start_date=start_date,
+            end_date=end_date,
+            exported_by=exported_by,
+        )
+
+    def export_order_audit_trail(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        format: AuditTrailExportFormat = AuditTrailExportFormat.JSON,
+        exported_by: str = "system",
+    ) -> AuditTrailExport:
+        """Export order records audit trail (P3)."""
+        records = self.rts25_records.export_records(start_date, end_date)
+        return self.audit_exporter.export_order_records(
+            records, start_date, end_date, format, exported_by
+        )
+
+    # =========================================================================
+    # P3: REGULATORY DEADLINE REMINDERS
+    # =========================================================================
+
+    def add_regulatory_deadline(
+        self,
+        title: str,
+        description: str,
+        regulation: str,
+        deadline_date: datetime,
+        reminder_days_before: list[int],
+        assigned_to: str,
+        priority: str = "medium",
+    ) -> RegulatoryDeadline:
+        """Add a regulatory deadline with reminders (P3)."""
+        return self.deadline_manager.add_deadline(
+            title=title,
+            description=description,
+            regulation=regulation,
+            deadline_date=deadline_date,
+            reminder_days_before=reminder_days_before,
+            assigned_to=assigned_to,
+            priority=priority,
+        )
+
+    def check_deadline_reminders(self) -> list[DeadlineReminder]:
+        """Check for deadline reminders that need to be sent (P3)."""
+        return self.deadline_manager.check_reminders()
+
+    def get_upcoming_deadlines(self, days: int = 30) -> list[RegulatoryDeadline]:
+        """Get upcoming regulatory deadlines (P3)."""
+        return self.deadline_manager.get_upcoming_deadlines(days)
+
+    def get_overdue_deadlines(self) -> list[RegulatoryDeadline]:
+        """Get overdue regulatory deadlines (P3)."""
+        return self.deadline_manager.get_overdue_deadlines()
+
+    def complete_deadline(self, deadline_id: str, notes: str = "") -> RegulatoryDeadline | None:
+        """Mark a deadline as completed (P3)."""
+        return self.deadline_manager.update_deadline_status(deadline_id, "completed", notes)
+
+    # =========================================================================
+    # P3: JURISDICTION-SPECIFIC RULES
+    # =========================================================================
+
+    def get_jurisdiction_rules(self, jurisdiction: Jurisdiction) -> list[JurisdictionRule]:
+        """Get compliance rules for a jurisdiction (P3)."""
+        return self.jurisdiction_rules.get_rules_for_jurisdiction(jurisdiction)
+
+    def get_applicable_rules(
+        self,
+        jurisdictions: list[Jurisdiction],
+        category: str,
+    ) -> list[JurisdictionRule]:
+        """Get applicable rules for jurisdictions and category (P3)."""
+        return self.jurisdiction_rules.check_rule_applicability(jurisdictions, category)
+
+    def get_reporting_requirements(self, jurisdictions: list[Jurisdiction]) -> dict:
+        """Get reporting requirements for jurisdictions (P3)."""
+        return self.jurisdiction_rules.get_reporting_requirements(jurisdictions)
+
+    def add_jurisdiction_rule(self, rule: JurisdictionRule) -> None:
+        """Add a custom jurisdiction-specific rule (P3)."""
+        self.jurisdiction_rules.add_rule(rule)

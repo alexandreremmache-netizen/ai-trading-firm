@@ -184,30 +184,84 @@ class MomentumAgent(SignalAgent):
         )
 
     def _calculate_rsi(self, state: MomentumState) -> float:
-        """Calculate RSI indicator."""
+        """
+        Calculate Relative Strength Index (RSI).
+
+        RSI is a momentum oscillator that measures the speed and magnitude
+        of price movements. It oscillates between 0 and 100.
+
+        Formula:
+            RS = Average Gain / Average Loss (over N periods)
+            RSI = 100 - (100 / (1 + RS))
+
+        Interpretation:
+            - RSI > 70: Overbought (potential reversal down)
+            - RSI < 30: Oversold (potential reversal up)
+            - RSI = 50: Neutral
+
+        Mathematical properties:
+            - When avg_gain >> avg_loss: RS -> infinity, RSI -> 100
+            - When avg_gain << avg_loss: RS -> 0, RSI -> 0
+            - When avg_gain = avg_loss: RS = 1, RSI = 50
+
+        Args:
+            state: MomentumState containing gains and losses deques
+
+        Returns:
+            RSI value between 0 and 100
+        """
         if len(state.gains) < self._rsi_period:
-            return 50.0
+            return 50.0  # Neutral RSI if insufficient data
 
         avg_gain = np.mean(list(state.gains))
         avg_loss = np.mean(list(state.losses))
 
+        # Handle edge case: no losses = maximum RSI
         if avg_loss < 1e-8:
             return 100.0
 
+        # RS = Relative Strength = ratio of average gain to average loss
         rs = avg_gain / avg_loss
+
+        # RSI formula: transforms RS to 0-100 scale
         rsi = 100 - (100 / (1 + rs))
 
         return rsi
 
     def _calculate_macd(self, state: MomentumState, price: float) -> tuple[float, float]:
         """
-        Calculate MACD and signal line using proper EMA.
+        Calculate MACD (Moving Average Convergence Divergence) indicator.
 
-        MACD = 12-period EMA - 26-period EMA
-        Signal = 9-period EMA of MACD
+        MACD is a trend-following momentum indicator that shows the relationship
+        between two exponential moving averages (EMAs) of prices.
 
-        EMA formula: EMA_t = price * k + EMA_{t-1} * (1 - k)
-        where k = 2 / (period + 1)
+        Components:
+            MACD Line = 12-period EMA - 26-period EMA
+            Signal Line = 9-period EMA of MACD Line
+            Histogram = MACD Line - Signal Line (not returned here)
+
+        EMA (Exponential Moving Average) formula:
+            EMA_t = price * k + EMA_{t-1} * (1 - k)
+            where k = 2 / (period + 1) is the smoothing factor
+
+        Trading signals:
+            - MACD > Signal: Bullish (momentum increasing)
+            - MACD < Signal: Bearish (momentum decreasing)
+            - MACD crosses above Signal: Buy signal
+            - MACD crosses below Signal: Sell signal
+
+        Interpretation:
+            - When fast EMA > slow EMA: Recent prices are higher (uptrend)
+            - MACD oscillates around zero
+            - Large positive/negative values indicate strong trends
+            - Zero crossovers indicate trend changes
+
+        Args:
+            state: MomentumState containing price history and EMA values
+            price: Current price to update EMAs
+
+        Returns:
+            Tuple of (MACD value, Signal line value)
         """
         # EMA smoothing factors
         fast_k = 2.0 / (12 + 1)  # 12-period: k = 0.1538

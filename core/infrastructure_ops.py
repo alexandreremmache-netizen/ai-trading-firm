@@ -20,13 +20,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import queue
 import random
 import threading
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from functools import wraps
 from queue import PriorityQueue, Queue
@@ -258,7 +259,7 @@ class LogAggregator:
             exception: Exception string if any
         """
         entry = LogEntry(
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             level=level,
             message=message,
             service=self.service_name,
@@ -419,7 +420,7 @@ class APMCollector:
             name=name,
             value=value,
             unit=unit,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             tags=tags or {},
             aggregation=aggregation
         )
@@ -649,7 +650,7 @@ class AlertManager:
             title=title,
             description=description,
             source=source,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             metadata=metadata or {}
         )
 
@@ -661,7 +662,7 @@ class AlertManager:
 
         # Generate alert ID
         alert_id = hashlib.md5(
-            f"{title}{source}{datetime.now().isoformat()}".encode()
+            f"{title}{source}{datetime.now(timezone.utc).isoformat()}".encode()
         ).hexdigest()[:12]
 
         # Check for duplicate in group
@@ -681,7 +682,7 @@ class AlertManager:
             title=title,
             description=description,
             source=source,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             metadata=metadata or {}
         )
 
@@ -705,7 +706,7 @@ class AlertManager:
             alert = self._alerts[alert_id]
             alert.status = AlertStatus.ACKNOWLEDGED
             alert.acknowledged_by = acknowledged_by
-            alert.acknowledged_at = datetime.now()
+            alert.acknowledged_at = datetime.now(timezone.utc)
 
         logger.info(f"Alert acknowledged: {alert_id} by {acknowledged_by}")
         return True
@@ -718,7 +719,7 @@ class AlertManager:
 
             alert = self._alerts[alert_id]
             alert.status = AlertStatus.RESOLVED
-            alert.resolved_at = datetime.now()
+            alert.resolved_at = datetime.now(timezone.utc)
 
         logger.info(f"Alert resolved: {alert_id}")
         return True
@@ -795,7 +796,7 @@ class AlertManager:
                         continue
 
                     # Check if escalation is needed
-                    age_minutes = (datetime.now() - alert.timestamp).total_seconds() / 60
+                    age_minutes = (datetime.now(timezone.utc) - alert.timestamp).total_seconds() / 60
 
                     # Simple escalation: escalate after 15, 30, 60 minutes
                     if age_minutes > 60 and alert.escalation_level < 3:
@@ -852,7 +853,7 @@ class ChaosEngine:
             Created experiment
         """
         exp_id = hashlib.md5(
-            f"{experiment_type.value}{target_service}{datetime.now().isoformat()}".encode()
+            f"{experiment_type.value}{target_service}{datetime.now(timezone.utc).isoformat()}".encode()
         ).hexdigest()[:12]
 
         experiment = ChaosExperiment(
@@ -877,7 +878,7 @@ class ChaosEngine:
 
             experiment = self._experiments[experiment_id]
             experiment.is_active = True
-            experiment.start_time = datetime.now()
+            experiment.start_time = datetime.now(timezone.utc)
             self._active_experiments.add(experiment_id)
 
             # Set up interceptor based on experiment type
@@ -901,7 +902,7 @@ class ChaosEngine:
 
             experiment = self._experiments[experiment_id]
             experiment.is_active = False
-            experiment.end_time = datetime.now()
+            experiment.end_time = datetime.now(timezone.utc)
             self._active_experiments.discard(experiment_id)
 
             # Remove interceptor
@@ -1045,8 +1046,8 @@ class ConnectionPool:
         conn = self.factory()
         pooled = PooledConnection(
             connection=conn,
-            created_at=datetime.now(),
-            last_used=datetime.now()
+            created_at=datetime.now(timezone.utc),
+            last_used=datetime.now(timezone.utc)
         )
         self._pool.put(pooled)
         self._total_created += 1
@@ -1078,12 +1079,12 @@ class ConnectionPool:
                     continue
 
                 # Check if connection has been idle too long
-                idle_time = (datetime.now() - pooled.last_used).total_seconds()
+                idle_time = (datetime.now(timezone.utc) - pooled.last_used).total_seconds()
                 if idle_time > self.max_idle_seconds:
                     self._recycle_connection(pooled)
                     continue
 
-                pooled.last_used = datetime.now()
+                pooled.last_used = datetime.now(timezone.utc)
                 pooled.use_count += 1
 
                 with self._lock:
@@ -1092,11 +1093,15 @@ class ConnectionPool:
 
                 return pooled.connection
 
-            except Exception:
+            except queue.Empty:
                 # Pool empty, try to create new connection
+                logger.debug("Connection pool empty, attempting to create new connection")
                 with self._lock:
                     if self._total_created < self.max_size:
                         self._create_connection()
+            except Exception as e:
+                logger.error(f"Failed to acquire connection from pool: {e}", exc_info=True)
+                raise
 
         raise TimeoutError("Could not acquire connection from pool")
 
@@ -1108,8 +1113,8 @@ class ConnectionPool:
 
         pooled = PooledConnection(
             connection=connection,
-            created_at=datetime.now(),  # Reset for simplicity
-            last_used=datetime.now()
+            created_at=datetime.now(timezone.utc),  # Reset for simplicity
+            last_used=datetime.now(timezone.utc)
         )
         self._pool.put(pooled)
 
@@ -1123,7 +1128,8 @@ class ConnectionPool:
             if not is_healthy:
                 self._stats["health_check_failures"] += 1
             return is_healthy
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Health check failed for connection: {e}")
             self._stats["health_check_failures"] += 1
             return False
 
@@ -1132,8 +1138,8 @@ class ConnectionPool:
         if self.cleanup:
             try:
                 self.cleanup(pooled.connection)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Error during connection cleanup: {e}")
 
         self._stats["recycled"] += 1
 
@@ -1167,7 +1173,10 @@ class ConnectionPool:
                 pooled = self._pool.get_nowait()
                 if self.cleanup:
                     self.cleanup(pooled.connection)
-            except Exception:
+            except queue.Empty:
+                break
+            except Exception as e:
+                logger.error(f"Error closing connection in pool: {e}")
                 break
 
 
@@ -1242,14 +1251,14 @@ class CacheWarmer:
             entry = self._cache[key]
 
             # Check TTL
-            age = (datetime.now() - entry.created_at).total_seconds()
+            age = (datetime.now(timezone.utc) - entry.created_at).total_seconds()
             if age > entry.ttl_seconds:
                 del self._cache[key]
                 self._stats["misses"] += 1
                 return None
 
             entry.access_count += 1
-            entry.last_accessed = datetime.now()
+            entry.last_accessed = datetime.now(timezone.utc)
             self._stats["hits"] += 1
             return entry.value
 
@@ -1270,7 +1279,7 @@ class CacheWarmer:
             self._cache[key] = CacheEntry(
                 key=key,
                 value=value,
-                created_at=datetime.now(),
+                created_at=datetime.now(timezone.utc),
                 ttl_seconds=ttl
             )
 
@@ -1416,7 +1425,7 @@ class RequestTracer:
             parent_span_id=None,
             operation_name=operation_name,
             service_name=self.service_name,
-            start_time=datetime.now()
+            start_time=datetime.now(timezone.utc)
         )
 
         with self._lock:
@@ -1448,7 +1457,7 @@ class RequestTracer:
             parent_span_id=parent_id,
             operation_name=operation_name,
             service_name=self.service_name,
-            start_time=datetime.now()
+            start_time=datetime.now(timezone.utc)
         )
 
         with self._lock:
@@ -1459,7 +1468,7 @@ class RequestTracer:
 
     def end_span(self, span: TraceSpan, status: str = "ok") -> None:
         """End a span."""
-        span.end_time = datetime.now()
+        span.end_time = datetime.now(timezone.utc)
         span.duration_ms = (span.end_time - span.start_time).total_seconds() * 1000
         span.status = status
 
@@ -1474,7 +1483,7 @@ class RequestTracer:
     def add_span_log(self, span: TraceSpan, message: str, fields: Optional[Dict[str, Any]] = None) -> None:
         """Add a log entry to a span."""
         span.logs.append({
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "message": message,
             "fields": fields or {}
         })
@@ -1502,7 +1511,7 @@ class RequestTracer:
             parent_span_id=None,
             operation_name=operation_name,
             service_name=self.service_name,
-            start_time=datetime.now()
+            start_time=datetime.now(timezone.utc)
         )
 
     def _export_trace(self, trace_id: str) -> None:
@@ -1651,7 +1660,7 @@ class BlueGreenDeployer:
                 # In production, this would make HTTP call to health endpoint
                 # For now, simulate health check
                 instance.is_healthy = True  # Assume healthy
-                instance.last_health_check = datetime.now()
+                instance.last_health_check = datetime.now(timezone.utc)
 
     def set_active(self, color: DeploymentColor) -> bool:
         """Set the active deployment (100% traffic)."""
@@ -1824,7 +1833,7 @@ class FeatureFlagManager:
                 return False
 
             self._flags[name].status = status
-            self._flags[name].updated_at = datetime.now()
+            self._flags[name].updated_at = datetime.now(timezone.utc)
 
         logger.info(f"Feature flag {name} status set to: {status.value}")
         return True
@@ -1840,7 +1849,7 @@ class FeatureFlagManager:
 
             self._flags[name].status = FeatureFlagStatus.PERCENTAGE_ROLLOUT
             self._flags[name].percentage = percentage
-            self._flags[name].updated_at = datetime.now()
+            self._flags[name].updated_at = datetime.now(timezone.utc)
 
         logger.info(f"Feature flag {name} set to {percentage}% rollout")
         return True
@@ -1853,7 +1862,7 @@ class FeatureFlagManager:
 
             self._flags[name].status = FeatureFlagStatus.USER_SEGMENT
             self._flags[name].user_segments = segments
-            self._flags[name].updated_at = datetime.now()
+            self._flags[name].updated_at = datetime.now(timezone.utc)
 
         logger.info(f"Feature flag {name} set for segments: {segments}")
         return True
@@ -1936,7 +1945,7 @@ class FeatureFlagManager:
             "user_id": user_id,
             "result": result,
             "reason": reason,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
         # Keep log bounded
@@ -2001,6 +2010,959 @@ def feature_flag(
 
 
 # =============================================================================
+# Automatic Backup System for Audit Logs
+# =============================================================================
+
+class AuditLogBackupManager:
+    """
+    Automatic backup system for critical audit logs.
+
+    Backs up:
+    - logs/audit.jsonl
+    - logs/trades.jsonl
+    - logs/decisions.jsonl
+
+    To: logs/backup/<timestamp>/
+    """
+
+    def __init__(
+        self,
+        log_dir: str = "logs",
+        backup_dir: str = "logs/backup",
+        retention_days: int = 90,
+    ):
+        """
+        Initialize audit log backup manager.
+
+        Args:
+            log_dir: Directory containing audit logs
+            backup_dir: Directory for backups
+            retention_days: Days to retain backups (0 = forever)
+        """
+        from pathlib import Path
+
+        self.log_dir = Path(log_dir)
+        self.backup_dir = Path(backup_dir)
+        self.retention_days = retention_days
+
+        # Critical audit log files to backup
+        self.critical_logs = [
+            "audit.jsonl",
+            "trades.jsonl",
+            "decisions.jsonl",
+        ]
+
+        # Ensure backup directory exists
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+
+        # Backup tracking
+        self._last_backup_time: Optional[datetime] = None
+        self._backup_count: int = 0
+        self._lock = threading.Lock()
+
+        logger.info(f"AuditLogBackupManager initialized: {backup_dir}")
+
+    def backup_now(self, reason: str = "manual") -> Dict[str, Any]:
+        """
+        Perform immediate backup of all critical audit logs.
+
+        Args:
+            reason: Reason for backup (e.g., "daily", "manual", "shutdown")
+
+        Returns:
+            Backup result with files backed up and paths
+        """
+        import shutil
+        from pathlib import Path
+
+        with self._lock:
+            timestamp = datetime.now()
+            timestamp_str = timestamp.strftime("%Y%m%d_%H%M%S")
+
+            # Create timestamped backup directory
+            backup_path = self.backup_dir / timestamp_str
+            backup_path.mkdir(parents=True, exist_ok=True)
+
+            results = {
+                "timestamp": timestamp.isoformat(),
+                "reason": reason,
+                "backup_path": str(backup_path),
+                "files_backed_up": [],
+                "files_missing": [],
+                "bytes_total": 0,
+                "success": True,
+            }
+
+            for log_file in self.critical_logs:
+                source_path = self.log_dir / log_file
+
+                if source_path.exists():
+                    dest_path = backup_path / log_file
+                    try:
+                        shutil.copy2(source_path, dest_path)
+                        file_size = dest_path.stat().st_size
+                        results["files_backed_up"].append({
+                            "file": log_file,
+                            "size_bytes": file_size,
+                            "path": str(dest_path),
+                        })
+                        results["bytes_total"] += file_size
+                        logger.info(f"Backed up {log_file} ({file_size} bytes)")
+                    except Exception as e:
+                        logger.error(f"Failed to backup {log_file}: {e}")
+                        results["files_missing"].append({
+                            "file": log_file,
+                            "error": str(e),
+                        })
+                        results["success"] = False
+                else:
+                    logger.warning(f"Audit log not found for backup: {source_path}")
+                    results["files_missing"].append({
+                        "file": log_file,
+                        "error": "File not found",
+                    })
+
+            # Write backup manifest
+            manifest_path = backup_path / "manifest.json"
+            with open(manifest_path, "w") as f:
+                json.dump(results, f, indent=2)
+
+            self._last_backup_time = timestamp
+            self._backup_count += 1
+
+            logger.info(
+                f"Backup complete: {len(results['files_backed_up'])} files, "
+                f"{results['bytes_total']} bytes to {backup_path}"
+            )
+
+            return results
+
+    def cleanup_old_backups(self) -> int:
+        """
+        Remove backups older than retention period.
+
+        Returns:
+            Number of backup directories removed
+        """
+        if self.retention_days <= 0:
+            return 0
+
+        import shutil
+        from pathlib import Path
+
+        cutoff = datetime.now() - timedelta(days=self.retention_days)
+        removed_count = 0
+
+        for backup_dir in self.backup_dir.iterdir():
+            if not backup_dir.is_dir():
+                continue
+
+            try:
+                # Parse timestamp from directory name
+                dir_timestamp = datetime.strptime(backup_dir.name, "%Y%m%d_%H%M%S")
+
+                if dir_timestamp < cutoff:
+                    shutil.rmtree(backup_dir)
+                    removed_count += 1
+                    logger.info(f"Removed old backup: {backup_dir}")
+            except ValueError:
+                # Not a backup directory (wrong name format)
+                continue
+            except Exception as e:
+                logger.error(f"Error removing old backup {backup_dir}: {e}")
+
+        return removed_count
+
+    def get_backup_status(self) -> Dict[str, Any]:
+        """Get backup system status."""
+        from pathlib import Path
+
+        backups = []
+        total_size = 0
+
+        for backup_dir in self.backup_dir.iterdir():
+            if backup_dir.is_dir():
+                try:
+                    # Try to parse as backup directory
+                    datetime.strptime(backup_dir.name, "%Y%m%d_%H%M%S")
+
+                    dir_size = sum(f.stat().st_size for f in backup_dir.rglob("*") if f.is_file())
+                    backups.append({
+                        "name": backup_dir.name,
+                        "size_bytes": dir_size,
+                    })
+                    total_size += dir_size
+                except ValueError:
+                    continue
+
+        return {
+            "backup_count": len(backups),
+            "total_backup_count": self._backup_count,
+            "last_backup_time": self._last_backup_time.isoformat() if self._last_backup_time else None,
+            "total_size_bytes": total_size,
+            "retention_days": self.retention_days,
+            "backup_dir": str(self.backup_dir),
+            "recent_backups": sorted(backups, key=lambda x: x["name"], reverse=True)[:5],
+        }
+
+    def schedule_daily_backup(self, hour: int = 0, minute: int = 0) -> None:
+        """
+        Schedule daily backup at specified time.
+
+        Args:
+            hour: Hour of day (0-23)
+            minute: Minute of hour (0-59)
+        """
+        def backup_loop():
+            while True:
+                now = datetime.now()
+
+                # Calculate next backup time
+                next_backup = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if next_backup <= now:
+                    next_backup += timedelta(days=1)
+
+                # Sleep until backup time
+                sleep_seconds = (next_backup - now).total_seconds()
+                logger.info(f"Next scheduled backup in {sleep_seconds/3600:.1f} hours")
+                time.sleep(sleep_seconds)
+
+                # Perform backup
+                try:
+                    self.backup_now(reason="daily")
+                    self.cleanup_old_backups()
+                except Exception as e:
+                    logger.error(f"Scheduled backup failed: {e}")
+
+        backup_thread = threading.Thread(target=backup_loop, daemon=True, name="audit-backup")
+        backup_thread.start()
+        logger.info(f"Scheduled daily backup at {hour:02d}:{minute:02d}")
+
+
+# =============================================================================
+# P3: Health Check Endpoint Customization
+# =============================================================================
+
+class HealthCheckStatus(Enum):
+    """Health check result status."""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+
+
+@dataclass
+class HealthCheckResult:
+    """Result of a health check."""
+    name: str
+    status: HealthCheckStatus
+    message: str = ""
+    duration_ms: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class HealthCheckConfig:
+    """Configuration for a health check."""
+    name: str
+    check_func: Callable[[], bool]
+    timeout_seconds: float = 5.0
+    critical: bool = True  # If False, failure won't mark system unhealthy
+    interval_seconds: int = 30
+    description: str = ""
+
+
+class HealthCheckManager:
+    """
+    Customizable health check endpoint manager.
+
+    P3 Enhancement: Provides:
+    - Custom health checks registration
+    - Configurable timeouts
+    - Critical vs non-critical checks
+    - Detailed health reports
+    - Health history tracking
+    """
+
+    def __init__(self, service_name: str):
+        """Initialize health check manager."""
+        self.service_name = service_name
+        self._checks: Dict[str, HealthCheckConfig] = {}
+        self._results_history: List[Dict[str, HealthCheckResult]] = []
+        self._lock = threading.Lock()
+        self._max_history = 100
+
+    def register_check(
+        self,
+        name: str,
+        check_func: Callable[[], bool],
+        timeout_seconds: float = 5.0,
+        critical: bool = True,
+        interval_seconds: int = 30,
+        description: str = "",
+    ) -> None:
+        """
+        Register a custom health check.
+
+        Args:
+            name: Unique name for the check
+            check_func: Function that returns True if healthy
+            timeout_seconds: Timeout for the check
+            critical: Whether failure marks system unhealthy
+            interval_seconds: Suggested check interval
+            description: Human-readable description
+        """
+        config = HealthCheckConfig(
+            name=name,
+            check_func=check_func,
+            timeout_seconds=timeout_seconds,
+            critical=critical,
+            interval_seconds=interval_seconds,
+            description=description,
+        )
+        with self._lock:
+            self._checks[name] = config
+        logger.info(f"Registered health check: {name} (critical={critical})")
+
+    def unregister_check(self, name: str) -> bool:
+        """Remove a health check."""
+        with self._lock:
+            if name in self._checks:
+                del self._checks[name]
+                return True
+            return False
+
+    def run_check(self, name: str) -> HealthCheckResult:
+        """
+        Run a single health check.
+
+        Args:
+            name: Name of the check to run
+
+        Returns:
+            HealthCheckResult with status and details
+        """
+        with self._lock:
+            if name not in self._checks:
+                return HealthCheckResult(
+                    name=name,
+                    status=HealthCheckStatus.UNHEALTHY,
+                    message=f"Unknown health check: {name}",
+                )
+            config = self._checks[name]
+
+        start_time = time.time()
+        try:
+            # Run check with timeout
+            result = self._run_with_timeout(config.check_func, config.timeout_seconds)
+            duration_ms = (time.time() - start_time) * 1000
+
+            if result:
+                return HealthCheckResult(
+                    name=name,
+                    status=HealthCheckStatus.HEALTHY,
+                    message="Check passed",
+                    duration_ms=duration_ms,
+                    metadata={"critical": config.critical},
+                )
+            else:
+                return HealthCheckResult(
+                    name=name,
+                    status=HealthCheckStatus.UNHEALTHY,
+                    message="Check failed",
+                    duration_ms=duration_ms,
+                    metadata={"critical": config.critical},
+                )
+
+        except TimeoutError:
+            return HealthCheckResult(
+                name=name,
+                status=HealthCheckStatus.UNHEALTHY,
+                message=f"Check timed out after {config.timeout_seconds}s",
+                duration_ms=config.timeout_seconds * 1000,
+                metadata={"critical": config.critical, "timeout": True},
+            )
+        except Exception as e:
+            return HealthCheckResult(
+                name=name,
+                status=HealthCheckStatus.UNHEALTHY,
+                message=f"Check error: {str(e)}",
+                duration_ms=(time.time() - start_time) * 1000,
+                metadata={"critical": config.critical, "error": str(e)},
+            )
+
+    def _run_with_timeout(self, func: Callable[[], bool], timeout: float) -> bool:
+        """Run a function with timeout."""
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(func)
+            try:
+                return future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                raise TimeoutError(f"Check timed out after {timeout}s")
+
+    def run_all_checks(self) -> Dict[str, Any]:
+        """
+        Run all registered health checks.
+
+        Returns:
+            Complete health report
+        """
+        results: Dict[str, HealthCheckResult] = {}
+        overall_status = HealthCheckStatus.HEALTHY
+
+        with self._lock:
+            check_names = list(self._checks.keys())
+
+        for name in check_names:
+            result = self.run_check(name)
+            results[name] = result
+
+            # Determine overall status
+            if result.status == HealthCheckStatus.UNHEALTHY:
+                config = self._checks.get(name)
+                if config and config.critical:
+                    overall_status = HealthCheckStatus.UNHEALTHY
+                elif overall_status == HealthCheckStatus.HEALTHY:
+                    overall_status = HealthCheckStatus.DEGRADED
+
+        # Store in history
+        with self._lock:
+            self._results_history.append(results)
+            if len(self._results_history) > self._max_history:
+                self._results_history = self._results_history[-self._max_history:]
+
+        return {
+            "service": self.service_name,
+            "status": overall_status.value,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "checks": {
+                name: {
+                    "status": r.status.value,
+                    "message": r.message,
+                    "duration_ms": r.duration_ms,
+                    "critical": r.metadata.get("critical", True),
+                }
+                for name, r in results.items()
+            },
+        }
+
+    def get_health_endpoint_response(self) -> Tuple[int, Dict[str, Any]]:
+        """
+        Get health check response suitable for HTTP endpoint.
+
+        Returns:
+            Tuple of (HTTP status code, response body)
+        """
+        report = self.run_all_checks()
+        status = report["status"]
+
+        if status == "healthy":
+            return (200, report)
+        elif status == "degraded":
+            return (200, report)  # Still OK but with warnings
+        else:
+            return (503, report)  # Service unavailable
+
+    def get_liveness_response(self) -> Tuple[int, Dict[str, Any]]:
+        """
+        Simple liveness check (is the service running?).
+
+        Returns:
+            Tuple of (HTTP status code, response body)
+        """
+        return (200, {
+            "service": self.service_name,
+            "status": "alive",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    def get_readiness_response(self) -> Tuple[int, Dict[str, Any]]:
+        """
+        Readiness check (is the service ready to receive traffic?).
+
+        Returns:
+            Tuple of (HTTP status code, response body)
+        """
+        report = self.run_all_checks()
+        status = report["status"]
+
+        ready = status in ("healthy", "degraded")
+        return (
+            200 if ready else 503,
+            {
+                "service": self.service_name,
+                "ready": ready,
+                "status": status,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+
+# =============================================================================
+# P3: Metrics Export Formats (Prometheus, StatsD)
+# =============================================================================
+
+class MetricsExportFormat(Enum):
+    """Supported metrics export formats."""
+    PROMETHEUS = "prometheus"
+    STATSD = "statsd"
+    JSON = "json"
+    INFLUXDB = "influxdb"
+
+
+class MetricsExporter:
+    """
+    Export metrics in various formats.
+
+    P3 Enhancement: Supports multiple formats:
+    - Prometheus text format
+    - StatsD format
+    - JSON format
+    - InfluxDB line protocol
+    """
+
+    def __init__(self, service_name: str, apm: Optional[APMCollector] = None):
+        """
+        Initialize metrics exporter.
+
+        Args:
+            service_name: Name of the service
+            apm: APMCollector to export metrics from
+        """
+        self.service_name = service_name
+        self.apm = apm
+        self._custom_metrics: Dict[str, Tuple[str, float, Dict[str, str]]] = {}
+        self._lock = threading.Lock()
+
+    def add_metric(
+        self,
+        name: str,
+        value: float,
+        metric_type: str = "gauge",
+        labels: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Add a custom metric for export."""
+        with self._lock:
+            self._custom_metrics[name] = (metric_type, value, labels or {})
+
+    def export_prometheus(self) -> str:
+        """
+        Export metrics in Prometheus text format.
+
+        Returns:
+            Prometheus-formatted metrics string
+        """
+        lines = []
+        lines.append(f"# Metrics for {self.service_name}")
+        lines.append(f"# Generated at {datetime.now(timezone.utc).isoformat()}")
+        lines.append("")
+
+        # Export APM metrics if available
+        if self.apm:
+            metrics = self.apm.get_all_metrics()
+
+            # Counters
+            for name, value in metrics.get("counters", {}).items():
+                metric_name = self._sanitize_name(name)
+                lines.append(f"# TYPE {metric_name}_total counter")
+                lines.append(f'{metric_name}_total{{service="{self.service_name}"}} {value}')
+
+            # Gauges
+            for name, value in metrics.get("gauges", {}).items():
+                metric_name = self._sanitize_name(name)
+                lines.append(f"# TYPE {metric_name} gauge")
+                lines.append(f'{metric_name}{{service="{self.service_name}"}} {value}')
+
+            # Histograms (export summary stats)
+            for name, stats in metrics.get("histograms", {}).items():
+                metric_name = self._sanitize_name(name)
+                if stats.get("count", 0) > 0:
+                    lines.append(f"# TYPE {metric_name} summary")
+                    lines.append(f'{metric_name}_count{{service="{self.service_name}"}} {stats["count"]}')
+                    lines.append(f'{metric_name}_sum{{service="{self.service_name}"}} {stats.get("mean", 0) * stats["count"]}')
+                    lines.append(f'{metric_name}{{service="{self.service_name}",quantile="0.5"}} {stats.get("median", 0)}')
+                    lines.append(f'{metric_name}{{service="{self.service_name}",quantile="0.95"}} {stats.get("p95", 0)}')
+                    lines.append(f'{metric_name}{{service="{self.service_name}",quantile="0.99"}} {stats.get("p99", 0)}')
+
+            # Transaction timings
+            for name, stats in metrics.get("transactions", {}).items():
+                metric_name = self._sanitize_name(f"transaction_{name}_duration_ms")
+                if stats.get("count", 0) > 0:
+                    lines.append(f"# TYPE {metric_name} summary")
+                    lines.append(f'{metric_name}_count{{service="{self.service_name}"}} {stats["count"]}')
+                    lines.append(f'{metric_name}{{service="{self.service_name}",quantile="0.5"}} {stats.get("median_ms", 0)}')
+                    lines.append(f'{metric_name}{{service="{self.service_name}",quantile="0.95"}} {stats.get("p95_ms", 0)}')
+                    lines.append(f'{metric_name}{{service="{self.service_name}",quantile="0.99"}} {stats.get("p99_ms", 0)}')
+
+        # Export custom metrics
+        with self._lock:
+            for name, (metric_type, value, labels) in self._custom_metrics.items():
+                metric_name = self._sanitize_name(name)
+                label_str = ",".join(f'{k}="{v}"' for k, v in labels.items())
+                if label_str:
+                    label_str = f'service="{self.service_name}",' + label_str
+                else:
+                    label_str = f'service="{self.service_name}"'
+
+                lines.append(f"# TYPE {metric_name} {metric_type}")
+                lines.append(f"{metric_name}{{{label_str}}} {value}")
+
+        return "\n".join(lines)
+
+    def export_statsd(self) -> List[str]:
+        """
+        Export metrics in StatsD format.
+
+        Returns:
+            List of StatsD-formatted metric strings
+        """
+        messages = []
+        prefix = self._sanitize_name(self.service_name)
+
+        if self.apm:
+            metrics = self.apm.get_all_metrics()
+
+            # Counters
+            for name, value in metrics.get("counters", {}).items():
+                metric_name = self._sanitize_name(name)
+                messages.append(f"{prefix}.{metric_name}:{value}|c")
+
+            # Gauges
+            for name, value in metrics.get("gauges", {}).items():
+                metric_name = self._sanitize_name(name)
+                messages.append(f"{prefix}.{metric_name}:{value}|g")
+
+            # Histograms as timings
+            for name, stats in metrics.get("histograms", {}).items():
+                metric_name = self._sanitize_name(name)
+                if stats.get("count", 0) > 0:
+                    messages.append(f"{prefix}.{metric_name}.mean:{stats.get('mean', 0)}|ms")
+                    messages.append(f"{prefix}.{metric_name}.p95:{stats.get('p95', 0)}|ms")
+                    messages.append(f"{prefix}.{metric_name}.count:{stats['count']}|c")
+
+            # Transactions
+            for name, stats in metrics.get("transactions", {}).items():
+                metric_name = self._sanitize_name(f"transaction_{name}")
+                if stats.get("count", 0) > 0:
+                    messages.append(f"{prefix}.{metric_name}.mean:{stats.get('mean_ms', 0)}|ms")
+                    messages.append(f"{prefix}.{metric_name}.p95:{stats.get('p95_ms', 0)}|ms")
+                    messages.append(f"{prefix}.{metric_name}.count:{stats['count']}|c")
+
+        # Custom metrics
+        with self._lock:
+            for name, (metric_type, value, _) in self._custom_metrics.items():
+                metric_name = self._sanitize_name(name)
+                type_char = {"counter": "c", "gauge": "g", "timing": "ms"}.get(metric_type, "g")
+                messages.append(f"{prefix}.{metric_name}:{value}|{type_char}")
+
+        return messages
+
+    def export_json(self) -> Dict[str, Any]:
+        """
+        Export metrics in JSON format.
+
+        Returns:
+            Dictionary with all metrics
+        """
+        result = {
+            "service": self.service_name,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metrics": {},
+        }
+
+        if self.apm:
+            result["metrics"] = self.apm.get_all_metrics()
+
+        with self._lock:
+            result["custom_metrics"] = {
+                name: {"type": t, "value": v, "labels": l}
+                for name, (t, v, l) in self._custom_metrics.items()
+            }
+
+        return result
+
+    def export_influxdb(self) -> List[str]:
+        """
+        Export metrics in InfluxDB line protocol.
+
+        Returns:
+            List of InfluxDB line protocol strings
+        """
+        lines = []
+        timestamp_ns = int(time.time() * 1e9)
+
+        if self.apm:
+            metrics = self.apm.get_all_metrics()
+
+            # Counters
+            for name, value in metrics.get("counters", {}).items():
+                lines.append(f"counters,service={self.service_name},name={name} value={value} {timestamp_ns}")
+
+            # Gauges
+            for name, value in metrics.get("gauges", {}).items():
+                lines.append(f"gauges,service={self.service_name},name={name} value={value} {timestamp_ns}")
+
+            # Histograms
+            for name, stats in metrics.get("histograms", {}).items():
+                if stats.get("count", 0) > 0:
+                    lines.append(
+                        f"histograms,service={self.service_name},name={name} "
+                        f"count={stats['count']},mean={stats.get('mean', 0)},p95={stats.get('p95', 0)} {timestamp_ns}"
+                    )
+
+            # Transactions
+            for name, stats in metrics.get("transactions", {}).items():
+                if stats.get("count", 0) > 0:
+                    lines.append(
+                        f"transactions,service={self.service_name},name={name} "
+                        f"count={stats['count']},mean_ms={stats.get('mean_ms', 0)},p95_ms={stats.get('p95_ms', 0)} {timestamp_ns}"
+                    )
+
+        return lines
+
+    def export(self, format: MetricsExportFormat) -> Union[str, List[str], Dict[str, Any]]:
+        """
+        Export metrics in specified format.
+
+        Args:
+            format: Export format
+
+        Returns:
+            Formatted metrics
+        """
+        if format == MetricsExportFormat.PROMETHEUS:
+            return self.export_prometheus()
+        elif format == MetricsExportFormat.STATSD:
+            return self.export_statsd()
+        elif format == MetricsExportFormat.JSON:
+            return self.export_json()
+        elif format == MetricsExportFormat.INFLUXDB:
+            return self.export_influxdb()
+        else:
+            raise ValueError(f"Unsupported export format: {format}")
+
+    def _sanitize_name(self, name: str) -> str:
+        """Sanitize metric name for export."""
+        # Replace non-alphanumeric chars with underscore
+        return "".join(c if c.isalnum() else "_" for c in name).lower()
+
+
+# =============================================================================
+# P3: Log Aggregation Configuration
+# =============================================================================
+
+@dataclass
+class LogDestinationConfig:
+    """Configuration for a log destination."""
+    name: str
+    destination_type: str  # "file", "stdout", "http", "syslog"
+    enabled: bool = True
+    level_filter: Optional[LogLevel] = None  # Min level to send
+    format: str = "json"  # "json", "text", "structured"
+    # Type-specific config
+    file_path: Optional[str] = None
+    http_endpoint: Optional[str] = None
+    syslog_host: Optional[str] = None
+    syslog_port: int = 514
+    batch_size: int = 100
+    flush_interval_seconds: int = 5
+
+
+class LogAggregationConfig:
+    """
+    Configurable log aggregation system.
+
+    P3 Enhancement: Provides:
+    - Multiple destination support
+    - Configurable log formats
+    - Level-based routing
+    - Batch configuration
+    """
+
+    def __init__(self, service_name: str):
+        """Initialize log aggregation config."""
+        self.service_name = service_name
+        self._destinations: Dict[str, LogDestinationConfig] = {}
+        self._formatters: Dict[str, Callable[[LogEntry], str]] = {}
+        self._register_default_formatters()
+
+    def _register_default_formatters(self) -> None:
+        """Register default log formatters."""
+        self._formatters["json"] = self._format_json
+        self._formatters["text"] = self._format_text
+        self._formatters["structured"] = self._format_structured
+
+    def _format_json(self, entry: LogEntry) -> str:
+        """Format log entry as JSON."""
+        return json.dumps({
+            "timestamp": entry.timestamp.isoformat(),
+            "level": entry.level.name,
+            "service": entry.service,
+            "component": entry.component,
+            "message": entry.message,
+            "trace_id": entry.trace_id,
+            "metadata": entry.metadata,
+            "exception": entry.exception,
+        })
+
+    def _format_text(self, entry: LogEntry) -> str:
+        """Format log entry as plain text."""
+        return (
+            f"[{entry.timestamp.isoformat()}] [{entry.level.name}] "
+            f"[{entry.service}/{entry.component}] {entry.message}"
+        )
+
+    def _format_structured(self, entry: LogEntry) -> str:
+        """Format log entry as structured key-value pairs."""
+        parts = [
+            f"ts={entry.timestamp.isoformat()}",
+            f"level={entry.level.name}",
+            f"service={entry.service}",
+            f"component={entry.component}",
+            f'msg="{entry.message}"',
+        ]
+        if entry.trace_id:
+            parts.append(f"trace_id={entry.trace_id}")
+        for k, v in entry.metadata.items():
+            parts.append(f"{k}={v}")
+        return " ".join(parts)
+
+    def add_destination(self, config: LogDestinationConfig) -> None:
+        """Add a log destination."""
+        self._destinations[config.name] = config
+        logger.info(f"Added log destination: {config.name} ({config.destination_type})")
+
+    def remove_destination(self, name: str) -> bool:
+        """Remove a log destination."""
+        if name in self._destinations:
+            del self._destinations[name]
+            return True
+        return False
+
+    def get_destinations(self) -> Dict[str, LogDestinationConfig]:
+        """Get all configured destinations."""
+        return self._destinations.copy()
+
+    def create_aggregator_from_config(self) -> LogAggregator:
+        """
+        Create a LogAggregator instance from current configuration.
+
+        Returns:
+            Configured LogAggregator
+        """
+        aggregator = LogAggregator(self.service_name)
+
+        for name, config in self._destinations.items():
+            if not config.enabled:
+                continue
+
+            # Create output handler based on destination type
+            handler = self._create_handler(config)
+            if handler:
+                # Wrap with level filter if configured
+                if config.level_filter:
+                    original_handler = handler
+                    min_level = config.level_filter.value
+
+                    def filtered_handler(entries: List[LogEntry], h=original_handler, ml=min_level):
+                        filtered = [e for e in entries if e.level.value >= ml]
+                        if filtered:
+                            h(filtered)
+
+                    aggregator.add_output(filtered_handler)
+                else:
+                    aggregator.add_output(handler)
+
+        return aggregator
+
+    def _create_handler(self, config: LogDestinationConfig) -> Optional[Callable[[List[LogEntry]], None]]:
+        """Create a log handler based on configuration."""
+        formatter = self._formatters.get(config.format, self._format_json)
+
+        if config.destination_type == "stdout":
+            def stdout_handler(entries: List[LogEntry]):
+                for entry in entries:
+                    print(formatter(entry))
+            return stdout_handler
+
+        elif config.destination_type == "file" and config.file_path:
+            def file_handler(entries: List[LogEntry]):
+                try:
+                    with open(config.file_path, "a") as f:
+                        for entry in entries:
+                            f.write(formatter(entry) + "\n")
+                except Exception as e:
+                    logger.error(f"Failed to write to log file: {e}")
+            return file_handler
+
+        elif config.destination_type == "http" and config.http_endpoint:
+            def http_handler(entries: List[LogEntry]):
+                try:
+                    import urllib.request
+                    data = json.dumps([json.loads(formatter(e)) for e in entries]).encode()
+                    req = urllib.request.Request(
+                        config.http_endpoint,
+                        data=data,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    urllib.request.urlopen(req, timeout=5)
+                except Exception as e:
+                    logger.error(f"Failed to send logs to HTTP endpoint: {e}")
+            return http_handler
+
+        return None
+
+    def register_formatter(self, name: str, formatter: Callable[[LogEntry], str]) -> None:
+        """Register a custom log formatter."""
+        self._formatters[name] = formatter
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Export configuration as dictionary."""
+        return {
+            "service_name": self.service_name,
+            "destinations": {
+                name: {
+                    "destination_type": cfg.destination_type,
+                    "enabled": cfg.enabled,
+                    "level_filter": cfg.level_filter.name if cfg.level_filter else None,
+                    "format": cfg.format,
+                    "file_path": cfg.file_path,
+                    "http_endpoint": cfg.http_endpoint,
+                    "batch_size": cfg.batch_size,
+                    "flush_interval_seconds": cfg.flush_interval_seconds,
+                }
+                for name, cfg in self._destinations.items()
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "LogAggregationConfig":
+        """Create configuration from dictionary."""
+        config = cls(data.get("service_name", "unknown"))
+
+        for name, dest_data in data.get("destinations", {}).items():
+            level_filter = None
+            if dest_data.get("level_filter"):
+                level_filter = LogLevel[dest_data["level_filter"]]
+
+            dest_config = LogDestinationConfig(
+                name=name,
+                destination_type=dest_data.get("destination_type", "stdout"),
+                enabled=dest_data.get("enabled", True),
+                level_filter=level_filter,
+                format=dest_data.get("format", "json"),
+                file_path=dest_data.get("file_path"),
+                http_endpoint=dest_data.get("http_endpoint"),
+                batch_size=dest_data.get("batch_size", 100),
+                flush_interval_seconds=dest_data.get("flush_interval_seconds", 5),
+            )
+            config.add_destination(dest_config)
+
+        return config
+
+
+# =============================================================================
 # Module Integration
 # =============================================================================
 
@@ -2011,9 +2973,13 @@ def create_infrastructure_suite(service_name: str) -> Dict[str, Any]:
     Returns:
         Dictionary containing all infrastructure components
     """
+    apm = APMCollector(service_name)
     return {
         "log_aggregator": LogAggregator(service_name),
-        "apm": APMCollector(service_name),
+        "log_config": LogAggregationConfig(service_name),
+        "apm": apm,
+        "metrics_exporter": MetricsExporter(service_name, apm),
+        "health_check_manager": HealthCheckManager(service_name),
         "alert_manager": AlertManager(service_name),
         "chaos_engine": ChaosEngine(),
         "cache": CacheWarmer(),

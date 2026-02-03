@@ -33,7 +33,38 @@ The AI Trading Firm is a comprehensive algorithmic trading platform that emulate
 - Stress testing with predefined scenarios
 - Kill-switch for emergency situations (MiFID II RTS 6 compliant)
 
-## Quick Start
+## Quick Start (3 Required Settings)
+
+Before diving into the full documentation, here are the **only 3 settings** you need to configure:
+
+### 1. Broker Port (config.yaml)
+```yaml
+broker:
+  port: 4002  # IB Gateway Paper (recommended)
+```
+| Port | Platform | Mode |
+|------|----------|------|
+| 4002 | IB Gateway | Paper (SAFE) |
+| 4001 | IB Gateway | Live (DANGEROUS) |
+| 7497 | TWS | Paper (SAFE) |
+| 7496 | TWS | Live (DANGEROUS) |
+
+### 2. Trading Mode (config.yaml)
+```yaml
+firm:
+  mode: "paper"  # Keep this until you're ready for live
+```
+
+### 3. LEI for Production (config.yaml)
+```yaml
+transaction_reporting:
+  firm_lei: ""  # Only needed for production
+```
+Get your LEI at: https://www.gleif.org/en/about-lei/get-an-lei-find-lei-issuing-organizations
+
+---
+
+## Full Setup
 
 ### Prerequisites
 
@@ -60,8 +91,7 @@ pip install -r requirements.txt
 ### Configuration
 
 ```bash
-# Edit configuration
-# Ensure mode is "paper" and broker settings are correct
+# Edit configuration (see Quick Start above for essential settings)
 vi config.yaml
 ```
 

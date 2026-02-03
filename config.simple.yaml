@@ -3,54 +3,76 @@
 # This is a simplified configuration for getting started quickly.
 # For advanced settings, see config.yaml
 #
+# VALIDATION: Use --dry-run to validate without starting:
+#   python main.py --config config.simple.yaml --dry-run
+#
 # P2-20: Simplified config for better onboarding
 
+# =============================================================================
 # REQUIRED SETTINGS (You MUST configure these)
-# =============================================
+# =============================================================================
 
 broker:
-  host: "127.0.0.1"
-  port: 4002        # 4002=Gateway Paper, 7497=TWS Paper (NEVER use 4001/7496 for live!)
-  client_id: 1
+  host: "127.0.0.1"           # [string] Usually keep as localhost
+  # VALIDATION: Port must match your IB Gateway/TWS configuration
+  # Valid values: 4002 (Gateway Paper), 7497 (TWS Paper)
+  # DANGER: 4001 and 7496 are LIVE trading ports!
+  port: 4002                  # [int] 4002=Gateway Paper, 7497=TWS Paper
+  client_id: 1                # [int, 1-32] Must be unique per connected app
 
 # Your trading universe (symbols to trade)
+# VALIDATION: Symbols must be valid IB contract symbols
+# Example symbols: AAPL, MSFT, GOOGL, SPY, QQQ
 trading:
   symbols:
-    - "AAPL"
-    - "MSFT"
-    - "GOOGL"
+    - "AAPL"                  # Apple Inc
+    - "MSFT"                  # Microsoft Corp
+    - "GOOGL"                 # Alphabet Inc
 
+# =============================================================================
 # OPTIONAL SETTINGS (Sensible defaults provided)
-# =============================================
+# =============================================================================
 
-# Mode: paper (simulated) or live (real money) - default is paper
+# Mode: paper (simulated) or live (real money)
+# VALIDATION: Must be "paper" or "live" - keep as "paper" for testing!
 firm:
-  mode: "paper"
+  mode: "paper"               # [string] paper | live
 
 # Risk limits - conservative defaults for safety
+# VALIDATION: All percentages must be positive numbers
 risk:
-  max_daily_loss_pct: 3.0       # Stop if daily loss > 3%
-  max_position_size_pct: 5.0    # Max 5% per position
-  max_drawdown_pct: 10.0        # Stop if drawdown > 10%
+  max_daily_loss_pct: 3.0     # [float, 1-10] Stop if daily loss > this %
+  max_position_size_pct: 5.0  # [float, 1-20] Max position as % of portfolio
+  max_drawdown_pct: 10.0      # [float, 5-25] Stop if drawdown exceeds this %
 
-# Strategy weights (must sum to 1.0) - balanced defaults
+# Strategy weights
+# VALIDATION: Must sum to 1.0 (or close to it)
 strategy_weights:
-  momentum: 0.40
-  stat_arb: 0.30
-  options_vol: 0.30
+  momentum: 0.40              # [float, 0-1] Momentum strategy weight
+  stat_arb: 0.30              # [float, 0-1] Statistical arbitrage weight
+  options_vol: 0.30           # [float, 0-1] Options volatility weight
 
-# Compliance - REQUIRED for MiFID II (EU)
+# Compliance - REQUIRED for MiFID II (EU) live trading
+# VALIDATION: LEI must be exactly 20 alphanumeric characters
 # Get your LEI from: https://www.gleif.org/en/about-lei/get-an-lei-find-lei-issuing-organizations
-compliance:
-  entity_lei: ""  # Your Legal Entity Identifier (REQUIRED for live trading)
+transaction_reporting:
+  enabled: true               # [bool] Enable transaction reporting
+  firm_lei: ""                # [string, 20 chars] Your Legal Entity Identifier
+                              # Example: 5493001KJTIIGC8Y1R12
 
-# =============================================
+# =============================================================================
 # THAT'S IT! You're ready to paper trade.
-# =============================================
+# =============================================================================
 #
-# Next steps:
+# Quick Start:
 # 1. Start IB Gateway or TWS
-# 2. Enable API in IB Gateway/TWS settings
-# 3. Run: python main.py --config config.simple.yaml
+# 2. Enable API in IB Gateway/TWS settings (Configure > API > Enable)
+# 3. Validate config: python main.py --config config.simple.yaml --dry-run
+# 4. Start trading: python main.py --config config.simple.yaml
+#
+# Troubleshooting:
+# - "Connection refused": IB Gateway/TWS not running or API not enabled
+# - "Port in use": Another app using same client_id, change client_id
+# - "Config validation failed": Check the error message for specific issues
 #
 # For advanced configuration, copy config.yaml and customize.

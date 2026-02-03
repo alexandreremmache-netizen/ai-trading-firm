@@ -235,6 +235,7 @@ class SlippageEstimator:
         quantity: int,
         price: float | None = None,
         urgency: str = "normal",
+        vix_level: float | None = None,
     ) -> SlippageEstimate:
         """
         Estimate slippage for a potential trade.
@@ -245,6 +246,7 @@ class SlippageEstimator:
             quantity: Number of shares/contracts
             price: Current price (uses cached if not provided)
             urgency: 'immediate', 'normal', or 'patient'
+            vix_level: Optional VIX level for regime-based multiplier
 
         Returns:
             SlippageEstimate with breakdown
@@ -278,11 +280,25 @@ class SlippageEstimator:
         )
         impact_coef = tier_params['impact_coefficient']
 
-        # Square-root impact
+        # Square-root impact using Almgren-Chriss model
+        # Impact = sigma * sqrt(Q/ADV) * coefficient * sqrt(price_normalizer)
+        # Price normalization: use sqrt(price/100) to account for tick size effects
         vol_daily = profile.volatility_daily_pct / 100
+        price_normalizer = math.sqrt(current_price / 100.0) if current_price > 0 else 1.0
         market_impact_bps = (
-            vol_daily * math.sqrt(participation_rate) * impact_coef * 10000
+            vol_daily * math.sqrt(participation_rate) * impact_coef * price_normalizer * 10000
         )
+
+        # MS004: Regime-based multiplier for crisis conditions
+        # VIX > 40: crisis mode (10x), VIX > 25: stressed (5x), else normal (1x)
+        if vix_level is not None:
+            if vix_level > 40:
+                regime_multiplier = 10.0
+            elif vix_level > 25:
+                regime_multiplier = 5.0
+            else:
+                regime_multiplier = 1.0
+            market_impact_bps *= regime_multiplier
 
         # Urgency adjustment for impact
         if urgency == "immediate":
@@ -294,14 +310,15 @@ class SlippageEstimator:
         permanent_impact_bps = market_impact_bps * self.permanent_impact_fraction
 
         # Volatility risk (execution risk from price movement)
-        # Proportional to sqrt(execution time) * volatility
+        # MS016 FIX: Correct time scaling - use vol_daily * sqrt(execution_hours / 6.5)
+        # This avoids double-counting time by scaling daily vol directly
         optimal_horizon = self._calculate_optimal_horizon(
             quantity, adv, urgency
         )
         execution_hours = optimal_horizon / 60
-        vol_hourly = vol_daily / math.sqrt(6.5)  # ~6.5 trading hours
+        # Correct formula: volatility scales with sqrt(time fraction of trading day)
         volatility_cost_bps = (
-            vol_hourly * math.sqrt(execution_hours) *
+            vol_daily * math.sqrt(execution_hours / 6.5) *
             self.volatility_risk_premium * 10000
         )
 

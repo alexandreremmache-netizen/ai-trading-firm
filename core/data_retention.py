@@ -373,8 +373,14 @@ class DataRetentionManager:
             logger.debug(f"Registered record {record_id} for retention ({data_type.value})")
             return True
 
+        except sqlite3.IntegrityError as e:
+            logger.warning(f"Record {record_id} already exists in retention tracking: {e}")
+            return False
+        except sqlite3.OperationalError as e:
+            logger.exception(f"Database operational error registering record {record_id}")
+            return False
         except Exception as e:
-            logger.error(f"Failed to register record {record_id}: {e}")
+            logger.exception(f"Unexpected error registering record {record_id}")
             return False
 
     def can_delete(
@@ -442,8 +448,14 @@ class DataRetentionManager:
                 self._log_deletion_attempt(record_id, False, "Retention period expired", requester)
                 return True, "Retention period expired"
 
+        except sqlite3.OperationalError as e:
+            logger.exception(f"Database error checking deletion for {record_id}")
+            return False, f"Database error checking retention: {e}"
+        except ValueError as e:
+            logger.error(f"Invalid data for record {record_id}: {e}")
+            return False, f"Invalid record data: {e}"
         except Exception as e:
-            logger.error(f"Error checking deletion for {record_id}: {e}")
+            logger.exception(f"Unexpected error checking deletion for {record_id}")
             return False, f"Error checking retention: {e}"
 
     def _log_deletion_attempt(
@@ -469,8 +481,10 @@ class DataRetentionManager:
                     requester,
                 ))
                 conn.commit()
+        except sqlite3.OperationalError as e:
+            logger.exception(f"Database error logging deletion attempt for {record_id}")
         except Exception as e:
-            logger.error(f"Failed to log deletion attempt: {e}")
+            logger.exception(f"Unexpected error logging deletion attempt for {record_id}")
 
     def create_legal_hold(
         self,
@@ -496,7 +510,7 @@ class DataRetentionManager:
             Hold ID
         """
         self._hold_counter += 1
-        hold_id = f"HOLD-{datetime.now().strftime('%Y%m%d')}-{self._hold_counter:04d}"
+        hold_id = f"HOLD-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{self._hold_counter:04d}"
 
         hold = LegalHold(
             hold_id=hold_id,
@@ -943,3 +957,809 @@ def create_retention_aware_logger(
 
     audit_logger._write_entry = retention_aware_write
     logger.info("AuditLogger patched for retention tracking")
+
+
+# =============================================================================
+# P3: Configurable Retention Policies Per Data Type
+# =============================================================================
+
+@dataclass
+class ConfigurableRetentionPolicy:
+    """
+    Extended retention policy with per-data-type configuration.
+
+    P3 Enhancement: Supports:
+    - Override default retention periods
+    - Configure archive timing per type
+    - Set custom storage locations
+    - Define compliance requirements
+    """
+    data_type: DataType
+    retention_years: int
+    archive_after_days: int = 365
+    legal_reference: str = ""
+    deletion_requires_approval: bool = True
+    # P3 extensions
+    cold_storage_after_days: int = 730  # Move to cold storage after this
+    cold_storage_location: str = "cold"
+    encryption_required: bool = True
+    compression_enabled: bool = True
+    custom_metadata: dict[str, Any] = field(default_factory=dict)
+
+    def get_cold_storage_date(self, record_date: datetime) -> datetime:
+        """Calculate when record should be moved to cold storage."""
+        return record_date + timedelta(days=self.cold_storage_after_days)
+
+    def should_move_to_cold_storage(self, record_date: datetime) -> bool:
+        """Check if a record should be moved to cold storage."""
+        return datetime.now(timezone.utc) > self.get_cold_storage_date(record_date)
+
+
+class RetentionPolicyManager:
+    """
+    Manages configurable retention policies per data type.
+
+    P3 Enhancement: Provides:
+    - Runtime policy configuration
+    - Policy validation
+    - Policy export/import
+    - Compliance checking
+    """
+
+    def __init__(self):
+        """Initialize with default policies."""
+        self._policies: dict[DataType, ConfigurableRetentionPolicy] = {}
+        self._load_default_policies()
+
+    def _load_default_policies(self) -> None:
+        """Load default retention policies."""
+        for data_type, policy in DEFAULT_RETENTION_POLICIES.items():
+            self._policies[data_type] = ConfigurableRetentionPolicy(
+                data_type=data_type,
+                retention_years=policy.retention_years,
+                archive_after_days=policy.archive_after_days,
+                legal_reference=policy.legal_reference,
+                deletion_requires_approval=policy.deletion_requires_approval,
+            )
+
+    def set_policy(
+        self,
+        data_type: DataType,
+        retention_years: int | None = None,
+        archive_after_days: int | None = None,
+        cold_storage_after_days: int | None = None,
+        **kwargs,
+    ) -> ConfigurableRetentionPolicy:
+        """
+        Set or update a retention policy for a data type.
+
+        Args:
+            data_type: Type of data
+            retention_years: Override retention period
+            archive_after_days: Override archive timing
+            cold_storage_after_days: When to move to cold storage
+            **kwargs: Additional policy attributes
+
+        Returns:
+            Updated policy
+        """
+        if data_type not in self._policies:
+            # Create new policy with defaults
+            default = DEFAULT_RETENTION_POLICIES.get(data_type)
+            if default:
+                self._policies[data_type] = ConfigurableRetentionPolicy(
+                    data_type=data_type,
+                    retention_years=default.retention_years,
+                    archive_after_days=default.archive_after_days,
+                    legal_reference=default.legal_reference,
+                    deletion_requires_approval=default.deletion_requires_approval,
+                )
+            else:
+                self._policies[data_type] = ConfigurableRetentionPolicy(
+                    data_type=data_type,
+                    retention_years=7,  # Default to 7 years
+                )
+
+        policy = self._policies[data_type]
+
+        # Update provided fields
+        if retention_years is not None:
+            policy.retention_years = retention_years
+        if archive_after_days is not None:
+            policy.archive_after_days = archive_after_days
+        if cold_storage_after_days is not None:
+            policy.cold_storage_after_days = cold_storage_after_days
+
+        for key, value in kwargs.items():
+            if hasattr(policy, key):
+                setattr(policy, key, value)
+
+        logger.info(f"Updated retention policy for {data_type.value}: {retention_years or policy.retention_years} years")
+        return policy
+
+    def get_policy(self, data_type: DataType) -> ConfigurableRetentionPolicy | None:
+        """Get policy for a data type."""
+        return self._policies.get(data_type)
+
+    def get_all_policies(self) -> dict[DataType, ConfigurableRetentionPolicy]:
+        """Get all policies."""
+        return self._policies.copy()
+
+    def validate_policy(self, policy: ConfigurableRetentionPolicy) -> list[str]:
+        """
+        Validate a policy meets minimum requirements.
+
+        Returns:
+            List of validation errors (empty if valid)
+        """
+        errors = []
+
+        # Check minimum retention for regulated data
+        min_retention = {
+            DataType.ORDER: 5,
+            DataType.TRADE: 5,
+            DataType.FILL: 5,
+            DataType.DECISION: 5,
+            DataType.TRANSACTION_REPORT: 5,
+            DataType.STOR: 10,
+        }
+
+        min_years = min_retention.get(policy.data_type, 0)
+        if policy.retention_years < min_years:
+            errors.append(
+                f"Retention for {policy.data_type.value} must be at least {min_years} years "
+                f"per {policy.legal_reference or 'regulatory requirements'}"
+            )
+
+        # Cold storage should be before retention expiry
+        cold_storage_years = policy.cold_storage_after_days / 365
+        if cold_storage_years > policy.retention_years:
+            errors.append(
+                f"Cold storage transition ({cold_storage_years:.1f} years) exceeds "
+                f"retention period ({policy.retention_years} years)"
+            )
+
+        # Archive should be before cold storage
+        archive_years = policy.archive_after_days / 365
+        if archive_years > cold_storage_years:
+            errors.append(
+                f"Archive timing ({archive_years:.1f} years) exceeds "
+                f"cold storage timing ({cold_storage_years:.1f} years)"
+            )
+
+        return errors
+
+    def export_policies(self) -> dict[str, Any]:
+        """Export policies as dictionary for serialization."""
+        return {
+            data_type.value: {
+                "retention_years": p.retention_years,
+                "archive_after_days": p.archive_after_days,
+                "cold_storage_after_days": p.cold_storage_after_days,
+                "cold_storage_location": p.cold_storage_location,
+                "legal_reference": p.legal_reference,
+                "deletion_requires_approval": p.deletion_requires_approval,
+                "encryption_required": p.encryption_required,
+                "compression_enabled": p.compression_enabled,
+            }
+            for data_type, p in self._policies.items()
+        }
+
+    def import_policies(self, data: dict[str, Any]) -> int:
+        """
+        Import policies from dictionary.
+
+        Args:
+            data: Dictionary of policy configurations
+
+        Returns:
+            Number of policies imported
+        """
+        imported = 0
+        for type_name, config in data.items():
+            try:
+                data_type = DataType(type_name)
+                self.set_policy(
+                    data_type=data_type,
+                    retention_years=config.get("retention_years"),
+                    archive_after_days=config.get("archive_after_days"),
+                    cold_storage_after_days=config.get("cold_storage_after_days"),
+                    cold_storage_location=config.get("cold_storage_location", "cold"),
+                    encryption_required=config.get("encryption_required", True),
+                    compression_enabled=config.get("compression_enabled", True),
+                )
+                imported += 1
+            except (ValueError, KeyError) as e:
+                logger.warning(f"Failed to import policy for {type_name}: {e}")
+
+        return imported
+
+
+# =============================================================================
+# P3: Archival to Cold Storage
+# =============================================================================
+
+class ColdStorageManager:
+    """
+    Manages archival to cold storage for long-term retention.
+
+    P3 Enhancement: Supports:
+    - Tiered storage (primary -> archive -> cold)
+    - Configurable cold storage backends
+    - Compression and encryption
+    - Retrieval from cold storage
+    """
+
+    def __init__(
+        self,
+        primary_path: str = "data",
+        archive_path: str = "archive",
+        cold_storage_path: str = "cold_storage",
+        compression_enabled: bool = True,
+        encryption_key: bytes | None = None,
+    ):
+        """
+        Initialize cold storage manager.
+
+        Args:
+            primary_path: Path for primary data
+            archive_path: Path for archived data
+            cold_storage_path: Path for cold storage
+            compression_enabled: Enable compression for cold storage
+            encryption_key: Optional encryption key (32 bytes for AES-256)
+        """
+        self._primary_path = Path(primary_path)
+        self._archive_path = Path(archive_path)
+        self._cold_storage_path = Path(cold_storage_path)
+        self._compression_enabled = compression_enabled
+        self._encryption_key = encryption_key
+
+        # Create directories
+        for path in [self._primary_path, self._archive_path, self._cold_storage_path]:
+            path.mkdir(parents=True, exist_ok=True)
+
+        # Track movements
+        self._movements: list[dict[str, Any]] = []
+
+        logger.info(f"ColdStorageManager initialized: cold_storage={cold_storage_path}")
+
+    def move_to_cold_storage(
+        self,
+        record_id: str,
+        data: bytes,
+        data_type: DataType,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """
+        Move data to cold storage.
+
+        Args:
+            record_id: Unique record identifier
+            data: Raw data bytes
+            data_type: Type of data
+            metadata: Additional metadata to store
+
+        Returns:
+            Path to cold storage file
+        """
+        import gzip
+        import hashlib
+
+        # Prepare metadata
+        cold_metadata = {
+            "record_id": record_id,
+            "data_type": data_type.value,
+            "original_size": len(data),
+            "moved_timestamp": datetime.now(timezone.utc).isoformat(),
+            "compressed": self._compression_enabled,
+            "encrypted": self._encryption_key is not None,
+            **(metadata or {}),
+        }
+
+        # Calculate checksum before any transformation
+        checksum = hashlib.sha256(data).hexdigest()
+        cold_metadata["checksum"] = checksum
+
+        # Compress if enabled
+        if self._compression_enabled:
+            data = gzip.compress(data)
+            cold_metadata["compressed_size"] = len(data)
+
+        # Encrypt if key provided (simplified - in production use proper encryption)
+        if self._encryption_key:
+            # Simple XOR for demo - use proper AES in production
+            data = bytes(b ^ self._encryption_key[i % len(self._encryption_key)] for i, b in enumerate(data))
+
+        # Create cold storage file path
+        date_prefix = datetime.now(timezone.utc).strftime("%Y/%m")
+        cold_dir = self._cold_storage_path / date_prefix / data_type.value
+        cold_dir.mkdir(parents=True, exist_ok=True)
+
+        file_path = cold_dir / f"{record_id}.cold"
+        metadata_path = cold_dir / f"{record_id}.meta.json"
+
+        # Write data and metadata
+        with open(file_path, "wb") as f:
+            f.write(data)
+
+        with open(metadata_path, "w") as f:
+            json.dump(cold_metadata, f, indent=2)
+
+        # Track movement
+        self._movements.append({
+            "record_id": record_id,
+            "data_type": data_type.value,
+            "cold_path": str(file_path),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "original_size": cold_metadata["original_size"],
+            "final_size": len(data),
+        })
+
+        logger.info(f"Moved {record_id} to cold storage: {file_path}")
+        return str(file_path)
+
+    def retrieve_from_cold_storage(
+        self,
+        record_id: str,
+        data_type: DataType,
+    ) -> tuple[bytes | None, dict[str, Any] | None]:
+        """
+        Retrieve data from cold storage.
+
+        Args:
+            record_id: Record identifier
+            data_type: Type of data
+
+        Returns:
+            Tuple of (data bytes, metadata) or (None, None) if not found
+        """
+        import gzip
+        import hashlib
+
+        # Search for file (check recent date prefixes first)
+        now = datetime.now(timezone.utc)
+        for months_back in range(120):  # Look back up to 10 years
+            check_date = now - timedelta(days=months_back * 30)
+            date_prefix = check_date.strftime("%Y/%m")
+            cold_dir = self._cold_storage_path / date_prefix / data_type.value
+
+            file_path = cold_dir / f"{record_id}.cold"
+            metadata_path = cold_dir / f"{record_id}.meta.json"
+
+            if file_path.exists():
+                break
+        else:
+            logger.warning(f"Cold storage file not found for {record_id}")
+            return None, None
+
+        # Read metadata
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+
+        # Read data
+        with open(file_path, "rb") as f:
+            data = f.read()
+
+        # Decrypt if needed
+        if metadata.get("encrypted") and self._encryption_key:
+            data = bytes(b ^ self._encryption_key[i % len(self._encryption_key)] for i, b in enumerate(data))
+
+        # Decompress if needed
+        if metadata.get("compressed"):
+            data = gzip.decompress(data)
+
+        # Verify checksum
+        checksum = hashlib.sha256(data).hexdigest()
+        if checksum != metadata.get("checksum"):
+            logger.error(f"Checksum mismatch for {record_id}! Data may be corrupted.")
+            return None, metadata
+
+        logger.info(f"Retrieved {record_id} from cold storage")
+        return data, metadata
+
+    def get_cold_storage_stats(self) -> dict[str, Any]:
+        """Get statistics about cold storage."""
+        stats = {
+            "total_files": 0,
+            "total_size_bytes": 0,
+            "by_data_type": {},
+            "by_year": {},
+        }
+
+        for year_dir in self._cold_storage_path.iterdir():
+            if not year_dir.is_dir():
+                continue
+
+            year = year_dir.name
+            stats["by_year"][year] = {"files": 0, "size": 0}
+
+            for month_dir in year_dir.iterdir():
+                if not month_dir.is_dir():
+                    continue
+
+                for type_dir in month_dir.iterdir():
+                    if not type_dir.is_dir():
+                        continue
+
+                    data_type = type_dir.name
+                    if data_type not in stats["by_data_type"]:
+                        stats["by_data_type"][data_type] = {"files": 0, "size": 0}
+
+                    for file in type_dir.glob("*.cold"):
+                        size = file.stat().st_size
+                        stats["total_files"] += 1
+                        stats["total_size_bytes"] += size
+                        stats["by_year"][year]["files"] += 1
+                        stats["by_year"][year]["size"] += size
+                        stats["by_data_type"][data_type]["files"] += 1
+                        stats["by_data_type"][data_type]["size"] += size
+
+        return stats
+
+    def get_recent_movements(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Get recent cold storage movements."""
+        return self._movements[-limit:]
+
+
+# =============================================================================
+# P3: Retention Compliance Reporting
+# =============================================================================
+
+@dataclass
+class ComplianceMetric:
+    """Single compliance metric."""
+    name: str
+    value: float | int | str
+    status: str  # "pass", "warning", "fail"
+    threshold: float | int | str | None = None
+    description: str = ""
+
+
+class RetentionComplianceReporter:
+    """
+    Generates detailed compliance reports for data retention.
+
+    P3 Enhancement: Provides:
+    - Detailed compliance metrics
+    - Regulatory requirement mapping
+    - Trend analysis
+    - Export in multiple formats
+    """
+
+    def __init__(
+        self,
+        retention_manager: DataRetentionManager,
+        policy_manager: RetentionPolicyManager | None = None,
+    ):
+        """Initialize compliance reporter."""
+        self._retention_manager = retention_manager
+        self._policy_manager = policy_manager or RetentionPolicyManager()
+        self._report_history: list[dict[str, Any]] = []
+
+    def generate_compliance_report(
+        self,
+        include_recommendations: bool = True,
+        include_trend_analysis: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Generate a comprehensive compliance report.
+
+        Args:
+            include_recommendations: Include improvement recommendations
+            include_trend_analysis: Include trend analysis from history
+
+        Returns:
+            Complete compliance report
+        """
+        report = {
+            "report_id": f"CR-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+            "generated_timestamp": datetime.now(timezone.utc).isoformat(),
+            "summary": {},
+            "metrics": [],
+            "regulatory_compliance": {},
+            "policy_review": {},
+            "issues": [],
+            "recommendations": [],
+        }
+
+        # Get base compliance report from retention manager
+        base_report = self._retention_manager.get_compliance_report()
+        report["summary"] = {
+            "overall_status": base_report.get("compliance_status", "UNKNOWN"),
+            "total_records": sum(base_report.get("record_counts", {}).values()),
+            "active_legal_holds": base_report.get("legal_holds", {}).get("active", 0),
+            "blocked_deletions": base_report.get("deletion_attempts", {}).get("blocked", 0),
+        }
+
+        # Generate metrics
+        report["metrics"] = self._calculate_metrics(base_report)
+
+        # Regulatory compliance mapping
+        report["regulatory_compliance"] = self._assess_regulatory_compliance(base_report)
+
+        # Policy review
+        report["policy_review"] = self._review_policies()
+
+        # Issues
+        report["issues"] = base_report.get("issues", [])
+
+        # Recommendations
+        if include_recommendations:
+            report["recommendations"] = self._generate_recommendations(base_report)
+
+        # Trend analysis
+        if include_trend_analysis and self._report_history:
+            report["trend_analysis"] = self._analyze_trends()
+
+        # Store in history
+        self._report_history.append({
+            "timestamp": report["generated_timestamp"],
+            "status": report["summary"]["overall_status"],
+            "total_records": report["summary"]["total_records"],
+            "issues_count": len(report["issues"]),
+        })
+        # Keep last 365 days of history
+        if len(self._report_history) > 365:
+            self._report_history = self._report_history[-365:]
+
+        return report
+
+    def _calculate_metrics(self, base_report: dict[str, Any]) -> list[dict[str, Any]]:
+        """Calculate compliance metrics."""
+        metrics = []
+
+        # Record coverage metric
+        record_counts = base_report.get("record_counts", {})
+        total_records = sum(record_counts.values())
+        tracked_types = len(record_counts)
+        total_types = len(DataType)
+
+        metrics.append({
+            "name": "data_type_coverage",
+            "value": tracked_types / total_types * 100 if total_types > 0 else 0,
+            "status": "pass" if tracked_types >= total_types * 0.8 else "warning",
+            "threshold": "80%",
+            "description": f"Percentage of data types with retention tracking ({tracked_types}/{total_types})",
+        })
+
+        # Legal hold effectiveness
+        legal_holds = base_report.get("legal_holds", {})
+        active_holds = legal_holds.get("active", 0)
+        metrics.append({
+            "name": "active_legal_holds",
+            "value": active_holds,
+            "status": "pass",  # Informational
+            "description": "Number of active legal holds",
+        })
+
+        # Deletion protection rate
+        deletion_attempts = base_report.get("deletion_attempts", {})
+        total_attempts = deletion_attempts.get("total", 0)
+        blocked = deletion_attempts.get("blocked", 0)
+        protection_rate = (blocked / total_attempts * 100) if total_attempts > 0 else 100
+
+        metrics.append({
+            "name": "deletion_protection_rate",
+            "value": protection_rate,
+            "status": "pass" if protection_rate >= 95 else "warning",
+            "threshold": "95%",
+            "description": "Percentage of premature deletion attempts blocked",
+        })
+
+        # Status distribution
+        status_breakdown = base_report.get("status_breakdown", {})
+        archived_pct = (status_breakdown.get("archived", 0) / total_records * 100) if total_records > 0 else 0
+        metrics.append({
+            "name": "archive_rate",
+            "value": archived_pct,
+            "status": "pass",
+            "description": "Percentage of records in archive storage",
+        })
+
+        return metrics
+
+    def _assess_regulatory_compliance(self, base_report: dict[str, Any]) -> dict[str, Any]:
+        """Assess compliance with specific regulations."""
+        compliance = {
+            "mifid_ii": {
+                "status": "COMPLIANT",
+                "requirements": [],
+            },
+            "emir": {
+                "status": "COMPLIANT",
+                "requirements": [],
+            },
+            "mar": {
+                "status": "COMPLIANT",
+                "requirements": [],
+            },
+        }
+
+        # MiFID II - 5 year retention for orders/trades
+        policies = base_report.get("policies", {})
+
+        mifid_types = ["order", "trade", "fill", "decision"]
+        for data_type in mifid_types:
+            policy = policies.get(data_type, {})
+            retention_years = policy.get("retention_years", 0)
+
+            req = {
+                "data_type": data_type,
+                "required_years": 5,
+                "configured_years": retention_years,
+                "compliant": retention_years >= 5,
+            }
+            compliance["mifid_ii"]["requirements"].append(req)
+
+            if not req["compliant"]:
+                compliance["mifid_ii"]["status"] = "NON_COMPLIANT"
+
+        # EMIR - 5 years post-contract for transaction reports
+        tr_policy = policies.get("transaction_report", {})
+        tr_years = tr_policy.get("retention_years", 0)
+        compliance["emir"]["requirements"].append({
+            "data_type": "transaction_report",
+            "required_years": 5,
+            "configured_years": tr_years,
+            "compliant": tr_years >= 5,
+        })
+        if tr_years < 5:
+            compliance["emir"]["status"] = "NON_COMPLIANT"
+
+        # MAR - Preserve surveillance alerts and STORs
+        for data_type in ["surveillance_alert", "stor"]:
+            policy = policies.get(data_type, {})
+            retention_years = policy.get("retention_years", 0)
+            min_years = 10 if data_type == "stor" else 5
+
+            req = {
+                "data_type": data_type,
+                "required_years": min_years,
+                "configured_years": retention_years,
+                "compliant": retention_years >= min_years,
+            }
+            compliance["mar"]["requirements"].append(req)
+
+            if not req["compliant"]:
+                compliance["mar"]["status"] = "NON_COMPLIANT"
+
+        return compliance
+
+    def _review_policies(self) -> dict[str, Any]:
+        """Review configured policies."""
+        review = {
+            "total_policies": 0,
+            "validation_errors": [],
+            "policies": {},
+        }
+
+        for data_type, policy in self._policy_manager.get_all_policies().items():
+            errors = self._policy_manager.validate_policy(policy)
+
+            review["policies"][data_type.value] = {
+                "retention_years": policy.retention_years,
+                "archive_after_days": policy.archive_after_days,
+                "cold_storage_after_days": policy.cold_storage_after_days,
+                "valid": len(errors) == 0,
+                "errors": errors,
+            }
+            review["total_policies"] += 1
+            review["validation_errors"].extend(errors)
+
+        return review
+
+    def _generate_recommendations(self, base_report: dict[str, Any]) -> list[dict[str, Any]]:
+        """Generate improvement recommendations."""
+        recommendations = []
+
+        # Check for policies below recommended retention
+        policies = base_report.get("policies", {})
+        for data_type, policy in policies.items():
+            retention_years = policy.get("retention_years", 0)
+            if retention_years < 7:
+                recommendations.append({
+                    "priority": "MEDIUM",
+                    "category": "retention",
+                    "data_type": data_type,
+                    "recommendation": f"Consider increasing retention for {data_type} from {retention_years} to 7 years "
+                                    f"to align with French AMF guidance",
+                })
+
+        # Check for high deletion attempt rates
+        deletion_attempts = base_report.get("deletion_attempts", {})
+        if deletion_attempts.get("total", 0) > 100:
+            blocked_rate = deletion_attempts.get("blocked", 0) / deletion_attempts["total"]
+            if blocked_rate > 0.5:
+                recommendations.append({
+                    "priority": "HIGH",
+                    "category": "process",
+                    "recommendation": "High rate of blocked deletions detected. "
+                                    "Consider reviewing data lifecycle processes to prevent premature deletion attempts.",
+                })
+
+        # Check for expired records not deleted
+        issues = base_report.get("issues", [])
+        expired_issues = [i for i in issues if i.get("type") == "expired_records"]
+        for issue in expired_issues:
+            if issue.get("count", 0) > 1000:
+                recommendations.append({
+                    "priority": "LOW",
+                    "category": "cleanup",
+                    "data_type": issue.get("data_type"),
+                    "recommendation": f"Consider scheduling cleanup for {issue.get('count')} expired "
+                                    f"{issue.get('data_type')} records to optimize storage.",
+                })
+
+        return recommendations
+
+    def _analyze_trends(self) -> dict[str, Any]:
+        """Analyze trends from historical reports."""
+        if len(self._report_history) < 2:
+            return {"available": False, "message": "Insufficient history for trend analysis"}
+
+        recent = self._report_history[-30:]  # Last 30 reports
+
+        # Calculate trend metrics
+        record_counts = [r.get("total_records", 0) for r in recent]
+        issue_counts = [r.get("issues_count", 0) for r in recent]
+
+        return {
+            "available": True,
+            "period_days": len(recent),
+            "record_growth": {
+                "start": record_counts[0] if record_counts else 0,
+                "end": record_counts[-1] if record_counts else 0,
+                "change_pct": ((record_counts[-1] - record_counts[0]) / record_counts[0] * 100)
+                            if record_counts and record_counts[0] > 0 else 0,
+            },
+            "issue_trend": {
+                "average_issues": sum(issue_counts) / len(issue_counts) if issue_counts else 0,
+                "recent_issues": issue_counts[-1] if issue_counts else 0,
+                "trend": "improving" if issue_counts and issue_counts[-1] < issue_counts[0] else "stable",
+            },
+        }
+
+    def export_report_csv(self, report: dict[str, Any]) -> str:
+        """Export report as CSV format."""
+        lines = []
+
+        # Header
+        lines.append("AI Trading Firm - Data Retention Compliance Report")
+        lines.append(f"Generated: {report.get('generated_timestamp', '')}")
+        lines.append(f"Report ID: {report.get('report_id', '')}")
+        lines.append("")
+
+        # Summary
+        summary = report.get("summary", {})
+        lines.append("SUMMARY")
+        lines.append(f"Overall Status,{summary.get('overall_status', '')}")
+        lines.append(f"Total Records,{summary.get('total_records', 0)}")
+        lines.append(f"Active Legal Holds,{summary.get('active_legal_holds', 0)}")
+        lines.append("")
+
+        # Metrics
+        lines.append("COMPLIANCE METRICS")
+        lines.append("Metric,Value,Status,Threshold,Description")
+        for metric in report.get("metrics", []):
+            lines.append(
+                f"{metric.get('name', '')},{metric.get('value', '')},"
+                f"{metric.get('status', '')},{metric.get('threshold', '')},"
+                f"\"{metric.get('description', '')}\""
+            )
+        lines.append("")
+
+        # Issues
+        lines.append("ISSUES")
+        lines.append("Type,Data Type,Count,Severity,Description")
+        for issue in report.get("issues", []):
+            lines.append(
+                f"{issue.get('type', '')},{issue.get('data_type', '')},"
+                f"{issue.get('count', '')},{issue.get('severity', '')},"
+                f"\"{issue.get('description', '')}\""
+            )
+
+        return "\n".join(lines)
+
+    def export_report_json(self, report: dict[str, Any]) -> str:
+        """Export report as JSON format."""
+        return json.dumps(report, indent=2, default=str)

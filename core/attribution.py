@@ -188,12 +188,20 @@ class StrategyMetrics:
         mean_excess_return = np.mean(returns_array) - period_rf
         std_return = np.std(returns_array, ddof=1)
 
-        if std_return == 0:
+        # Guard against zero or near-zero std (division by zero)
+        if std_return < 1e-12:
+            return 0.0
+
+        # Guard against non-finite values
+        if not np.isfinite(mean_excess_return) or not np.isfinite(std_return):
             return 0.0
 
         # Annualize: multiply mean by factor, std by sqrt(factor)
         # Sharpe = (mean * factor) / (std * sqrt(factor)) = mean / std * sqrt(factor)
-        return (mean_excess_return / std_return) * np.sqrt(ann_factor)
+        result = (mean_excess_return / std_return) * np.sqrt(ann_factor)
+
+        # Final sanity check
+        return result if np.isfinite(result) else 0.0
 
     @property
     def sortino_ratio(self) -> float:
@@ -206,6 +214,14 @@ class StrategyMetrics:
             return 0.0
 
         returns_array = np.array(self.returns)
+
+        # Filter out NaN and inf values
+        valid_mask = np.isfinite(returns_array)
+        returns_array = returns_array[valid_mask]
+
+        if len(returns_array) < 2:
+            return 0.0
+
         ann_factor = self.annualization_factor
 
         # Convert annual risk-free rate to per-period (used as MAR)
@@ -222,20 +238,44 @@ class StrategyMetrics:
         downside_deviations = downside_returns - period_rf
         downside_std = np.std(downside_deviations, ddof=1)
 
-        if downside_std == 0:
+        # Guard against zero or near-zero std
+        if downside_std < 1e-12:
             return 0.0
 
-        return (mean_excess_return / downside_std) * np.sqrt(ann_factor)
+        result = (mean_excess_return / downside_std) * np.sqrt(ann_factor)
+
+        # Final sanity check
+        return result if np.isfinite(result) else 0.0
 
     @property
     def max_drawdown(self) -> float:
         """Calculate maximum drawdown."""
         if len(self.pnl_history) == 0:
             return 0.0
-        cumulative = np.cumsum([p[1] for p in self.pnl_history])
+
+        pnl_values = [p[1] for p in self.pnl_history]
+
+        # Filter out invalid values
+        pnl_values = [p for p in pnl_values if np.isfinite(p)]
+        if len(pnl_values) == 0:
+            return 0.0
+
+        cumulative = np.cumsum(pnl_values)
+
+        # Guard against empty cumulative array
+        if len(cumulative) == 0:
+            return 0.0
+
         running_max = np.maximum.accumulate(cumulative)
         drawdowns = cumulative - running_max
-        return float(np.min(drawdowns))
+
+        min_drawdown = np.min(drawdowns)
+
+        # Guard against non-finite result
+        if not np.isfinite(min_drawdown):
+            return 0.0
+
+        return float(min_drawdown)
 
     @property
     def expectancy(self) -> float:
@@ -508,9 +548,14 @@ class PerformanceAttribution:
         """
         self._cash_flows.append((timestamp, amount))
 
-    def calculate_twr(self, start_date: datetime | None = None) -> float:
+    def calculate_twr(
+        self,
+        start_date: datetime | None = None,
+        max_gap_days: int = 7,
+        warn_on_gaps: bool = True
+    ) -> float:
         """
-        P1-15: Calculate Time-Weighted Return (TWR).
+        P1-15/PM-08: Calculate Time-Weighted Return (TWR).
 
         TWR eliminates the effect of cash flows, showing pure investment
         performance. Used for comparing manager skill regardless of
@@ -518,6 +563,15 @@ class PerformanceAttribution:
 
         Formula: TWR = ((1 + r1) * (1 + r2) * ... * (1 + rn)) - 1
         where rn is the sub-period return between cash flows.
+
+        PM-08: Added validation for valuation frequency and gap detection.
+        TWR assumes regular (typically daily) valuations. Gaps > 7 days
+        may indicate missing data and reduce accuracy.
+
+        Args:
+            start_date: Optional start date to filter valuations
+            max_gap_days: Maximum days between valuations before warning (default: 7)
+            warn_on_gaps: Whether to log warnings for gaps (default: True)
 
         Returns:
             Annualized TWR as decimal (e.g., 0.15 = 15%)
@@ -532,6 +586,28 @@ class PerformanceAttribution:
             sorted_values = [(t, v) for t, v in sorted_values if t >= start_date]
             if len(sorted_values) < 2:
                 return 0.0
+
+        # PM-08: Validate valuation frequency and detect gaps
+        gaps_found = []
+        for i in range(1, len(sorted_values)):
+            curr_date = sorted_values[i][0]
+            prev_date = sorted_values[i-1][0]
+            gap_days = (curr_date - prev_date).days
+
+            if gap_days > max_gap_days:
+                gaps_found.append({
+                    "from": prev_date.isoformat(),
+                    "to": curr_date.isoformat(),
+                    "gap_days": gap_days,
+                })
+
+        if gaps_found and warn_on_gaps:
+            logger.warning(
+                f"TWR calculation: Found {len(gaps_found)} gaps exceeding {max_gap_days} days. "
+                f"Largest gap: {max(g['gap_days'] for g in gaps_found)} days. "
+                f"TWR accuracy may be reduced due to missing valuation data. "
+                f"Consider using more frequent valuations or MWR for periods with gaps."
+            )
 
         # Calculate sub-period returns
         # For each period between cash flows, calculate the return
@@ -576,6 +652,83 @@ class PerformanceAttribution:
                 return annualized
 
         return total_return
+
+    def validate_valuation_frequency(self, expected_frequency: str = "daily") -> dict:
+        """
+        PM-08: Validate valuation frequency and identify data quality issues.
+
+        Args:
+            expected_frequency: Expected frequency - "daily", "weekly", "monthly"
+
+        Returns:
+            Dictionary with validation results and recommendations
+        """
+        if len(self._portfolio_values) < 2:
+            return {
+                "valid": False,
+                "error": "insufficient_data",
+                "message": "Need at least 2 valuations for analysis",
+            }
+
+        sorted_values = sorted(self._portfolio_values, key=lambda x: x[0])
+
+        # Calculate gaps
+        gaps = []
+        for i in range(1, len(sorted_values)):
+            curr_date = sorted_values[i][0]
+            prev_date = sorted_values[i-1][0]
+            gap_days = (curr_date - prev_date).days
+            gaps.append(gap_days)
+
+        # Expected gap based on frequency
+        expected_gaps = {
+            "daily": 1,
+            "weekly": 7,
+            "monthly": 30,
+        }
+        expected_gap = expected_gaps.get(expected_frequency, 1)
+        max_acceptable_gap = expected_gap * 3  # Allow up to 3x expected gap
+
+        # Analyze gaps
+        avg_gap = sum(gaps) / len(gaps) if gaps else 0
+        max_gap = max(gaps) if gaps else 0
+        min_gap = min(gaps) if gaps else 0
+        large_gaps = [g for g in gaps if g > max_acceptable_gap]
+
+        # Determine data quality
+        if max_gap > 7 and expected_frequency == "daily":
+            quality = "poor"
+            recommendation = (
+                "Large gaps detected (>7 days). TWR accuracy is compromised. "
+                "Consider: (1) filling missing valuations, (2) using MWR instead, "
+                "or (3) splitting analysis into sub-periods."
+            )
+        elif len(large_gaps) > len(gaps) * 0.1:  # More than 10% gaps are large
+            quality = "fair"
+            recommendation = (
+                "Multiple gaps larger than expected. Review data sources "
+                "and consider interpolation for missing values."
+            )
+        else:
+            quality = "good"
+            recommendation = "Valuation frequency appears consistent with expectations."
+
+        return {
+            "valid": quality != "poor",
+            "quality": quality,
+            "expected_frequency": expected_frequency,
+            "actual_avg_gap_days": round(avg_gap, 2),
+            "min_gap_days": min_gap,
+            "max_gap_days": max_gap,
+            "large_gaps_count": len(large_gaps),
+            "total_valuations": len(sorted_values),
+            "date_range": {
+                "start": sorted_values[0][0].isoformat(),
+                "end": sorted_values[-1][0].isoformat(),
+                "total_days": (sorted_values[-1][0] - sorted_values[0][0]).days,
+            },
+            "recommendation": recommendation,
+        }
 
     def calculate_mwr(self, start_date: datetime | None = None) -> float:
         """
@@ -783,16 +936,26 @@ class PerformanceAttribution:
 
     def get_recommended_weights(
         self,
-        method: str = "sharpe"
+        method: str = "sharpe",
+        current_weights: dict[str, float] | None = None,
+        transaction_cost_bps: float = 10.0,
+        min_expected_benefit_bps: float = 5.0,
     ) -> dict[str, float]:
         """
         Calculate recommended strategy weights based on performance.
 
+        PM-09: Added turnover penalty to avoid excessive rebalancing.
+        Compares expected benefit from rebalancing against transaction costs.
+        If turnover cost exceeds expected benefit, returns current weights.
+
         Args:
             method: Weighting method - "sharpe", "win_rate", "profit_factor", "equal"
+            current_weights: Current portfolio weights (optional, for turnover check)
+            transaction_cost_bps: Estimated transaction cost in basis points (default: 10 bps)
+            min_expected_benefit_bps: Minimum expected benefit in bps to justify rebalancing (default: 5 bps)
 
         Returns:
-            Normalized weights by strategy
+            Normalized weights by strategy, or current_weights if rebalancing not beneficial
         """
         if not self._strategy_metrics:
             return {}
@@ -816,13 +979,152 @@ class PerformanceAttribution:
         # Normalize
         total = sum(weights.values())
         if total > 0:
-            weights = {k: v / total for k, v in weights.items()}
+            optimal_weights = {k: v / total for k, v in weights.items()}
         else:
             # Equal weights fallback
             n = len(weights)
-            weights = {k: 1.0 / n for k in weights}
+            optimal_weights = {k: 1.0 / n for k in weights}
 
-        return weights
+        # PM-09: Apply turnover penalty if current_weights provided
+        if current_weights:
+            # Calculate turnover (sum of absolute weight changes)
+            all_strategies = set(optimal_weights.keys()) | set(current_weights.keys())
+            turnover = sum(
+                abs(optimal_weights.get(s, 0) - current_weights.get(s, 0))
+                for s in all_strategies
+            )
+
+            # Calculate turnover cost in basis points
+            # Turnover of 1.0 (100%) means replacing entire portfolio
+            # Each side costs transaction_cost_bps, so round-trip is 2x
+            turnover_cost_bps = turnover * transaction_cost_bps
+
+            # Estimate expected benefit from rebalancing
+            # Use Sharpe improvement as proxy for benefit
+            current_score = self._calculate_portfolio_score(current_weights, method)
+            optimal_score = self._calculate_portfolio_score(optimal_weights, method)
+            score_improvement = optimal_score - current_score
+
+            # Convert score improvement to basis points (rough approximation)
+            # Assume 1 unit of Sharpe improvement ~ 50 bps annual return
+            expected_benefit_bps = score_improvement * 50
+
+            # Log decision factors
+            logger.debug(
+                f"Rebalancing analysis: turnover={turnover:.2%}, "
+                f"turnover_cost={turnover_cost_bps:.1f}bps, "
+                f"expected_benefit={expected_benefit_bps:.1f}bps"
+            )
+
+            # Don't rebalance if cost exceeds benefit
+            if turnover_cost_bps > expected_benefit_bps + min_expected_benefit_bps:
+                logger.info(
+                    f"Skipping rebalance: turnover cost ({turnover_cost_bps:.1f}bps) "
+                    f"exceeds expected benefit ({expected_benefit_bps:.1f}bps)"
+                )
+                return current_weights
+
+        return optimal_weights
+
+    def _calculate_portfolio_score(
+        self,
+        weights: dict[str, float],
+        method: str
+    ) -> float:
+        """
+        Calculate portfolio-level score for given weights and method.
+
+        Used to estimate benefit of rebalancing.
+        """
+        score = 0.0
+        for strategy, weight in weights.items():
+            metrics = self._strategy_metrics.get(strategy)
+            if metrics is None:
+                continue
+
+            if method == "sharpe":
+                score += weight * max(0, metrics.sharpe_ratio)
+            elif method == "win_rate":
+                score += weight * metrics.win_rate
+            elif method == "profit_factor":
+                pf = metrics.profit_factor
+                pf = min(pf, 5.0) if pf != float("inf") else 5.0
+                score += weight * pf
+            else:
+                score += weight
+
+        return score
+
+    def calculate_rebalancing_benefit(
+        self,
+        current_weights: dict[str, float],
+        method: str = "sharpe",
+        transaction_cost_bps: float = 10.0,
+    ) -> dict:
+        """
+        PM-09: Analyze potential benefit vs cost of rebalancing.
+
+        Provides detailed breakdown to help decide whether to rebalance.
+
+        Args:
+            current_weights: Current portfolio weights
+            method: Weighting method for optimization
+            transaction_cost_bps: Transaction cost in basis points
+
+        Returns:
+            Dictionary with rebalancing analysis
+        """
+        # Get optimal weights (without turnover check)
+        optimal_weights = self.get_recommended_weights(method=method)
+
+        if not optimal_weights:
+            return {"should_rebalance": False, "reason": "no_optimal_weights"}
+
+        # Calculate changes
+        all_strategies = set(optimal_weights.keys()) | set(current_weights.keys())
+        changes = {}
+        total_turnover = 0.0
+
+        for strategy in all_strategies:
+            current = current_weights.get(strategy, 0)
+            optimal = optimal_weights.get(strategy, 0)
+            change = optimal - current
+            changes[strategy] = {
+                "current": current,
+                "optimal": optimal,
+                "change": change,
+                "abs_change": abs(change),
+            }
+            total_turnover += abs(change)
+
+        # Calculate costs and benefits
+        turnover_cost_bps = total_turnover * transaction_cost_bps
+        current_score = self._calculate_portfolio_score(current_weights, method)
+        optimal_score = self._calculate_portfolio_score(optimal_weights, method)
+        score_improvement = optimal_score - current_score
+        expected_benefit_bps = score_improvement * 50  # Rough approximation
+
+        net_benefit_bps = expected_benefit_bps - turnover_cost_bps
+
+        return {
+            "should_rebalance": net_benefit_bps > 5.0,  # Need at least 5bps net benefit
+            "current_weights": current_weights,
+            "optimal_weights": optimal_weights,
+            "changes": changes,
+            "total_turnover": total_turnover,
+            "turnover_pct": total_turnover * 100,
+            "turnover_cost_bps": turnover_cost_bps,
+            "current_score": current_score,
+            "optimal_score": optimal_score,
+            "score_improvement": score_improvement,
+            "expected_benefit_bps": expected_benefit_bps,
+            "net_benefit_bps": net_benefit_bps,
+            "recommendation": (
+                f"Rebalance recommended: net benefit of {net_benefit_bps:.1f}bps"
+                if net_benefit_bps > 5.0 else
+                f"Hold current weights: net benefit only {net_benefit_bps:.1f}bps"
+            ),
+        }
 
     def get_symbol_attribution(self) -> dict[str, float]:
         """Get P&L attribution by symbol."""
@@ -2036,6 +2338,110 @@ class BrinsonAttributor:
             "cumulative_interaction": sum(a["interaction_effect"] for a in recent),
         }
 
+    def get_rebalancing_recommendations(
+        self,
+        attribution_results: dict | None = None,
+        selection_threshold: float = 0.01,
+        allocation_threshold: float = 0.01,
+    ) -> dict[str, dict]:
+        """
+        PM-07: Generate rebalancing recommendations based on Brinson attribution.
+
+        Uses selection and allocation effects to determine which strategies/sectors
+        should have their allocations adjusted. This creates a feedback loop from
+        attribution analysis to portfolio rebalancing decisions.
+
+        Args:
+            attribution_results: Attribution results dict (uses latest from history if None)
+            selection_threshold: Threshold for selection effect (default 1% = 0.01)
+            allocation_threshold: Threshold for allocation effect (default 1% = 0.01)
+
+        Returns:
+            Dictionary of recommendations by sector/strategy with:
+            - action: 'increase_allocation', 'decrease_allocation', or 'hold'
+            - selection_effect: The selection effect value
+            - allocation_effect: The allocation effect value
+            - rationale: Human-readable explanation
+            - confidence: Confidence level based on effect magnitude
+        """
+        if attribution_results is None:
+            if not self._attribution_history:
+                return {}
+            attribution_results = self._attribution_history[-1]
+
+        by_sector = attribution_results.get("by_sector", {})
+        if not by_sector:
+            return {}
+
+        recommendations: dict[str, dict] = {}
+
+        for sector, effects in by_sector.items():
+            selection_effect = effects.get("selection", 0.0)
+            allocation_effect = effects.get("allocation", 0.0)
+
+            # Determine action based on selection effect (alpha generation)
+            if selection_effect > selection_threshold:
+                action = "increase_allocation"
+                rationale = f"Positive selection effect ({selection_effect:.2%}) indicates good security selection - consider increasing allocation"
+                confidence = min(1.0, abs(selection_effect) / 0.05)  # Scale confidence up to 5%
+            elif selection_effect < -selection_threshold:
+                action = "decrease_allocation"
+                rationale = f"Negative selection effect ({selection_effect:.2%}) indicates poor security selection - consider reducing allocation"
+                confidence = min(1.0, abs(selection_effect) / 0.05)
+            else:
+                action = "hold"
+                rationale = f"Selection effect ({selection_effect:.2%}) within threshold - maintain current allocation"
+                confidence = 0.5
+
+            # Enhance recommendation based on allocation effect
+            if allocation_effect > allocation_threshold:
+                rationale += f". Allocation effect ({allocation_effect:.2%}) also positive"
+                if action == "increase_allocation":
+                    confidence = min(1.0, confidence + 0.2)
+            elif allocation_effect < -allocation_threshold:
+                rationale += f". Allocation effect ({allocation_effect:.2%}) negative"
+                if action == "decrease_allocation":
+                    confidence = min(1.0, confidence + 0.2)
+
+            recommendations[sector] = {
+                "action": action,
+                "selection_effect": selection_effect,
+                "allocation_effect": allocation_effect,
+                "interaction_effect": effects.get("interaction", 0.0),
+                "rationale": rationale,
+                "confidence": round(confidence, 2),
+                "portfolio_weight": effects.get("portfolio_weight", 0.0),
+                "benchmark_weight": effects.get("benchmark_weight", 0.0),
+                "suggested_weight_change": self._calculate_weight_change(
+                    action, selection_effect, effects.get("portfolio_weight", 0.0)
+                ),
+            }
+
+        return recommendations
+
+    def _calculate_weight_change(
+        self,
+        action: str,
+        selection_effect: float,
+        current_weight: float
+    ) -> float:
+        """
+        Calculate suggested weight change based on action and effect magnitude.
+
+        Returns suggested change as a decimal (e.g., 0.02 for +2%).
+        """
+        if action == "hold":
+            return 0.0
+
+        # Base change proportional to selection effect magnitude, capped at 5%
+        base_change = min(0.05, abs(selection_effect) * 2)
+
+        # Scale by current weight to avoid over-concentration
+        max_change = current_weight * 0.25  # Max 25% of current weight
+        change = min(base_change, max_change) if max_change > 0 else base_change
+
+        return change if action == "increase_allocation" else -change
+
 
 # =============================================================================
 # BENCHMARK TRACKING (#P12)
@@ -2386,3 +2792,783 @@ class PortfolioHeatMapGenerator:
             "max_gain": max(total_daily) if total_daily else 0,
             "max_loss": min(total_daily) if total_daily else 0,
         }
+
+
+# =============================================================================
+# P3: SECTOR ATTRIBUTION BREAKDOWN
+# =============================================================================
+
+class SectorAttributionAnalyzer:
+    """
+    Provides detailed sector-level attribution breakdown (P3).
+
+    Analyzes P&L contribution by sector with:
+    - Sector-level P&L breakdown
+    - Relative sector performance
+    - Sector concentration metrics
+    - Sector momentum indicators
+    """
+
+    # Default sector classifications
+    SECTOR_CLASSIFICATIONS: dict[str, str] = {
+        # Technology
+        "AAPL": "Technology", "MSFT": "Technology", "GOOGL": "Technology",
+        "GOOG": "Technology", "META": "Technology", "NVDA": "Technology",
+        "AMD": "Technology", "INTC": "Technology", "CRM": "Technology",
+        # Financials
+        "JPM": "Financials", "BAC": "Financials", "GS": "Financials",
+        "MS": "Financials", "C": "Financials", "WFC": "Financials",
+        # Healthcare
+        "JNJ": "Healthcare", "UNH": "Healthcare", "PFE": "Healthcare",
+        "MRK": "Healthcare", "ABBV": "Healthcare", "LLY": "Healthcare",
+        # Energy
+        "XOM": "Energy", "CVX": "Energy", "COP": "Energy",
+        "SLB": "Energy", "EOG": "Energy",
+        # Consumer Discretionary
+        "AMZN": "Consumer Discretionary", "TSLA": "Consumer Discretionary",
+        "HD": "Consumer Discretionary", "NKE": "Consumer Discretionary",
+        # Consumer Staples
+        "PG": "Consumer Staples", "KO": "Consumer Staples",
+        "PEP": "Consumer Staples", "WMT": "Consumer Staples",
+        # Industrials
+        "BA": "Industrials", "CAT": "Industrials", "UPS": "Industrials",
+        "HON": "Industrials", "GE": "Industrials",
+        # Materials
+        "LIN": "Materials", "APD": "Materials", "SHW": "Materials",
+        # Real Estate
+        "AMT": "Real Estate", "PLD": "Real Estate", "CCI": "Real Estate",
+        # Utilities
+        "NEE": "Utilities", "DUK": "Utilities", "SO": "Utilities",
+        # Communication Services
+        "NFLX": "Communication Services", "DIS": "Communication Services",
+        "VZ": "Communication Services", "T": "Communication Services",
+    }
+
+    def __init__(self, custom_sector_map: dict[str, str] | None = None):
+        """
+        Initialize sector attribution analyzer.
+
+        Args:
+            custom_sector_map: Custom symbol-to-sector mapping (overrides defaults)
+        """
+        self._sector_map = dict(self.SECTOR_CLASSIFICATIONS)
+        if custom_sector_map:
+            self._sector_map.update(custom_sector_map)
+        self._sector_history: list[dict] = []
+
+    def get_sector(self, symbol: str) -> str:
+        """Get sector for a symbol."""
+        return self._sector_map.get(symbol.upper(), "Other")
+
+    def set_sector(self, symbol: str, sector: str) -> None:
+        """Set sector classification for a symbol."""
+        self._sector_map[symbol.upper()] = sector
+
+    def calculate_sector_attribution(
+        self,
+        trades: list[TradeRecord],
+        as_of: datetime | None = None
+    ) -> dict[str, Any]:
+        """
+        Calculate P&L attribution by sector.
+
+        Args:
+            trades: List of trade records
+            as_of: Optional cutoff date
+
+        Returns:
+            Sector attribution breakdown
+        """
+        if as_of is None:
+            as_of = datetime.now(timezone.utc)
+
+        # Filter closed trades
+        closed_trades = [
+            t for t in trades
+            if t.is_closed and (t.exit_timestamp is None or t.exit_timestamp <= as_of)
+        ]
+
+        # Aggregate by sector
+        sector_data: dict[str, dict] = {}
+
+        for trade in closed_trades:
+            sector = self.get_sector(trade.symbol)
+
+            if sector not in sector_data:
+                sector_data[sector] = {
+                    "total_pnl": 0.0,
+                    "gross_pnl": 0.0,
+                    "trade_count": 0,
+                    "winning_trades": 0,
+                    "losing_trades": 0,
+                    "symbols": set(),
+                    "total_volume": 0,
+                    "returns": [],
+                }
+
+            data = sector_data[sector]
+            data["total_pnl"] += trade.net_pnl
+            data["gross_pnl"] += trade.gross_pnl
+            data["trade_count"] += 1
+            data["symbols"].add(trade.symbol)
+            data["total_volume"] += trade.quantity * trade.entry_price
+            data["returns"].append(trade.net_pnl)
+
+            if trade.outcome == TradeOutcome.WIN:
+                data["winning_trades"] += 1
+            elif trade.outcome == TradeOutcome.LOSS:
+                data["losing_trades"] += 1
+
+        # Calculate metrics
+        total_pnl = sum(d["total_pnl"] for d in sector_data.values())
+        total_volume = sum(d["total_volume"] for d in sector_data.values())
+
+        result = {
+            "timestamp": as_of.isoformat(),
+            "total_pnl": total_pnl,
+            "total_volume": total_volume,
+            "sector_count": len(sector_data),
+            "sectors": {},
+        }
+
+        for sector, data in sector_data.items():
+            win_rate = (
+                data["winning_trades"] / (data["winning_trades"] + data["losing_trades"])
+                if (data["winning_trades"] + data["losing_trades"]) > 0 else 0
+            )
+
+            avg_return = np.mean(data["returns"]) if data["returns"] else 0
+            std_return = np.std(data["returns"]) if len(data["returns"]) > 1 else 0
+
+            result["sectors"][sector] = {
+                "pnl": data["total_pnl"],
+                "gross_pnl": data["gross_pnl"],
+                "pnl_contribution_pct": (data["total_pnl"] / total_pnl * 100) if total_pnl != 0 else 0,
+                "volume_pct": (data["total_volume"] / total_volume * 100) if total_volume > 0 else 0,
+                "trade_count": data["trade_count"],
+                "win_rate": win_rate,
+                "avg_return": avg_return,
+                "volatility": std_return,
+                "sharpe": (avg_return / std_return) if std_return > 0 else 0,
+                "symbol_count": len(data["symbols"]),
+                "symbols": list(data["symbols"]),
+            }
+
+        # Store in history
+        self._sector_history.append(result)
+
+        return result
+
+    def get_sector_momentum(self, lookback_periods: int = 5) -> dict[str, dict]:
+        """
+        Calculate sector momentum from recent attribution history.
+
+        Args:
+            lookback_periods: Number of periods to analyze
+
+        Returns:
+            Momentum metrics by sector
+        """
+        if len(self._sector_history) < 2:
+            return {}
+
+        recent = self._sector_history[-lookback_periods:]
+        all_sectors = set()
+        for period in recent:
+            all_sectors.update(period.get("sectors", {}).keys())
+
+        momentum = {}
+        for sector in all_sectors:
+            pnl_series = []
+            for period in recent:
+                sector_data = period.get("sectors", {}).get(sector, {})
+                pnl_series.append(sector_data.get("pnl", 0))
+
+            if len(pnl_series) >= 2:
+                trend = pnl_series[-1] - pnl_series[0]
+                avg_pnl = np.mean(pnl_series)
+                momentum[sector] = {
+                    "trend": trend,
+                    "average_pnl": avg_pnl,
+                    "latest_pnl": pnl_series[-1],
+                    "direction": "improving" if trend > 0 else ("declining" if trend < 0 else "stable"),
+                    "periods_analyzed": len(pnl_series),
+                }
+
+        return momentum
+
+    def get_sector_concentration(
+        self,
+        positions: dict[str, float]  # symbol -> notional value
+    ) -> dict[str, Any]:
+        """
+        Calculate sector concentration metrics.
+
+        Args:
+            positions: Current positions by symbol
+
+        Returns:
+            Concentration analysis
+        """
+        sector_exposure: dict[str, float] = {}
+        total_exposure = 0.0
+
+        for symbol, notional in positions.items():
+            sector = self.get_sector(symbol)
+            sector_exposure[sector] = sector_exposure.get(sector, 0) + abs(notional)
+            total_exposure += abs(notional)
+
+        if total_exposure == 0:
+            return {"error": "no_positions"}
+
+        # Calculate HHI (Herfindahl-Hirschman Index)
+        weights = [exp / total_exposure for exp in sector_exposure.values()]
+        hhi = sum(w ** 2 for w in weights)
+
+        # Calculate effective number of sectors
+        effective_sectors = 1 / hhi if hhi > 0 else len(sector_exposure)
+
+        return {
+            "sector_weights": {
+                s: (exp / total_exposure * 100) for s, exp in sector_exposure.items()
+            },
+            "hhi": hhi,
+            "hhi_pct": hhi * 100,  # 0-100 scale
+            "effective_sectors": effective_sectors,
+            "sector_count": len(sector_exposure),
+            "concentration_level": (
+                "highly_concentrated" if hhi > 0.25 else
+                "moderately_concentrated" if hhi > 0.15 else
+                "diversified"
+            ),
+            "top_sector": max(sector_exposure.items(), key=lambda x: x[1])[0] if sector_exposure else None,
+            "top_sector_weight": max(weights) * 100 if weights else 0,
+        }
+
+
+# =============================================================================
+# P3: FACTOR EXPOSURE REPORTING
+# =============================================================================
+
+class FactorExposureAnalyzer:
+    """
+    Analyzes and reports portfolio factor exposures (P3).
+
+    Tracks exposures to common risk factors:
+    - Market (Beta)
+    - Size (SMB - Small Minus Big)
+    - Value (HML - High Minus Low)
+    - Momentum (MOM)
+    - Quality (QMJ)
+    - Volatility (VOL)
+    """
+
+    # Default factor betas for common symbols (simplified)
+    DEFAULT_FACTOR_BETAS: dict[str, dict[str, float]] = {
+        # Large cap tech (high beta, growth)
+        "AAPL": {"market": 1.2, "size": -0.3, "value": -0.4, "momentum": 0.2, "quality": 0.3, "volatility": -0.2},
+        "MSFT": {"market": 1.1, "size": -0.4, "value": -0.3, "momentum": 0.3, "quality": 0.4, "volatility": -0.3},
+        "GOOGL": {"market": 1.15, "size": -0.4, "value": -0.3, "momentum": 0.2, "quality": 0.3, "volatility": -0.2},
+        "AMZN": {"market": 1.3, "size": -0.3, "value": -0.5, "momentum": 0.1, "quality": 0.2, "volatility": 0.1},
+        "NVDA": {"market": 1.6, "size": -0.2, "value": -0.6, "momentum": 0.5, "quality": 0.2, "volatility": 0.3},
+        # Financials (value, high beta)
+        "JPM": {"market": 1.2, "size": -0.3, "value": 0.3, "momentum": 0.0, "quality": 0.2, "volatility": 0.1},
+        "BAC": {"market": 1.4, "size": -0.2, "value": 0.4, "momentum": -0.1, "quality": 0.0, "volatility": 0.2},
+        "GS": {"market": 1.3, "size": -0.2, "value": 0.2, "momentum": 0.1, "quality": 0.1, "volatility": 0.2},
+        # Defensive (low beta, quality)
+        "JNJ": {"market": 0.7, "size": -0.4, "value": 0.1, "momentum": 0.0, "quality": 0.5, "volatility": -0.4},
+        "PG": {"market": 0.6, "size": -0.4, "value": 0.0, "momentum": 0.1, "quality": 0.4, "volatility": -0.5},
+        "KO": {"market": 0.65, "size": -0.4, "value": 0.1, "momentum": 0.0, "quality": 0.4, "volatility": -0.4},
+        # Energy (value, cyclical)
+        "XOM": {"market": 1.0, "size": -0.3, "value": 0.5, "momentum": 0.0, "quality": 0.2, "volatility": 0.0},
+        "CVX": {"market": 1.0, "size": -0.3, "value": 0.4, "momentum": 0.0, "quality": 0.2, "volatility": 0.0},
+        # Small cap (higher size beta)
+        "default_small": {"market": 1.2, "size": 0.5, "value": 0.1, "momentum": 0.0, "quality": -0.1, "volatility": 0.2},
+        "default_large": {"market": 1.0, "size": -0.3, "value": 0.0, "momentum": 0.0, "quality": 0.1, "volatility": 0.0},
+    }
+
+    FACTOR_NAMES = ["market", "size", "value", "momentum", "quality", "volatility"]
+
+    def __init__(self, custom_factor_betas: dict[str, dict[str, float]] | None = None):
+        """
+        Initialize factor exposure analyzer.
+
+        Args:
+            custom_factor_betas: Custom factor betas by symbol (overrides defaults)
+        """
+        self._factor_betas = dict(self.DEFAULT_FACTOR_BETAS)
+        if custom_factor_betas:
+            self._factor_betas.update(custom_factor_betas)
+        self._exposure_history: list[dict] = []
+
+    def get_factor_betas(self, symbol: str) -> dict[str, float]:
+        """Get factor betas for a symbol."""
+        return self._factor_betas.get(
+            symbol.upper(),
+            self._factor_betas.get("default_large", {f: 0.0 for f in self.FACTOR_NAMES})
+        )
+
+    def set_factor_betas(self, symbol: str, betas: dict[str, float]) -> None:
+        """Set factor betas for a symbol."""
+        self._factor_betas[symbol.upper()] = betas
+
+    def calculate_portfolio_exposures(
+        self,
+        positions: dict[str, float],  # symbol -> notional value
+        portfolio_value: float | None = None
+    ) -> dict[str, Any]:
+        """
+        Calculate portfolio-level factor exposures.
+
+        Args:
+            positions: Position notionals by symbol
+            portfolio_value: Total portfolio value (calculated if not provided)
+
+        Returns:
+            Factor exposure report
+        """
+        if portfolio_value is None:
+            portfolio_value = sum(abs(v) for v in positions.values())
+
+        if portfolio_value == 0:
+            return {"error": "zero_portfolio_value"}
+
+        # Calculate weighted factor exposures
+        factor_exposures: dict[str, float] = {f: 0.0 for f in self.FACTOR_NAMES}
+        position_contributions: dict[str, dict] = {}
+
+        for symbol, notional in positions.items():
+            weight = notional / portfolio_value
+            betas = self.get_factor_betas(symbol)
+
+            position_contributions[symbol] = {
+                "weight": weight,
+                "notional": notional,
+                "factor_contributions": {},
+            }
+
+            for factor in self.FACTOR_NAMES:
+                beta = betas.get(factor, 0.0)
+                contribution = weight * beta
+                factor_exposures[factor] += contribution
+                position_contributions[symbol]["factor_contributions"][factor] = contribution
+
+        # Calculate exposure summary
+        result = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "portfolio_value": portfolio_value,
+            "position_count": len(positions),
+            "factor_exposures": factor_exposures,
+            "factor_summary": {},
+            "position_contributions": position_contributions,
+        }
+
+        # Add factor-level analysis
+        for factor, exposure in factor_exposures.items():
+            result["factor_summary"][factor] = {
+                "exposure": exposure,
+                "exposure_level": (
+                    "high" if abs(exposure) > 0.5 else
+                    "moderate" if abs(exposure) > 0.2 else
+                    "low"
+                ),
+                "direction": "long" if exposure > 0 else ("short" if exposure < 0 else "neutral"),
+                "risk_contribution_approx": abs(exposure) * 0.15,  # Simplified risk estimate
+            }
+
+        # Store history
+        self._exposure_history.append({
+            "timestamp": result["timestamp"],
+            "exposures": dict(factor_exposures),
+        })
+
+        return result
+
+    def get_exposure_drift(self, lookback_periods: int = 10) -> dict[str, Any]:
+        """
+        Analyze factor exposure drift over time.
+
+        Args:
+            lookback_periods: Number of periods to analyze
+
+        Returns:
+            Exposure drift analysis
+        """
+        if len(self._exposure_history) < 2:
+            return {"error": "insufficient_history"}
+
+        recent = self._exposure_history[-lookback_periods:]
+
+        drift_analysis: dict[str, dict] = {}
+        for factor in self.FACTOR_NAMES:
+            exposures = [p["exposures"].get(factor, 0) for p in recent]
+            if len(exposures) >= 2:
+                drift = exposures[-1] - exposures[0]
+                avg_exposure = np.mean(exposures)
+                std_exposure = np.std(exposures) if len(exposures) > 1 else 0
+
+                drift_analysis[factor] = {
+                    "current": exposures[-1],
+                    "initial": exposures[0],
+                    "drift": drift,
+                    "average": avg_exposure,
+                    "volatility": std_exposure,
+                    "drift_direction": "increasing" if drift > 0.05 else ("decreasing" if drift < -0.05 else "stable"),
+                }
+
+        return {
+            "periods_analyzed": len(recent),
+            "factor_drift": drift_analysis,
+        }
+
+    def generate_factor_report(
+        self,
+        positions: dict[str, float],
+        target_exposures: dict[str, float] | None = None
+    ) -> dict[str, Any]:
+        """
+        Generate comprehensive factor exposure report.
+
+        Args:
+            positions: Current positions
+            target_exposures: Target factor exposures (optional)
+
+        Returns:
+            Detailed factor report
+        """
+        current = self.calculate_portfolio_exposures(positions)
+        if "error" in current:
+            return current
+
+        report = {
+            "report_type": "factor_exposure",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "current_exposures": current["factor_exposures"],
+            "factor_summary": current["factor_summary"],
+            "recommendations": [],
+        }
+
+        # Add target comparison if provided
+        if target_exposures:
+            deviations = {}
+            for factor in self.FACTOR_NAMES:
+                current_exp = current["factor_exposures"].get(factor, 0)
+                target_exp = target_exposures.get(factor, 0)
+                deviation = current_exp - target_exp
+
+                deviations[factor] = {
+                    "current": current_exp,
+                    "target": target_exp,
+                    "deviation": deviation,
+                    "deviation_pct": (deviation / target_exp * 100) if target_exp != 0 else 0,
+                }
+
+                # Generate recommendation
+                if abs(deviation) > 0.1:
+                    action = "reduce" if deviation > 0 else "increase"
+                    report["recommendations"].append({
+                        "factor": factor,
+                        "action": f"{action} {factor} exposure",
+                        "current": current_exp,
+                        "target": target_exp,
+                        "priority": "high" if abs(deviation) > 0.3 else "medium",
+                    })
+
+            report["target_comparison"] = deviations
+
+        # Add top contributors
+        contributions = current.get("position_contributions", {})
+        for factor in self.FACTOR_NAMES:
+            sorted_positions = sorted(
+                contributions.items(),
+                key=lambda x: abs(x[1]["factor_contributions"].get(factor, 0)),
+                reverse=True
+            )
+            report[f"top_{factor}_contributors"] = [
+                {"symbol": sym, "contribution": data["factor_contributions"].get(factor, 0)}
+                for sym, data in sorted_positions[:5]
+            ]
+
+        return report
+
+
+# =============================================================================
+# P3: BENCHMARK COMPARISON METRICS
+# =============================================================================
+
+class BenchmarkComparisonMetrics:
+    """
+    Enhanced benchmark comparison metrics (P3).
+
+    Provides comprehensive benchmark analysis including:
+    - Alpha and Beta calculations
+    - Up/Down capture ratios
+    - Batting average
+    - Risk-adjusted comparisons
+    """
+
+    def __init__(self, risk_free_rate: float = 0.05):
+        """
+        Initialize benchmark comparison.
+
+        Args:
+            risk_free_rate: Annual risk-free rate for calculations
+        """
+        self._risk_free_rate = risk_free_rate
+        self._portfolio_returns: list[tuple[datetime, float]] = []
+        self._benchmark_returns: dict[str, list[tuple[datetime, float]]] = {}
+
+    def add_portfolio_return(self, date: datetime, return_pct: float) -> None:
+        """Record a portfolio return."""
+        self._portfolio_returns.append((date, return_pct))
+
+    def add_benchmark_return(self, benchmark: str, date: datetime, return_pct: float) -> None:
+        """Record a benchmark return."""
+        if benchmark not in self._benchmark_returns:
+            self._benchmark_returns[benchmark] = []
+        self._benchmark_returns[benchmark].append((date, return_pct))
+
+    def calculate_alpha_beta(
+        self,
+        benchmark: str,
+        lookback_days: int = 252
+    ) -> dict[str, float | None]:
+        """
+        Calculate Jensen's Alpha and Beta vs benchmark.
+
+        Args:
+            benchmark: Benchmark name
+            lookback_days: Days of history to use
+
+        Returns:
+            Alpha and Beta values
+        """
+        if benchmark not in self._benchmark_returns:
+            return {"alpha": None, "beta": None, "error": "benchmark_not_found"}
+
+        # Get aligned returns
+        portfolio_rets = dict(self._portfolio_returns[-lookback_days:])
+        benchmark_rets = dict(self._benchmark_returns[benchmark][-lookback_days:])
+
+        common_dates = set(portfolio_rets.keys()) & set(benchmark_rets.keys())
+        if len(common_dates) < 30:
+            return {"alpha": None, "beta": None, "error": "insufficient_data"}
+
+        sorted_dates = sorted(common_dates)
+        p_returns = [portfolio_rets[d] for d in sorted_dates]
+        b_returns = [benchmark_rets[d] for d in sorted_dates]
+
+        # Calculate Beta = Cov(Rp, Rb) / Var(Rb)
+        p_array = np.array(p_returns)
+        b_array = np.array(b_returns)
+
+        covariance = np.cov(p_array, b_array)[0, 1]
+        variance = np.var(b_array, ddof=1)
+
+        if variance == 0:
+            return {"alpha": None, "beta": None, "error": "zero_variance"}
+
+        beta = covariance / variance
+
+        # Calculate Alpha = Rp - [Rf + Beta * (Rm - Rf)]
+        daily_rf = self._risk_free_rate / 252
+        avg_p_return = np.mean(p_array)
+        avg_b_return = np.mean(b_array)
+
+        # Annualized alpha
+        alpha = (avg_p_return - (daily_rf + beta * (avg_b_return - daily_rf))) * 252
+
+        return {
+            "alpha": float(alpha),
+            "alpha_annualized_pct": float(alpha * 100),
+            "beta": float(beta),
+            "r_squared": float(covariance ** 2 / (np.var(p_array, ddof=1) * variance)) if variance > 0 else 0,
+            "data_points": len(sorted_dates),
+        }
+
+    def calculate_capture_ratios(
+        self,
+        benchmark: str,
+        lookback_days: int = 252
+    ) -> dict[str, float | None]:
+        """
+        Calculate up-market and down-market capture ratios.
+
+        Args:
+            benchmark: Benchmark name
+            lookback_days: Days of history
+
+        Returns:
+            Up and down capture ratios
+        """
+        if benchmark not in self._benchmark_returns:
+            return {"up_capture": None, "down_capture": None, "error": "benchmark_not_found"}
+
+        portfolio_rets = dict(self._portfolio_returns[-lookback_days:])
+        benchmark_rets = dict(self._benchmark_returns[benchmark][-lookback_days:])
+
+        common_dates = set(portfolio_rets.keys()) & set(benchmark_rets.keys())
+        if len(common_dates) < 30:
+            return {"up_capture": None, "down_capture": None, "error": "insufficient_data"}
+
+        # Separate up and down periods
+        up_portfolio = []
+        up_benchmark = []
+        down_portfolio = []
+        down_benchmark = []
+
+        for date in common_dates:
+            p_ret = portfolio_rets[date]
+            b_ret = benchmark_rets[date]
+
+            if b_ret > 0:
+                up_portfolio.append(p_ret)
+                up_benchmark.append(b_ret)
+            elif b_ret < 0:
+                down_portfolio.append(p_ret)
+                down_benchmark.append(b_ret)
+
+        # Calculate capture ratios
+        up_capture = None
+        down_capture = None
+
+        if up_benchmark and sum(up_benchmark) != 0:
+            up_capture = sum(up_portfolio) / sum(up_benchmark) * 100
+
+        if down_benchmark and sum(down_benchmark) != 0:
+            down_capture = sum(down_portfolio) / sum(down_benchmark) * 100
+
+        return {
+            "up_capture": up_capture,
+            "down_capture": down_capture,
+            "up_periods": len(up_benchmark),
+            "down_periods": len(down_benchmark),
+            "interpretation": self._interpret_capture_ratios(up_capture, down_capture),
+        }
+
+    def _interpret_capture_ratios(
+        self,
+        up_capture: float | None,
+        down_capture: float | None
+    ) -> str:
+        """Interpret capture ratio results."""
+        if up_capture is None or down_capture is None:
+            return "Insufficient data for interpretation"
+
+        if up_capture > 100 and down_capture < 100:
+            return "Excellent: Outperforms in up markets and protects in down markets"
+        elif up_capture > 100 and down_capture > 100:
+            return "Aggressive: Higher returns but more downside exposure"
+        elif up_capture < 100 and down_capture < 100:
+            return "Defensive: Lower returns but downside protection"
+        else:
+            return "Underperforming: Lower upside capture with higher downside exposure"
+
+    def calculate_batting_average(
+        self,
+        benchmark: str,
+        lookback_days: int = 252
+    ) -> dict[str, Any]:
+        """
+        Calculate batting average (frequency of outperformance).
+
+        Args:
+            benchmark: Benchmark name
+            lookback_days: Days of history
+
+        Returns:
+            Batting average metrics
+        """
+        if benchmark not in self._benchmark_returns:
+            return {"batting_average": None, "error": "benchmark_not_found"}
+
+        portfolio_rets = dict(self._portfolio_returns[-lookback_days:])
+        benchmark_rets = dict(self._benchmark_returns[benchmark][-lookback_days:])
+
+        common_dates = set(portfolio_rets.keys()) & set(benchmark_rets.keys())
+        if len(common_dates) < 10:
+            return {"batting_average": None, "error": "insufficient_data"}
+
+        outperform_count = 0
+        for date in common_dates:
+            if portfolio_rets[date] > benchmark_rets[date]:
+                outperform_count += 1
+
+        batting_avg = outperform_count / len(common_dates)
+
+        return {
+            "batting_average": batting_avg,
+            "batting_average_pct": batting_avg * 100,
+            "outperform_periods": outperform_count,
+            "total_periods": len(common_dates),
+            "interpretation": (
+                "Strong" if batting_avg > 0.55 else
+                "Average" if batting_avg > 0.45 else
+                "Weak"
+            ),
+        }
+
+    def generate_comparison_report(
+        self,
+        benchmark: str,
+        lookback_days: int = 252
+    ) -> dict[str, Any]:
+        """
+        Generate comprehensive benchmark comparison report.
+
+        Args:
+            benchmark: Benchmark to compare against
+            lookback_days: Analysis period
+
+        Returns:
+            Full comparison report
+        """
+        alpha_beta = self.calculate_alpha_beta(benchmark, lookback_days)
+        capture = self.calculate_capture_ratios(benchmark, lookback_days)
+        batting = self.calculate_batting_average(benchmark, lookback_days)
+
+        # Calculate additional metrics
+        portfolio_rets = [r for _, r in self._portfolio_returns[-lookback_days:]]
+        benchmark_rets_list = [r for _, r in self._benchmark_returns.get(benchmark, [])[-lookback_days:]]
+
+        report = {
+            "report_type": "benchmark_comparison",
+            "benchmark": benchmark,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "lookback_days": lookback_days,
+            "alpha_beta": alpha_beta,
+            "capture_ratios": capture,
+            "batting_average": batting,
+            "portfolio_metrics": {},
+            "benchmark_metrics": {},
+            "relative_metrics": {},
+        }
+
+        if portfolio_rets:
+            p_return = np.sum(portfolio_rets)
+            p_vol = np.std(portfolio_rets) * np.sqrt(252) if len(portfolio_rets) > 1 else 0
+            report["portfolio_metrics"] = {
+                "total_return_pct": p_return * 100,
+                "annualized_volatility_pct": p_vol * 100,
+                "sharpe_ratio": (p_return * 252 - self._risk_free_rate) / p_vol if p_vol > 0 else 0,
+            }
+
+        if benchmark_rets_list:
+            b_return = np.sum(benchmark_rets_list)
+            b_vol = np.std(benchmark_rets_list) * np.sqrt(252) if len(benchmark_rets_list) > 1 else 0
+            report["benchmark_metrics"] = {
+                "total_return_pct": b_return * 100,
+                "annualized_volatility_pct": b_vol * 100,
+                "sharpe_ratio": (b_return * 252 - self._risk_free_rate) / b_vol if b_vol > 0 else 0,
+            }
+
+        if portfolio_rets and benchmark_rets_list:
+            report["relative_metrics"] = {
+                "excess_return_pct": (np.sum(portfolio_rets) - np.sum(benchmark_rets_list)) * 100,
+                "relative_volatility": (
+                    np.std(portfolio_rets) / np.std(benchmark_rets_list)
+                    if np.std(benchmark_rets_list) > 0 else 0
+                ),
+            }
+
+        return report

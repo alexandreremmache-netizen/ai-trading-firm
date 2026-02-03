@@ -4,7 +4,35 @@ Options Volatility Strategy
 
 Implements options and volatility-based trading logic.
 
-TODO: This is a placeholder - implement actual vol models.
+MATURITY: BETA
+--------------
+Status: Comprehensive Greeks and volatility surface implementation
+- [x] Black-Scholes pricing with dividends
+- [x] Full Greeks calculation (delta, gamma, theta, vega, rho)
+- [x] Implied volatility (Newton-Raphson)
+- [x] IV percentile ranking
+- [x] Vol surface construction (#O4)
+- [x] Skew analysis (risk reversal, butterfly) (#O5)
+- [x] Early exercise boundary (binomial) (#O3)
+- [x] Vanna/Volga adjustments (#O11)
+- [x] Option validation (#O2)
+- [x] Spread strategies (verticals, iron condors) (#O7)
+- [x] Pin risk detection (#O8)
+- [x] Assignment risk calculation (#O9)
+- [x] Gamma scalping support (#O10)
+- [ ] SABR model (TODO)
+- [ ] Local volatility surface (TODO)
+- [ ] Variance swap replication (TODO)
+
+Production Readiness:
+- Unit tests: Good coverage for Greeks
+- Validation: Option contract validation implemented
+- Greeks bounds checking: Implemented
+
+Use in production: WITH CAUTION
+- IV solver may not converge for extreme values
+- Early exercise uses binomial tree approximation
+- Verify Greeks against broker values before trading
 """
 
 from __future__ import annotations
@@ -230,40 +258,79 @@ class OptionsVolStrategy:
         q: float = 0.0,  # Continuous dividend yield
     ) -> float:
         """
-        Calculate Black-Scholes option price with dividend yield.
+        Calculate Black-Scholes option price with continuous dividend yield.
+
+        The Black-Scholes model (1973) provides a closed-form solution for
+        European option prices under the following assumptions:
+        - Log-normal distribution of stock prices
+        - Constant volatility and interest rates
+        - No transaction costs or taxes
+        - Continuous trading possible
+        - No arbitrage opportunities
+
+        Black-Scholes Formula (with dividend yield q):
+            Call: C = S * e^(-qT) * N(d1) - K * e^(-rT) * N(d2)
+            Put:  P = K * e^(-rT) * N(-d2) - S * e^(-qT) * N(-d1)
+
+        Where:
+            d1 = [ln(S/K) + (r - q + sigma^2/2) * T] / (sigma * sqrt(T))
+            d2 = d1 - sigma * sqrt(T)
+
+            N(x) = cumulative standard normal distribution function
+            e^(-rT) = discount factor for strike payment
+            e^(-qT) = discount factor for dividend-paying stock
+
+        Interpretation:
+            - N(d2) is approximately the probability the option expires ITM
+              (risk-neutral probability of exercise)
+            - N(d1) is delta-related: probability-weighted exercise value
 
         Args:
-            S: Spot price
-            K: Strike price
-            T: Time to expiry in years
-            r: Risk-free interest rate (annualized)
-            sigma: Volatility (annualized)
-            is_call: True for call, False for put
+            S: Current spot price of the underlying asset
+            K: Strike (exercise) price
+            T: Time to expiry in years (e.g., 30 days = 30/365 = 0.0822)
+            r: Risk-free interest rate (annualized decimal, e.g., 0.05 for 5%)
+            sigma: Implied volatility (annualized decimal, e.g., 0.20 for 20%)
+            is_call: True for call option, False for put option
             q: Continuous dividend yield (annualized, e.g., 0.02 for 2%)
 
         Returns:
-            Option price
+            Theoretical option price in the same currency as S and K
 
-        Note: For stocks with discrete dividends, convert to continuous yield:
+        Example:
+            S=100, K=100, T=0.25 (3 months), r=0.05, sigma=0.20, call
+            d1 = [ln(1) + (0.05 + 0.02) * 0.25] / (0.20 * 0.5) = 0.175
+            d2 = 0.175 - 0.10 = 0.075
+            C = 100 * N(0.175) - 100 * e^(-0.0125) * N(0.075) = ~5.88
+
+        Note:
+            For stocks with discrete dividends, convert to continuous yield:
             q = -ln(1 - PV(dividends)/S) / T
+            where PV(dividends) is the present value of expected dividends.
         """
         if T <= 0 or sigma <= 0:
-            # Intrinsic value at expiry
+            # At or past expiry: return intrinsic value only
             return max(0, S - K) if is_call else max(0, K - S)
 
         sqrt_T = math.sqrt(T)
 
-        # Modified d1 and d2 with dividend yield
+        # Calculate d1 and d2 (key Black-Scholes parameters)
+        # d1 incorporates: moneyness (ln(S/K)), cost of carry (r-q), and volatility (sigma^2/2)
         d1 = (math.log(S / K) + (r - q + sigma ** 2 / 2) * T) / (sigma * sqrt_T)
+        # d2 = d1 - sigma*sqrt(T) represents the probability of exercise
         d2 = d1 - sigma * sqrt_T
 
-        # Discount factors
-        discount_factor = math.exp(-r * T)
-        dividend_discount = math.exp(-q * T)
+        # Discount factors for present value calculations
+        discount_factor = math.exp(-r * T)  # PV of $1 received at expiry
+        dividend_discount = math.exp(-q * T)  # Adjustment for dividend-paying assets
 
+        # Apply Black-Scholes formula
         if is_call:
+            # Call = S * e^(-qT) * N(d1) - K * e^(-rT) * N(d2)
             price = S * dividend_discount * norm.cdf(d1) - K * discount_factor * norm.cdf(d2)
         else:
+            # Put = K * e^(-rT) * N(-d2) - S * e^(-qT) * N(-d1)
+            # Using put-call parity: P = C - S*e^(-qT) + K*e^(-rT)
             price = K * discount_factor * norm.cdf(-d2) - S * dividend_discount * norm.cdf(-d1)
 
         return price
@@ -279,54 +346,112 @@ class OptionsVolStrategy:
         q: float = 0.0,  # Continuous dividend yield
     ) -> dict[str, float]:
         """
-        Calculate option Greeks with dividend yield.
+        Calculate option Greeks (sensitivities) with dividend yield.
+
+        Greeks measure how option prices change with respect to various factors.
+        They are essential for hedging and risk management.
+
+        First-Order Greeks (price sensitivities):
+            Delta: dV/dS - sensitivity to underlying price
+            Vega:  dV/d(sigma) - sensitivity to volatility
+            Theta: dV/dt - time decay (negative for long options)
+            Rho:   dV/dr - sensitivity to interest rate
+
+        Second-Order Greek:
+            Gamma: d(Delta)/dS = d^2V/dS^2 - rate of delta change
+
+        Formulas (Black-Scholes with continuous dividend yield q):
+            d1 = [ln(S/K) + (r - q + sigma^2/2) * T] / (sigma * sqrt(T))
+            d2 = d1 - sigma * sqrt(T)
+
+            Delta_call = e^(-qT) * N(d1)
+            Delta_put  = -e^(-qT) * N(-d1)
+
+            Gamma = e^(-qT) * N'(d1) / (S * sigma * sqrt(T))
+
+            Theta = -e^(-qT) * S * N'(d1) * sigma / (2 * sqrt(T))
+                    - r * K * e^(-rT) * N(d2)  [call]
+                    + q * S * e^(-qT) * N(d1)  [call]
+
+            Vega = S * e^(-qT) * sqrt(T) * N'(d1)
+
+            Rho_call = K * T * e^(-rT) * N(d2)
+            Rho_put  = -K * T * e^(-rT) * N(-d2)
+
+        Where N(x) is the standard normal CDF and N'(x) is the PDF.
 
         Args:
-            S: Spot price
+            S: Spot price of the underlying
             K: Strike price
-            T: Time to expiry in years
-            r: Risk-free rate
-            sigma: Volatility
-            is_call: True for call, False for put
-            q: Continuous dividend yield
+            T: Time to expiry in years (e.g., 30 days = 30/365)
+            r: Risk-free interest rate (annualized, e.g., 0.05 for 5%)
+            sigma: Implied volatility (annualized, e.g., 0.20 for 20%)
+            is_call: True for call option, False for put option
+            q: Continuous dividend yield (annualized, e.g., 0.02 for 2%)
 
         Returns:
-            Dictionary with delta, gamma, theta, vega, rho
+            Dictionary with:
+                delta: Change in option price per $1 move in underlying
+                gamma: Change in delta per $1 move in underlying
+                theta: Daily time decay in dollars (negative for long options)
+                vega: Change in price per 1% (100bp) move in volatility
+                rho: Change in price per 1% (100bp) move in interest rate
         """
+        # Handle edge cases: expired or zero volatility options
         if T <= 0 or sigma <= 0:
             return {"delta": 0, "gamma": 0, "theta": 0, "vega": 0, "rho": 0}
 
         sqrt_T = math.sqrt(T)
+
+        # Calculate d1 and d2 (fundamental Black-Scholes parameters)
+        # d1 represents the moneyness adjusted for drift and volatility
         d1 = (math.log(S / K) + (r - q + sigma ** 2 / 2) * T) / (sigma * sqrt_T)
+        # d2 = d1 - sigma*sqrt(T), represents the probability of exercise
         d2 = d1 - sigma * sqrt_T
 
-        # Discount factors
-        discount_factor = math.exp(-r * T)
-        dividend_discount = math.exp(-q * T)
+        # Discount factors for present value calculations
+        discount_factor = math.exp(-r * T)  # For discounting strike
+        dividend_discount = math.exp(-q * T)  # For dividend-paying assets
 
-        # Delta (adjusted for dividend yield)
+        # DELTA: Sensitivity of option price to underlying price
+        # Call delta is in [0, 1], Put delta is in [-1, 0]
+        # For dividend-paying assets, multiply by e^(-qT)
         if is_call:
             delta = dividend_discount * norm.cdf(d1)
         else:
+            # Put-call parity: delta_put = delta_call - e^(-qT)
             delta = -dividend_discount * norm.cdf(-d1)
 
-        # Gamma (same formula, but d1 uses dividend-adjusted drift)
+        # GAMMA: Rate of change of delta (curvature)
+        # Gamma is always positive for long options
+        # Highest for ATM options near expiry
         gamma = dividend_discount * norm.pdf(d1) / (S * sigma * sqrt_T)
 
-        # Theta (per day) - more complex with dividends
+        # THETA: Time decay (value lost per day)
+        # Composed of three terms:
+        # Term 1: Pure time decay (always negative for long options)
         theta_term1 = -S * dividend_discount * norm.pdf(d1) * sigma / (2 * sqrt_T)
         if is_call:
+            # Term 2: Interest cost of holding strike (negative for calls)
             theta_term2 = -r * K * discount_factor * norm.cdf(d2)
+            # Term 3: Dividend benefit for call holders (positive)
             theta_term3 = q * S * dividend_discount * norm.cdf(d1)
         else:
+            # Term 2: Interest benefit of put (positive for puts)
             theta_term2 = r * K * discount_factor * norm.cdf(-d2)
+            # Term 3: Dividend cost for put holders (negative)
             theta_term3 = -q * S * dividend_discount * norm.cdf(-d1)
+        # Convert to per-day (annual theta / 365)
         theta = (theta_term1 + theta_term2 + theta_term3) / 365
 
-        # Vega (per 1% vol change)
+        # VEGA: Sensitivity to volatility
+        # Scaled to show P&L per 1% (100 basis point) vol change
+        # Always positive for long options
         vega = S * dividend_discount * sqrt_T * norm.pdf(d1) / 100
 
-        # Rho (per 1% rate change)
+        # RHO: Sensitivity to interest rate
+        # Scaled to show P&L per 1% (100 basis point) rate change
+        # Calls have positive rho, puts have negative rho
         if is_call:
             rho = K * T * discount_factor * norm.cdf(d2) / 100
         else:
@@ -353,41 +478,77 @@ class OptionsVolStrategy:
         max_iterations: int = 100,
     ) -> float:
         """
-        Calculate implied volatility using Newton-Raphson.
+        Calculate implied volatility using Newton-Raphson method.
+
+        Implied volatility (IV) is the volatility value that, when input into
+        Black-Scholes, produces the observed market price. It represents the
+        market's expectation of future volatility.
+
+        Newton-Raphson Method:
+            Given a function f(x) = 0, iterate:
+            x_{n+1} = x_n - f(x_n) / f'(x_n)
+
+            For IV: f(sigma) = BS_price(sigma) - market_price = 0
+            Derivative: f'(sigma) = vega = dPrice/dSigma
+
+            Therefore: sigma_{n+1} = sigma_n - (BS_price - market_price) / vega
+
+        Convergence:
+            Newton-Raphson converges quadratically when the initial guess
+            is close to the solution. Convergence issues can occur for:
+            - Deep ITM/OTM options (low vega)
+            - Very short-dated options (rapid delta change)
+            - Options trading below intrinsic value
 
         Args:
-            price: Market price of the option
-            S: Spot price
+            price: Observed market price of the option
+            S: Current spot price of underlying
             K: Strike price
             T: Time to expiry in years
-            r: Risk-free rate
+            r: Risk-free interest rate (annualized)
             is_call: True for call, False for put
-            q: Continuous dividend yield
-            precision: Price precision for convergence
-            max_iterations: Maximum iterations
+            q: Continuous dividend yield (annualized)
+            precision: Price precision for convergence (default: $0.0001)
+            max_iterations: Maximum Newton-Raphson iterations (default: 100)
 
         Returns:
-            Implied volatility
+            Implied volatility as decimal (e.g., 0.25 for 25%)
+            Bounded between 0.01 (1%) and 2.0 (200%)
 
-        TODO: Use more robust method (Brent's, bisection with bounds).
+        Note:
+            For production use, consider Brent's method or bisection with bounds
+            for more robust convergence on extreme options.
         """
-        sigma = 0.2  # Initial guess
+        # Initial guess: 20% volatility is reasonable for most equity options
+        sigma = 0.2
 
         for _ in range(max_iterations):
+            # Calculate Black-Scholes price at current sigma guess
             bs_price = self.black_scholes_price(S, K, T, r, sigma, is_call, q)
+
+            # Get vega (sensitivity of price to volatility)
+            # Multiply by 100 because our vega is scaled for 1% vol change
             vega = self.calculate_greeks(S, K, T, r, sigma, is_call, q)["vega"] * 100
 
+            # Check for near-zero vega (convergence issues)
+            # This happens for deep ITM/OTM or very short-dated options
             if abs(vega) < 1e-8:
                 break
 
+            # Newton-Raphson update: sigma_new = sigma - f(sigma) / f'(sigma)
+            # Where f(sigma) = BS_price - market_price and f'(sigma) = vega
             sigma = sigma - (bs_price - price) / vega
 
+            # Prevent sigma from going negative (volatility must be positive)
             if sigma <= 0:
                 sigma = 0.01
 
+            # Check for convergence (price difference within tolerance)
             if abs(bs_price - price) < precision:
                 break
 
+        # Bound the result to reasonable volatility range
+        # IV below 1% or above 200% is typically invalid/suspicious
         return max(0.01, min(2.0, sigma))
 
     def calculate_iv_percentile(
@@ -1463,8 +1624,16 @@ class OptionsVolStrategy:
         # Net delta including current hedge
         net_delta = total_delta + current_hedge_shares
 
-        # Hedge adjustment needed (negative to offset)
-        hedge_adjustment = -int(round(net_delta))
+        # OPT-P0-3: Hedge adjustment using floor/ceil based on direction
+        # to avoid residual exposure from rounding errors
+        # If net_delta > 0, we need to sell shares: floor(155.7) = 155 -> hedge = -155
+        # If net_delta < 0, we need to buy shares: ceil(155.7) = 156 -> hedge = 156
+        if net_delta > 0:
+            hedge_adjustment = -math.floor(net_delta)
+        elif net_delta < 0:
+            hedge_adjustment = math.ceil(abs(net_delta))
+        else:
+            hedge_adjustment = 0
 
         return {
             "option_delta": total_delta,
@@ -1614,6 +1783,505 @@ class OptionsVolStrategy:
             "adjusted_price": adjusted_price,
             "adjustment_pct": (total_adjustment / bs_price * 100) if bs_price > 0 else 0,
         }
+
+    # =========================================================================
+    # VOL SURFACE INTERPOLATION METHODS (P3)
+    # =========================================================================
+
+    def interpolate_vol_cubic(
+        self,
+        surface: dict,
+        target_expiry: int,
+        target_moneyness: float
+    ) -> float | None:
+        """
+        Interpolate volatility using cubic spline interpolation (P3).
+
+        More accurate than bilinear for smooth surfaces.
+
+        Args:
+            surface: Vol surface from build_vol_surface
+            target_expiry: Target expiry in days
+            target_moneyness: Target log-moneyness
+
+        Returns:
+            Interpolated implied volatility
+        """
+        expiries = surface.get("expiries", [])
+        moneyness = surface.get("moneyness", [])
+        grid = np.array(surface.get("surface", []))
+
+        if len(expiries) < 2 or len(moneyness) < 2:
+            return self.interpolate_vol(surface, target_expiry, target_moneyness)
+
+        try:
+            from scipy.interpolate import RectBivariateSpline
+
+            # Remove NaN values for interpolation
+            valid_mask = ~np.isnan(grid)
+            if not np.any(valid_mask):
+                return None
+
+            # Fill NaN with nearest neighbor for spline fitting
+            grid_filled = np.copy(grid)
+            for i in range(grid.shape[0]):
+                for j in range(grid.shape[1]):
+                    if np.isnan(grid_filled[i, j]):
+                        # Find nearest non-NaN value
+                        valid_vals = grid[valid_mask]
+                        if len(valid_vals) > 0:
+                            grid_filled[i, j] = np.mean(valid_vals)
+
+            # Create spline interpolator
+            spline = RectBivariateSpline(
+                expiries, moneyness, grid_filled, kx=min(3, len(expiries) - 1), ky=min(3, len(moneyness) - 1)
+            )
+
+            # Interpolate
+            vol = spline(target_expiry, target_moneyness)[0, 0]
+            return float(vol)
+
+        except (ImportError, ValueError) as e:
+            logger.warning(f"Cubic interpolation failed, falling back to bilinear: {e}")
+            return self.interpolate_vol(surface, target_expiry, target_moneyness)
+
+    def fit_svi_slice(
+        self,
+        strikes: list[float],
+        ivs: list[float],
+        forward: float,
+        time_to_expiry: float
+    ) -> dict | None:
+        """
+        Fit SVI (Stochastic Volatility Inspired) parameterization to a vol slice (P3).
+
+        SVI: w(k) = a + b * (rho * (k - m) + sqrt((k - m)^2 + sigma^2))
+        where w = total variance = iv^2 * T, k = log(K/F)
+
+        Args:
+            strikes: Strike prices
+            ivs: Implied volatilities at each strike
+            forward: Forward price
+            time_to_expiry: Time to expiry in years
+
+        Returns:
+            SVI parameters {a, b, rho, m, sigma} or None if fit fails
+        """
+        if len(strikes) < 5 or time_to_expiry <= 0:
+            return None
+
+        try:
+            from scipy.optimize import minimize
+
+            # Convert to log-moneyness and total variance
+            k = np.log(np.array(strikes) / forward)
+            w = np.array(ivs) ** 2 * time_to_expiry
+
+            def svi(params, k):
+                a, b, rho, m, sigma = params
+                return a + b * (rho * (k - m) + np.sqrt((k - m) ** 2 + sigma ** 2))
+
+            def objective(params):
+                pred = svi(params, k)
+                return np.sum((pred - w) ** 2)
+
+            # Initial guess
+            a0 = np.mean(w)
+            b0 = 0.1
+            rho0 = -0.3
+            m0 = 0.0
+            sigma0 = 0.1
+
+            # Constraints: b >= 0, |rho| < 1, sigma > 0, a + b*sigma*sqrt(1-rho^2) >= 0
+            bounds = [
+                (None, None),  # a
+                (0.001, None),  # b > 0
+                (-0.99, 0.99),  # |rho| < 1
+                (None, None),  # m
+                (0.001, None),  # sigma > 0
+            ]
+
+            result = minimize(
+                objective,
+                [a0, b0, rho0, m0, sigma0],
+                method='L-BFGS-B',
+                bounds=bounds
+            )
+
+            if result.success:
+                a, b, rho, m, sigma = result.x
+                return {
+                    "a": a,
+                    "b": b,
+                    "rho": rho,
+                    "m": m,
+                    "sigma": sigma,
+                    "fit_error": result.fun,
+                    "time_to_expiry": time_to_expiry,
+                }
+            return None
+
+        except (ImportError, Exception) as e:
+            logger.warning(f"SVI fitting failed: {e}")
+            return None
+
+    def interpolate_vol_svi(
+        self,
+        svi_params: dict,
+        target_moneyness: float,
+        time_to_expiry: float
+    ) -> float | None:
+        """
+        Interpolate volatility using fitted SVI parameters (P3).
+
+        Args:
+            svi_params: SVI parameters from fit_svi_slice
+            target_moneyness: Target log-moneyness (log(K/F))
+            time_to_expiry: Time to expiry in years
+
+        Returns:
+            Implied volatility at target strike
+        """
+        if not svi_params or time_to_expiry <= 0:
+            return None
+
+        a = svi_params["a"]
+        b = svi_params["b"]
+        rho = svi_params["rho"]
+        m = svi_params["m"]
+        sigma = svi_params["sigma"]
+
+        # Calculate total variance
+        k = target_moneyness
+        w = a + b * (rho * (k - m) + np.sqrt((k - m) ** 2 + sigma ** 2))
+
+        # Convert to IV
+        if w <= 0:
+            return None
+        iv = np.sqrt(w / time_to_expiry)
+        return float(iv)
+
+    # =========================================================================
+    # TERM STRUCTURE ANALYSIS (P3)
+    # =========================================================================
+
+    def analyze_term_structure(
+        self,
+        surface: dict,
+        spot_price: float
+    ) -> dict:
+        """
+        Analyze volatility term structure characteristics (P3).
+
+        Examines how ATM volatility changes with expiry and identifies
+        term structure patterns (contango, backwardation, humped).
+
+        Args:
+            surface: Vol surface from build_vol_surface
+            spot_price: Current underlying price
+
+        Returns:
+            Term structure analysis
+        """
+        atm_term_structure = surface.get("atm_term_structure", [])
+
+        if len(atm_term_structure) < 2:
+            return {"error": "insufficient_data", "expiries": len(atm_term_structure)}
+
+        expiries = [x[0] for x in atm_term_structure]
+        ivs = [x[1] for x in atm_term_structure]
+
+        # Calculate term structure slope
+        if len(expiries) >= 2:
+            slope, intercept = np.polyfit(expiries, ivs, 1)
+        else:
+            slope, intercept = 0, ivs[0] if ivs else 0
+
+        # Identify term structure shape
+        front_iv = ivs[0] if ivs else 0
+        back_iv = ivs[-1] if ivs else 0
+
+        if slope > 0.0001:
+            shape = "contango"  # Back months higher IV
+        elif slope < -0.0001:
+            shape = "backwardation"  # Front months higher IV
+        else:
+            shape = "flat"
+
+        # Check for hump
+        is_humped = False
+        hump_expiry = None
+        if len(ivs) >= 3:
+            max_idx = np.argmax(ivs)
+            if 0 < max_idx < len(ivs) - 1:
+                is_humped = True
+                hump_expiry = expiries[max_idx]
+
+        # Calculate roll yield proxy (front to second month)
+        roll_yield = None
+        if len(ivs) >= 2:
+            roll_yield = (ivs[1] - ivs[0]) / ivs[0] * 100 if ivs[0] > 0 else 0
+
+        # Forward volatility (variance interpolation)
+        forward_vols = []
+        for i in range(len(expiries) - 1):
+            t1, v1 = expiries[i], ivs[i]
+            t2, v2 = expiries[i + 1], ivs[i + 1]
+
+            if t1 > 0 and t2 > t1:
+                # Forward variance = (v2^2 * t2 - v1^2 * t1) / (t2 - t1)
+                fwd_var = (v2 ** 2 * t2 / 365 - v1 ** 2 * t1 / 365) / ((t2 - t1) / 365)
+                if fwd_var > 0:
+                    fwd_vol = np.sqrt(fwd_var)
+                    forward_vols.append({
+                        "period": f"{t1}d-{t2}d",
+                        "forward_vol": fwd_vol,
+                    })
+
+        return {
+            "shape": shape,
+            "slope": slope,
+            "intercept": intercept,
+            "front_iv": front_iv,
+            "back_iv": back_iv,
+            "is_humped": is_humped,
+            "hump_expiry": hump_expiry,
+            "roll_yield_pct": roll_yield,
+            "forward_vols": forward_vols,
+            "n_expiries": len(expiries),
+            "term_structure": atm_term_structure,
+        }
+
+    def calculate_vol_carry(
+        self,
+        current_iv: float,
+        realized_vol: float,
+        days_to_expiry: int
+    ) -> dict:
+        """
+        Calculate volatility carry/theta from vol premium (P3).
+
+        Estimates daily P&L from being short volatility.
+
+        Args:
+            current_iv: Current implied volatility
+            realized_vol: Current realized volatility
+            days_to_expiry: Days to option expiry
+
+        Returns:
+            Vol carry analysis
+        """
+        vol_premium = current_iv - realized_vol
+
+        # Daily variance carry (simplified)
+        # Total variance = IV^2 * T, realized variance = RV^2 * T
+        # Daily carry = (IV^2 - RV^2) / 365
+        daily_variance_carry = (current_iv ** 2 - realized_vol ** 2) / 365
+
+        # Annualized carry
+        annualized_carry = vol_premium
+
+        # Break-even days (how long RV can be at current level before losing)
+        break_even_days = None
+        if daily_variance_carry != 0:
+            total_premium = vol_premium * days_to_expiry / 365
+            break_even_days = abs(total_premium / daily_variance_carry) if daily_variance_carry != 0 else None
+
+        return {
+            "vol_premium": vol_premium,
+            "daily_variance_carry": daily_variance_carry,
+            "annualized_carry": annualized_carry,
+            "days_to_expiry": days_to_expiry,
+            "break_even_days": break_even_days,
+            "carry_direction": "positive" if vol_premium > 0 else "negative",
+            "recommendation": "sell_vol" if vol_premium > 0.02 else ("buy_vol" if vol_premium < -0.02 else "neutral"),
+        }
+
+    # =========================================================================
+    # SKEW TRADING SIGNALS (P3)
+    # =========================================================================
+
+    def generate_skew_signal(
+        self,
+        current_skew: dict,
+        historical_skew: list[dict],
+        underlying: str
+    ) -> dict | None:
+        """
+        Generate trading signal from skew analysis (P3).
+
+        Identifies when skew is at extremes relative to history.
+
+        Args:
+            current_skew: Current skew from analyze_skew
+            historical_skew: Historical skew readings
+            underlying: Underlying symbol
+
+        Returns:
+            Skew trading signal or None
+        """
+        anomalies = self.detect_skew_anomaly(current_skew, historical_skew)
+
+        if not anomalies.get("has_anomaly"):
+            return None
+
+        signals = []
+
+        for anomaly in anomalies.get("anomalies", []):
+            metric = anomaly["metric"]
+            z_score = anomaly["z_score"]
+            direction = anomaly["direction"]
+
+            if metric == "risk_reversal_25d":
+                # High RR = puts expensive, low RR = calls expensive
+                if direction == "high" and z_score > 2:
+                    # Puts very expensive - sell put spread, buy call spread
+                    signals.append({
+                        "trade": "sell_risk_reversal",
+                        "action": "Sell OTM puts, buy OTM calls",
+                        "rationale": f"Put skew at {z_score:.1f} sigma - puts overpriced",
+                        "strength": min(1.0, z_score / 3),
+                    })
+                elif direction == "low" and z_score < -2:
+                    # Calls expensive - opposite
+                    signals.append({
+                        "trade": "buy_risk_reversal",
+                        "action": "Buy OTM puts, sell OTM calls",
+                        "rationale": f"Call skew at {abs(z_score):.1f} sigma - calls overpriced",
+                        "strength": min(1.0, abs(z_score) / 3),
+                    })
+
+            elif metric == "butterfly_25d":
+                # High butterfly = wings expensive
+                if direction == "high" and z_score > 2:
+                    signals.append({
+                        "trade": "sell_butterfly",
+                        "action": "Sell wings, buy ATM (short butterfly)",
+                        "rationale": f"Butterfly at {z_score:.1f} sigma - wings overpriced",
+                        "strength": min(1.0, z_score / 3),
+                    })
+                elif direction == "low" and z_score < -2:
+                    signals.append({
+                        "trade": "buy_butterfly",
+                        "action": "Buy wings, sell ATM (long butterfly)",
+                        "rationale": f"Butterfly at {abs(z_score):.1f} sigma - wings cheap",
+                        "strength": min(1.0, abs(z_score) / 3),
+                    })
+
+        if not signals:
+            return None
+
+        # Return strongest signal
+        best_signal = max(signals, key=lambda s: s["strength"])
+
+        return {
+            "underlying": underlying,
+            "signal_type": "skew_trade",
+            "trade": best_signal["trade"],
+            "action": best_signal["action"],
+            "rationale": best_signal["rationale"],
+            "strength": best_signal["strength"],
+            "current_skew": {
+                "risk_reversal_25d": current_skew.get("risk_reversal_25d"),
+                "butterfly_25d": current_skew.get("butterfly_25d"),
+            },
+            "all_signals": signals,
+        }
+
+    def create_skew_trade(
+        self,
+        options: list[OptionData],
+        trade_type: str,  # "risk_reversal", "butterfly"
+        target_delta: float = 0.25
+    ) -> dict | None:
+        """
+        Create a skew trade structure (P3).
+
+        Args:
+            options: Available options
+            trade_type: Type of skew trade
+            target_delta: Target delta for legs
+
+        Returns:
+            Trade structure or None
+        """
+        calls = [o for o in options if o.is_call]
+        puts = [o for o in options if not o.is_call]
+
+        if not calls or not puts:
+            return None
+
+        if trade_type == "risk_reversal":
+            # Find matching delta put and call
+            target_put = min(puts, key=lambda o: abs(abs(o.delta) - target_delta))
+            target_call = min(calls, key=lambda o: abs(o.delta - target_delta))
+
+            net_premium = target_call.mid_price - target_put.mid_price
+
+            return {
+                "trade_type": "risk_reversal",
+                "buy_leg": {
+                    "type": "call",
+                    "strike": target_call.strike,
+                    "delta": target_call.delta,
+                    "price": target_call.mid_price,
+                    "iv": target_call.implied_vol,
+                },
+                "sell_leg": {
+                    "type": "put",
+                    "strike": target_put.strike,
+                    "delta": target_put.delta,
+                    "price": target_put.mid_price,
+                    "iv": target_put.implied_vol,
+                },
+                "net_premium": net_premium,
+                "implied_skew": target_put.implied_vol - target_call.implied_vol,
+                "max_loss": "unlimited on downside",
+                "max_profit": "unlimited on upside",
+            }
+
+        elif trade_type == "butterfly":
+            # Find ATM and wings
+            atm_opts = [o for o in options if abs(o.delta) > 0.45 and abs(o.delta) < 0.55]
+            if not atm_opts:
+                return None
+
+            # Use calls for simplicity
+            atm_call = min([o for o in atm_opts if o.is_call], key=lambda o: abs(o.delta - 0.5), default=None)
+            if not atm_call:
+                return None
+
+            # Find wings at target delta
+            lower_wing = min(calls, key=lambda o: abs(o.delta - (1 - target_delta)))
+            upper_wing = min(calls, key=lambda o: abs(o.delta - target_delta))
+
+            # Long butterfly: buy lower, sell 2x ATM, buy upper
+            net_premium = lower_wing.mid_price - 2 * atm_call.mid_price + upper_wing.mid_price
+
+            return {
+                "trade_type": "butterfly",
+                "lower_wing": {
+                    "strike": lower_wing.strike,
+                    "action": "buy",
+                    "price": lower_wing.mid_price,
+                },
+                "body": {
+                    "strike": atm_call.strike,
+                    "action": "sell",
+                    "quantity": 2,
+                    "price": atm_call.mid_price,
+                },
+                "upper_wing": {
+                    "strike": upper_wing.strike,
+                    "action": "buy",
+                    "price": upper_wing.mid_price,
+                },
+                "net_premium": net_premium,
+                "max_profit": atm_call.strike - lower_wing.strike - abs(net_premium),
+                "max_loss": abs(net_premium),
+            }
+
+        return None
 
     # =========================================================================
     # OPTION PORTFOLIO HEDGING SUGGESTIONS (#O12)

@@ -67,6 +67,11 @@ class ScenarioDefinition:
     vix_level: float | None = None
     credit_spread_change_bps: float = 0.0
 
+    # P2 Enhancement: Probability weighting
+    probability: float = 1.0  # Scenario probability (for weighting)
+    severity_rank: int = 0  # Relative severity (1 = worst)
+    category: str = "custom"  # Category: 'historical', 'hypothetical', 'custom'
+
     def to_dict(self) -> dict:
         return {
             'name': self.name,
@@ -86,6 +91,9 @@ class ScenarioDefinition:
             'interest_rate_change_bps': self.interest_rate_change_bps,
             'vix_level': self.vix_level,
             'credit_spread_change_bps': self.credit_spread_change_bps,
+            'probability': self.probability,
+            'severity_rank': self.severity_rank,
+            'category': self.category,
         }
 
 
@@ -861,3 +869,593 @@ class WhatIfAnalyzer:
         # Sort by VaR reduction (most reduction first)
         results.sort(key=lambda r: r.var_impact)
         return results[:5]
+
+
+# =============================================================================
+# P2 Enhancement: Historical Scenario Replay
+# =============================================================================
+
+@dataclass
+class HistoricalReplayConfig:
+    """Configuration for historical scenario replay."""
+    start_date: date
+    end_date: date
+    replay_speed: float = 1.0  # 1.0 = real-time, 2.0 = 2x speed
+    include_intraday: bool = False
+    data_source: str = "synthetic"  # 'synthetic', 'file', 'api'
+
+
+@dataclass
+class ReplaySnapshot:
+    """Snapshot of portfolio state during replay."""
+    timestamp: datetime
+    portfolio_value: float
+    pnl: float
+    pnl_pct: float
+    position_values: dict[str, float]
+    market_conditions: dict[str, Any]
+
+
+class HistoricalScenarioReplayer:
+    """
+    Historical scenario replay engine (P2 Enhancement).
+
+    Replays historical market conditions to test strategy behavior.
+    """
+
+    def __init__(self, scenario_engine: ScenarioEngine):
+        self.scenario_engine = scenario_engine
+        self._historical_data: dict[str, list[dict]] = {}  # symbol -> [daily data]
+        self._replay_snapshots: list[ReplaySnapshot] = []
+
+    def load_historical_event(self, event: HistoricalEvent) -> bool:
+        """
+        Load historical data for a specific event.
+
+        Generates synthetic data based on event characteristics.
+        """
+        scenario = HistoricalEventLibrary.get_event(event)
+        if not scenario:
+            return False
+
+        # Generate synthetic daily data for the event period
+        self._historical_data = self._generate_synthetic_event_data(scenario)
+        return True
+
+    def _generate_synthetic_event_data(
+        self,
+        scenario: ScenarioDefinition,
+    ) -> dict[str, list[dict]]:
+        """Generate synthetic daily data for scenario replay."""
+        data = {}
+        duration = scenario.duration_days
+
+        for shock in scenario.shocks:
+            asset_class = shock.asset_class
+            daily_data = []
+
+            # Calculate daily shock (distribute over duration)
+            daily_change = shock.price_change_pct / max(1, duration)
+
+            base_price = 100.0
+            current_price = base_price
+
+            for day in range(duration):
+                # Add some randomness around the trend
+                import random
+                noise = random.gauss(0, abs(daily_change) * 0.3)
+                actual_change = daily_change + noise
+
+                current_price *= (1 + actual_change / 100)
+
+                daily_data.append({
+                    'day': day,
+                    'price': current_price,
+                    'change_pct': actual_change,
+                    'volatility': shock.volatility_multiplier * 0.02,  # Base 2% vol
+                    'volume_multiplier': 1.0 + abs(daily_change) * 0.5,
+                })
+
+            data[asset_class] = daily_data
+
+        return data
+
+    def replay(
+        self,
+        config: HistoricalReplayConfig,
+        callback: Callable[[ReplaySnapshot], None] | None = None,
+    ) -> list[ReplaySnapshot]:
+        """
+        Replay historical scenario day by day.
+
+        Args:
+            config: Replay configuration
+            callback: Optional callback for each snapshot
+
+        Returns:
+            List of replay snapshots
+        """
+        self._replay_snapshots = []
+
+        if not self._historical_data:
+            logger.warning("No historical data loaded for replay")
+            return []
+
+        # Get max duration
+        max_days = max(len(data) for data in self._historical_data.values())
+
+        initial_value = sum(
+            abs(p['quantity'] * p['price'])
+            for p in self.scenario_engine._positions.values()
+        )
+
+        cumulative_pnl = 0.0
+
+        for day in range(max_days):
+            # Get market conditions for this day
+            market_conditions = {}
+            position_values = {}
+
+            for asset_class, daily_data in self._historical_data.items():
+                if day < len(daily_data):
+                    market_conditions[asset_class] = daily_data[day]
+
+            # Calculate position values and P&L
+            daily_pnl = 0.0
+            for symbol, pos in self.scenario_engine._positions.items():
+                asset_class = pos.get('asset_class', 'us_equity')
+                if asset_class in market_conditions:
+                    day_data = market_conditions[asset_class]
+                    daily_change = day_data['change_pct'] / 100
+
+                    position_value = pos['quantity'] * pos['price']
+                    position_pnl = position_value * daily_change
+
+                    # Update for shorts
+                    if pos['quantity'] < 0:
+                        position_pnl = -position_pnl
+
+                    daily_pnl += position_pnl
+                    position_values[symbol] = position_value + position_pnl
+
+            cumulative_pnl += daily_pnl
+            portfolio_value = initial_value + cumulative_pnl
+            pnl_pct = (cumulative_pnl / initial_value * 100) if initial_value > 0 else 0
+
+            # Create snapshot
+            snapshot = ReplaySnapshot(
+                timestamp=datetime.now(timezone.utc),
+                portfolio_value=portfolio_value,
+                pnl=cumulative_pnl,
+                pnl_pct=pnl_pct,
+                position_values=position_values,
+                market_conditions=market_conditions,
+            )
+
+            self._replay_snapshots.append(snapshot)
+
+            if callback:
+                callback(snapshot)
+
+        return self._replay_snapshots
+
+    def get_replay_summary(self) -> dict:
+        """Get summary of replay results."""
+        if not self._replay_snapshots:
+            return {}
+
+        values = [s.portfolio_value for s in self._replay_snapshots]
+        pnls = [s.pnl for s in self._replay_snapshots]
+
+        return {
+            'num_days': len(self._replay_snapshots),
+            'initial_value': values[0] if values else 0,
+            'final_value': values[-1] if values else 0,
+            'total_pnl': pnls[-1] if pnls else 0,
+            'max_drawdown': self._calculate_max_drawdown(values),
+            'worst_day_pnl': min(
+                self._replay_snapshots[i].pnl - self._replay_snapshots[i-1].pnl
+                for i in range(1, len(self._replay_snapshots))
+            ) if len(self._replay_snapshots) > 1 else 0,
+        }
+
+    def _calculate_max_drawdown(self, values: list[float]) -> float:
+        """Calculate maximum drawdown from value series."""
+        if not values:
+            return 0.0
+
+        peak = values[0]
+        max_dd = 0.0
+
+        for value in values:
+            if value > peak:
+                peak = value
+            dd = (peak - value) / peak if peak > 0 else 0
+            max_dd = max(max_dd, dd)
+
+        return max_dd
+
+
+# =============================================================================
+# P2 Enhancement: Custom Scenario Builder
+# =============================================================================
+
+class ScenarioBuilder:
+    """
+    Builder pattern for creating custom scenarios (P2 Enhancement).
+
+    Provides fluent interface for scenario construction.
+    """
+
+    def __init__(self, name: str):
+        self._name = name
+        self._description = ""
+        self._shocks: list[AssetShock] = []
+        self._event_date: date | None = None
+        self._duration_days = 1
+        self._is_historical = False
+        self._interest_rate_change_bps = 0.0
+        self._vix_level: float | None = None
+        self._credit_spread_change_bps = 0.0
+        self._probability = 1.0
+        self._severity_rank = 0
+        self._category = "custom"
+
+    def with_description(self, description: str) -> "ScenarioBuilder":
+        """Set scenario description."""
+        self._description = description
+        return self
+
+    def with_equity_shock(
+        self,
+        change_pct: float,
+        asset_class: str = "us_equity",
+        volatility_mult: float = 1.0,
+        correlation_shift: float = 0.0,
+    ) -> "ScenarioBuilder":
+        """Add equity shock."""
+        self._shocks.append(AssetShock(
+            asset_class=asset_class,
+            price_change_pct=change_pct,
+            volatility_multiplier=volatility_mult,
+            correlation_shift=correlation_shift,
+        ))
+        return self
+
+    def with_rate_shock(self, change_bps: float) -> "ScenarioBuilder":
+        """Add interest rate shock."""
+        self._interest_rate_change_bps = change_bps
+        return self
+
+    def with_credit_shock(self, spread_change_bps: float) -> "ScenarioBuilder":
+        """Add credit spread shock."""
+        self._credit_spread_change_bps = spread_change_bps
+        return self
+
+    def with_vix_level(self, vix: float) -> "ScenarioBuilder":
+        """Set VIX level."""
+        self._vix_level = vix
+        return self
+
+    def with_duration(self, days: int) -> "ScenarioBuilder":
+        """Set scenario duration."""
+        self._duration_days = days
+        return self
+
+    def with_event_date(self, event_date: date) -> "ScenarioBuilder":
+        """Set event date."""
+        self._event_date = event_date
+        return self
+
+    def as_historical(self) -> "ScenarioBuilder":
+        """Mark as historical scenario."""
+        self._is_historical = True
+        self._category = "historical"
+        return self
+
+    def with_probability(self, probability: float) -> "ScenarioBuilder":
+        """Set scenario probability (for weighting)."""
+        self._probability = max(0.0, min(1.0, probability))
+        return self
+
+    def with_severity_rank(self, rank: int) -> "ScenarioBuilder":
+        """Set severity ranking."""
+        self._severity_rank = rank
+        return self
+
+    def with_category(self, category: str) -> "ScenarioBuilder":
+        """Set scenario category."""
+        self._category = category
+        return self
+
+    def add_custom_shock(self, shock: AssetShock) -> "ScenarioBuilder":
+        """Add a custom asset shock."""
+        self._shocks.append(shock)
+        return self
+
+    def build(self) -> ScenarioDefinition:
+        """Build the scenario definition."""
+        return ScenarioDefinition(
+            name=self._name,
+            description=self._description,
+            shocks=self._shocks,
+            event_date=self._event_date,
+            duration_days=self._duration_days,
+            is_historical=self._is_historical,
+            interest_rate_change_bps=self._interest_rate_change_bps,
+            vix_level=self._vix_level,
+            credit_spread_change_bps=self._credit_spread_change_bps,
+            probability=self._probability,
+            severity_rank=self._severity_rank,
+            category=self._category,
+        )
+
+    @classmethod
+    def recession_scenario(cls) -> "ScenarioBuilder":
+        """Pre-built recession scenario."""
+        return (
+            cls("Recession")
+            .with_description("Economic recession with market correction")
+            .with_equity_shock(-25.0, "us_equity", 2.0, 0.2)
+            .with_equity_shock(-30.0, "international_equity", 2.5, 0.3)
+            .with_rate_shock(-150)
+            .with_credit_shock(200)
+            .with_vix_level(35.0)
+            .with_duration(180)
+            .with_probability(0.15)
+            .with_severity_rank(3)
+            .with_category("hypothetical")
+        )
+
+    @classmethod
+    def inflation_shock_scenario(cls) -> "ScenarioBuilder":
+        """Pre-built inflation shock scenario."""
+        return (
+            cls("Inflation Shock")
+            .with_description("Unexpected inflation surge forcing aggressive Fed action")
+            .with_equity_shock(-15.0, "us_equity", 1.8, 0.15)
+            .with_equity_shock(-20.0, "growth_equity", 2.2, 0.2)
+            .with_rate_shock(200)
+            .with_credit_shock(100)
+            .with_vix_level(30.0)
+            .with_duration(90)
+            .with_probability(0.10)
+            .with_severity_rank(4)
+            .with_category("hypothetical")
+        )
+
+    @classmethod
+    def geopolitical_crisis_scenario(cls) -> "ScenarioBuilder":
+        """Pre-built geopolitical crisis scenario."""
+        return (
+            cls("Geopolitical Crisis")
+            .with_description("Major geopolitical event causing flight to safety")
+            .with_equity_shock(-18.0, "us_equity", 3.0, 0.4)
+            .with_equity_shock(-25.0, "emerging_market", 4.0, 0.5)
+            .with_rate_shock(-50)
+            .with_credit_shock(150)
+            .with_vix_level(40.0)
+            .with_duration(30)
+            .with_probability(0.05)
+            .with_severity_rank(2)
+            .with_category("hypothetical")
+        )
+
+
+# =============================================================================
+# P2 Enhancement: Probability-Weighted Scenario Analysis
+# =============================================================================
+
+@dataclass
+class ProbabilityWeightedResult:
+    """Result with probability weighting."""
+    scenario_name: str
+    probability: float
+    unweighted_pnl: float
+    weighted_pnl: float
+    unweighted_pnl_pct: float
+    weighted_contribution_pct: float
+
+    def to_dict(self) -> dict:
+        return {
+            'scenario_name': self.scenario_name,
+            'probability': self.probability,
+            'unweighted_pnl': self.unweighted_pnl,
+            'weighted_pnl': self.weighted_pnl,
+            'unweighted_pnl_pct': self.unweighted_pnl_pct,
+            'weighted_contribution_pct': self.weighted_contribution_pct,
+        }
+
+
+class ProbabilityWeightedAnalyzer:
+    """
+    Probability-weighted scenario analysis (P2 Enhancement).
+
+    Weights scenario results by their assigned probabilities.
+    """
+
+    def __init__(self, scenario_engine: ScenarioEngine):
+        self.scenario_engine = scenario_engine
+        self._scenario_results: dict[str, tuple[ScenarioResult, float]] = {}
+
+    def run_weighted_analysis(
+        self,
+        scenarios: list[ScenarioDefinition],
+        account_equity: float,
+        normalize_probabilities: bool = True,
+    ) -> dict:
+        """
+        Run probability-weighted scenario analysis.
+
+        Args:
+            scenarios: List of scenarios with probabilities
+            account_equity: Account equity for calculations
+            normalize_probabilities: If True, normalize probabilities to sum to 1
+
+        Returns:
+            Dictionary with weighted analysis results
+        """
+        self._scenario_results = {}
+        weighted_results = []
+
+        # Calculate total probability for normalization
+        total_prob = sum(s.probability for s in scenarios)
+        if normalize_probabilities and total_prob > 0:
+            prob_scale = 1.0 / total_prob
+        else:
+            prob_scale = 1.0
+
+        total_weighted_pnl = 0.0
+
+        for scenario in scenarios:
+            # Run scenario
+            result = self.scenario_engine.run_scenario(scenario, account_equity)
+
+            # Calculate weighted values
+            adjusted_prob = scenario.probability * prob_scale
+            weighted_pnl = result.total_pnl * adjusted_prob
+
+            self._scenario_results[scenario.name] = (result, adjusted_prob)
+            total_weighted_pnl += weighted_pnl
+
+        # Calculate contributions
+        for scenario in scenarios:
+            result, prob = self._scenario_results[scenario.name]
+            weighted_pnl = result.total_pnl * prob
+
+            weighted_results.append(ProbabilityWeightedResult(
+                scenario_name=scenario.name,
+                probability=prob,
+                unweighted_pnl=result.total_pnl,
+                weighted_pnl=weighted_pnl,
+                unweighted_pnl_pct=result.total_pnl_pct,
+                weighted_contribution_pct=(
+                    weighted_pnl / total_weighted_pnl * 100
+                    if total_weighted_pnl != 0 else 0
+                ),
+            ))
+
+        # Sort by probability-weighted impact
+        weighted_results.sort(key=lambda r: r.weighted_pnl)
+
+        return {
+            'analysis_timestamp': datetime.now(timezone.utc).isoformat(),
+            'num_scenarios': len(scenarios),
+            'expected_loss': total_weighted_pnl,
+            'expected_loss_pct': (
+                total_weighted_pnl / account_equity * 100
+                if account_equity > 0 else 0
+            ),
+            'worst_scenario': weighted_results[0].scenario_name if weighted_results else None,
+            'scenario_results': [r.to_dict() for r in weighted_results],
+            'risk_summary': self._generate_risk_summary(weighted_results),
+        }
+
+    def _generate_risk_summary(
+        self,
+        weighted_results: list[ProbabilityWeightedResult],
+    ) -> dict:
+        """Generate risk summary from weighted results."""
+        if not weighted_results:
+            return {}
+
+        # Calculate percentiles
+        unweighted_pnls = sorted([r.unweighted_pnl for r in weighted_results])
+
+        return {
+            'median_scenario_loss': unweighted_pnls[len(unweighted_pnls) // 2],
+            'worst_case_loss': min(unweighted_pnls),
+            'best_case_loss': max(unweighted_pnls),
+            'num_scenarios_with_loss': sum(1 for r in weighted_results if r.unweighted_pnl < 0),
+            'total_scenarios': len(weighted_results),
+        }
+
+    def get_var_weighted(
+        self,
+        confidence_level: float = 0.95,
+    ) -> float:
+        """
+        Calculate probability-weighted VaR.
+
+        Uses scenario probabilities to estimate VaR.
+        """
+        if not self._scenario_results:
+            return 0.0
+
+        # Sort scenarios by loss
+        sorted_scenarios = sorted(
+            self._scenario_results.items(),
+            key=lambda x: x[1][0].total_pnl
+        )
+
+        # Find VaR at confidence level
+        cumulative_prob = 0.0
+        target_prob = 1 - confidence_level
+
+        for name, (result, prob) in sorted_scenarios:
+            cumulative_prob += prob
+            if cumulative_prob >= target_prob:
+                return -result.total_pnl
+
+        # If we get here, return worst case
+        return -sorted_scenarios[0][1][0].total_pnl if sorted_scenarios else 0.0
+
+    def sensitivity_analysis(
+        self,
+        base_scenarios: list[ScenarioDefinition],
+        account_equity: float,
+        probability_shifts: list[float] = [-0.05, -0.02, 0.0, 0.02, 0.05],
+    ) -> dict:
+        """
+        Analyze sensitivity of results to probability assumptions.
+
+        Args:
+            base_scenarios: Base scenarios to analyze
+            account_equity: Account equity
+            probability_shifts: Probability shifts to test
+
+        Returns:
+            Sensitivity analysis results
+        """
+        sensitivity_results = []
+
+        for shift in probability_shifts:
+            # Adjust probabilities
+            adjusted_scenarios = []
+            for scenario in base_scenarios:
+                adjusted = ScenarioDefinition(
+                    name=scenario.name,
+                    description=scenario.description,
+                    shocks=scenario.shocks,
+                    event_date=scenario.event_date,
+                    duration_days=scenario.duration_days,
+                    is_historical=scenario.is_historical,
+                    interest_rate_change_bps=scenario.interest_rate_change_bps,
+                    vix_level=scenario.vix_level,
+                    credit_spread_change_bps=scenario.credit_spread_change_bps,
+                    probability=max(0.01, min(0.99, scenario.probability + shift)),
+                    severity_rank=scenario.severity_rank,
+                    category=scenario.category,
+                )
+                adjusted_scenarios.append(adjusted)
+
+            # Run analysis
+            result = self.run_weighted_analysis(
+                adjusted_scenarios, account_equity, normalize_probabilities=True
+            )
+
+            sensitivity_results.append({
+                'probability_shift': shift,
+                'expected_loss': result['expected_loss'],
+                'expected_loss_pct': result['expected_loss_pct'],
+            })
+
+        return {
+            'base_expected_loss': next(
+                (r['expected_loss'] for r in sensitivity_results if r['probability_shift'] == 0),
+                0
+            ),
+            'sensitivity_results': sensitivity_results,
+            'max_expected_loss': max(r['expected_loss'] for r in sensitivity_results),
+            'min_expected_loss': min(r['expected_loss'] for r in sensitivity_results),
+        }

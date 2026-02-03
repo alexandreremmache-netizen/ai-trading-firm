@@ -82,6 +82,89 @@ class VenueQuote:
 
 
 @dataclass
+class VenuePerformance:
+    """Performance metrics for a trading venue (P2)."""
+    venue_id: str
+    total_orders: int = 0
+    filled_orders: int = 0
+    partial_fills: int = 0
+    rejected_orders: int = 0
+    total_latency_ms: float = 0.0
+    total_slippage_bps: float = 0.0
+    last_updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def fill_rate(self) -> float:
+        """Full fill rate (0-1)."""
+        if self.total_orders == 0:
+            return 0.0
+        return self.filled_orders / self.total_orders
+
+    @property
+    def partial_fill_rate(self) -> float:
+        """Partial fill rate (0-1)."""
+        if self.total_orders == 0:
+            return 0.0
+        return self.partial_fills / self.total_orders
+
+    @property
+    def rejection_rate(self) -> float:
+        """Rejection rate (0-1)."""
+        if self.total_orders == 0:
+            return 0.0
+        return self.rejected_orders / self.total_orders
+
+    @property
+    def avg_latency_ms(self) -> float:
+        """Average execution latency in milliseconds."""
+        if self.total_orders == 0:
+            return 0.0
+        return self.total_latency_ms / self.total_orders
+
+    @property
+    def avg_slippage_bps(self) -> float:
+        """Average slippage in basis points."""
+        filled = self.filled_orders + self.partial_fills
+        if filled == 0:
+            return 0.0
+        return self.total_slippage_bps / filled
+
+    def record_execution(
+        self,
+        filled: bool,
+        partial: bool,
+        rejected: bool,
+        latency_ms: float,
+        slippage_bps: float = 0.0
+    ) -> None:
+        """Record an execution result."""
+        self.total_orders += 1
+        if filled:
+            self.filled_orders += 1
+        elif partial:
+            self.partial_fills += 1
+        elif rejected:
+            self.rejected_orders += 1
+        self.total_latency_ms += latency_ms
+        if filled or partial:
+            self.total_slippage_bps += slippage_bps
+        self.last_updated = datetime.now(timezone.utc)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "venue_id": self.venue_id,
+            "total_orders": self.total_orders,
+            "fill_rate": self.fill_rate,
+            "partial_fill_rate": self.partial_fill_rate,
+            "rejection_rate": self.rejection_rate,
+            "avg_latency_ms": self.avg_latency_ms,
+            "avg_slippage_bps": self.avg_slippage_bps,
+            "last_updated": self.last_updated.isoformat(),
+        }
+
+
+@dataclass
 class VenueConfig:
     """Configuration for a trading venue."""
     venue_id: str
@@ -140,7 +223,13 @@ class SmartOrderRouter:
     - Considers price, cost, speed, and likelihood of execution
     - Provides audit trail of routing decisions
     - Supports multiple routing strategies
+    - Reg NMS trade-through protection (NBBO validation)
+    - Tiered fee schedules based on monthly volume
     """
+
+    # Fee tier thresholds (monthly share volume)
+    FEE_TIER_HIGH_VOLUME = 10_000_000   # 10M+ shares: 30% discount
+    FEE_TIER_MID_VOLUME = 1_000_000     # 1M+ shares: 15% discount
 
     def __init__(self, config: dict[str, Any] | None = None):
         """
@@ -159,6 +248,9 @@ class SmartOrderRouter:
         self._max_venue_split = self._config.get("max_venue_split", 3)
         self._min_split_size = self._config.get("min_split_size", 100)
 
+        # Monthly volume tracking for tiered fees (would be updated from external source)
+        self._monthly_volume: int = self._config.get("monthly_volume", 0)
+
         # Venue configurations
         self._venues: dict[str, VenueConfig] = {}
 
@@ -167,6 +259,15 @@ class SmartOrderRouter:
 
         # Routing history for audit
         self._routing_history: list[RouteDecision] = []
+
+        # Venue performance tracking (P2)
+        self._venue_performance: dict[str, VenuePerformance] = {}
+
+        # Fill rate optimization settings (P2)
+        self._min_fill_rate_threshold = self._config.get("min_fill_rate_threshold", 0.7)
+        self._latency_weight = self._config.get("latency_weight", 0.3)
+        self._fill_rate_weight = self._config.get("fill_rate_weight", 0.4)
+        self._price_weight = self._config.get("price_weight", 0.3)
 
         # Add default venues (would be configured from external source in production)
         self._initialize_default_venues()
@@ -217,13 +318,16 @@ class SmartOrderRouter:
             avg_latency_ms=2.0,
         ))
 
+        # IEX has a 350 microsecond (0.35ms) speed bump - intentional delay to protect
+        # against latency arbitrage. This is NOT network latency but a regulatory feature.
+        # The speed bump applies to all incoming orders, giving IEX time to adjust prices.
         self.add_venue(VenueConfig(
             venue_id="IEX",
             venue_type=VenueType.ATS,
             name="Investors Exchange",
             taker_fee_bps=0.9,
             maker_fee_bps=0.0,  # No rebate
-            avg_latency_ms=10.0,  # Speed bump
+            avg_latency_ms=0.35,  # 350 microsecond speed bump (regulatory feature, not network latency)
             supports_hidden=True,
         ))
 
@@ -242,6 +346,95 @@ class SmartOrderRouter:
         self._venues[venue_config.venue_id] = venue_config
         logger.debug(f"Added venue: {venue_config.venue_id} ({venue_config.name})")
 
+    def validate_no_trade_through(
+        self, side: str, price: float, nbbo: tuple[float, float]
+    ) -> bool:
+        """
+        Validate order price against NBBO per Reg NMS Rule 611 (Trade-Through Protection).
+
+        Reg NMS prohibits executing trades at prices inferior to protected quotations
+        displayed by other trading centers (National Best Bid/Offer).
+
+        Args:
+            side: Order side ("BUY" or "SELL")
+            price: Proposed execution price
+            nbbo: Tuple of (best_bid, best_ask) - National Best Bid and Offer
+
+        Returns:
+            True if order would NOT trade through (compliant)
+            False if order would trade through protected quote (violation)
+        """
+        best_bid, best_ask = nbbo
+
+        # Validate NBBO is sensible
+        if best_bid <= 0 or best_ask <= 0:
+            logger.warning("Invalid NBBO values, skipping trade-through validation")
+            return True
+
+        if best_bid >= best_ask:
+            logger.warning(f"Crossed NBBO (bid={best_bid} >= ask={best_ask}), market may be locked")
+            return True  # Crossed/locked market, allow order
+
+        side_upper = side.upper()
+
+        if side_upper == "BUY":
+            # Buy orders must not execute at a price higher than the best offer
+            # (would be paying more than necessary, trading through better prices)
+            if price > best_ask:
+                logger.warning(
+                    f"Trade-through violation: BUY at {price} > NBBO ask {best_ask}"
+                )
+                return False
+        elif side_upper == "SELL":
+            # Sell orders must not execute at a price lower than the best bid
+            # (would be receiving less than available, trading through better prices)
+            if price < best_bid:
+                logger.warning(
+                    f"Trade-through violation: SELL at {price} < NBBO bid {best_bid}"
+                )
+                return False
+
+        return True
+
+    def get_tiered_fee(self, venue: str, base_fee_bps: float, monthly_volume: int | None = None) -> float:
+        """
+        Calculate tiered fee based on monthly trading volume.
+
+        Many exchanges offer volume-based fee discounts to incentivize trading activity.
+        This implements a standard tiered structure:
+        - > 10M shares/month: 30% discount
+        - > 1M shares/month: 15% discount
+        - Otherwise: base fee
+
+        Args:
+            venue: Venue ID (for venue-specific tiers in future)
+            base_fee_bps: Base fee in basis points
+            monthly_volume: Monthly share volume (uses instance default if None)
+
+        Returns:
+            Adjusted fee in basis points
+        """
+        volume = monthly_volume if monthly_volume is not None else self._monthly_volume
+
+        if volume > self.FEE_TIER_HIGH_VOLUME:
+            # High volume tier: 30% discount
+            return base_fee_bps * 0.7
+        elif volume > self.FEE_TIER_MID_VOLUME:
+            # Mid volume tier: 15% discount
+            return base_fee_bps * 0.85
+        else:
+            # Standard tier: no discount
+            return base_fee_bps
+
+    def set_monthly_volume(self, volume: int) -> None:
+        """
+        Update monthly volume for tiered fee calculation.
+
+        Should be called periodically (e.g., daily) with updated volume data.
+        """
+        self._monthly_volume = volume
+        logger.info(f"Updated monthly volume to {volume:,} shares")
+
     def update_quote(self, quote: VenueQuote) -> None:
         """
         Update quote for a venue.
@@ -259,6 +452,44 @@ class SmartOrderRouter:
         """Get all quotes for a symbol."""
         return list(self._quotes.get(symbol, {}).values())
 
+    def get_nbbo(self, symbol: str) -> tuple[float, float] | None:
+        """
+        Calculate National Best Bid and Offer (NBBO) from all venue quotes.
+
+        The NBBO represents the best available bid and ask prices across all
+        protected trading venues, as required by Reg NMS.
+
+        Args:
+            symbol: Instrument symbol
+
+        Returns:
+            Tuple of (best_bid, best_ask) or None if no quotes available
+        """
+        quotes = self.get_quotes(symbol)
+        if not quotes:
+            return None
+
+        best_bid = 0.0
+        best_ask = float('inf')
+
+        for q in quotes:
+            venue = self._venues.get(q.venue_id)
+            if not venue or not venue.enabled:
+                continue
+
+            # Best bid is the highest bid
+            if q.bid > 0 and q.bid_size > 0:
+                best_bid = max(best_bid, q.bid)
+
+            # Best ask is the lowest ask
+            if q.ask > 0 and q.ask_size > 0:
+                best_ask = min(best_ask, q.ask)
+
+        if best_bid <= 0 or best_ask == float('inf'):
+            return None
+
+        return (best_bid, best_ask)
+
     def route_order(
         self,
         symbol: str,
@@ -267,9 +498,13 @@ class SmartOrderRouter:
         strategy: RoutingStrategy | None = None,
         max_price: float | None = None,  # For buys: max price willing to pay
         min_price: float | None = None,  # For sells: min price willing to accept
+        validate_nbbo: bool = True,  # Validate against NBBO per Reg NMS
     ) -> RouteDecision:
         """
         Determine optimal routing for an order (#E11).
+
+        Includes Reg NMS trade-through protection by validating proposed
+        execution prices against NBBO before routing.
 
         Args:
             symbol: Instrument symbol
@@ -278,6 +513,7 @@ class SmartOrderRouter:
             strategy: Routing strategy (uses default if None)
             max_price: Maximum price for buys
             min_price: Minimum price for sells
+            validate_nbbo: Whether to validate against NBBO (default True)
 
         Returns:
             RouteDecision with routing instructions
@@ -303,6 +539,9 @@ class SmartOrderRouter:
 
         is_buy = side.lower() == "buy"
 
+        # Get NBBO for trade-through validation
+        nbbo = self.get_nbbo(symbol) if validate_nbbo else None
+
         if strategy == RoutingStrategy.BEST_PRICE:
             decision = self._route_best_price(symbol, is_buy, quantity, quotes, max_price, min_price)
         elif strategy == RoutingStrategy.LOWEST_COST:
@@ -315,6 +554,38 @@ class SmartOrderRouter:
             decision = self._route_liquidity(symbol, is_buy, quantity, quotes, max_price, min_price)
         else:  # ADAPTIVE
             decision = self._route_adaptive(symbol, is_buy, quantity, quotes, max_price, min_price)
+
+        # Validate routes against NBBO per Reg NMS Rule 611
+        if nbbo is not None and decision.routes:
+            validated_routes = []
+            for venue_id, qty, price in decision.routes:
+                if price > 0:  # Only validate priced routes
+                    if self.validate_no_trade_through(side, price, nbbo):
+                        validated_routes.append((venue_id, qty, price))
+                    else:
+                        # Route would trade through - adjust to NBBO
+                        best_bid, best_ask = nbbo
+                        adjusted_price = best_ask if is_buy else best_bid
+                        logger.info(
+                            f"Adjusted {venue_id} route price from {price} to {adjusted_price} "
+                            f"to comply with Reg NMS NBBO"
+                        )
+                        validated_routes.append((venue_id, qty, adjusted_price))
+                else:
+                    validated_routes.append((venue_id, qty, price))
+
+            # Update decision with validated routes
+            if validated_routes:
+                total_value = sum(qty * price for _, qty, price in validated_routes if price > 0)
+                total_qty = sum(qty for _, qty, _ in validated_routes)
+                decision = RouteDecision(
+                    routes=validated_routes,
+                    total_quantity=decision.total_quantity,
+                    strategy_used=decision.strategy_used,
+                    expected_avg_price=total_value / total_qty if total_qty > 0 else 0,
+                    expected_total_fee_bps=decision.expected_total_fee_bps,
+                    rationale=decision.rationale + " (NBBO validated)",
+                )
 
         self._routing_history.append(decision)
 
@@ -681,4 +952,351 @@ class SmartOrderRouter:
             "symbols_with_quotes": len(self._quotes),
             "routing_decisions_today": len(self._routing_history),
             "default_strategy": self._default_strategy.value,
+            "venues_with_performance_data": len(self._venue_performance),
+        }
+
+    # =========================================================================
+    # VENUE PERFORMANCE TRACKING (P2)
+    # =========================================================================
+
+    def record_execution_result(
+        self,
+        venue_id: str,
+        filled: bool,
+        partial: bool = False,
+        rejected: bool = False,
+        latency_ms: float = 0.0,
+        expected_price: float = 0.0,
+        actual_price: float = 0.0
+    ) -> None:
+        """
+        Record execution result for venue performance tracking (P2).
+
+        Call this after each order execution to build performance statistics.
+
+        Args:
+            venue_id: Venue identifier
+            filled: Whether order was fully filled
+            partial: Whether order was partially filled
+            rejected: Whether order was rejected
+            latency_ms: Execution latency in milliseconds
+            expected_price: Expected execution price
+            actual_price: Actual execution price
+        """
+        if venue_id not in self._venue_performance:
+            self._venue_performance[venue_id] = VenuePerformance(venue_id=venue_id)
+
+        # Calculate slippage
+        slippage_bps = 0.0
+        if expected_price > 0 and actual_price > 0:
+            slippage_bps = abs(actual_price - expected_price) / expected_price * 10000
+
+        self._venue_performance[venue_id].record_execution(
+            filled=filled,
+            partial=partial,
+            rejected=rejected,
+            latency_ms=latency_ms,
+            slippage_bps=slippage_bps
+        )
+
+        logger.debug(
+            f"Recorded execution for {venue_id}: filled={filled}, "
+            f"latency={latency_ms}ms, slippage={slippage_bps:.2f}bps"
+        )
+
+    def get_venue_performance(self, venue_id: str) -> VenuePerformance | None:
+        """Get performance metrics for a specific venue."""
+        return self._venue_performance.get(venue_id)
+
+    def get_all_venue_performance(self) -> dict[str, dict[str, Any]]:
+        """Get performance metrics for all venues."""
+        return {
+            venue_id: perf.to_dict()
+            for venue_id, perf in self._venue_performance.items()
+        }
+
+    def get_best_performing_venues(
+        self,
+        metric: str = "fill_rate",
+        min_orders: int = 10,
+        limit: int = 5
+    ) -> list[tuple[str, float]]:
+        """
+        Get best performing venues by specified metric (P2).
+
+        Args:
+            metric: Metric to rank by ("fill_rate", "latency", "slippage")
+            min_orders: Minimum orders to be considered
+            limit: Maximum number of venues to return
+
+        Returns:
+            List of (venue_id, metric_value) tuples, sorted best to worst
+        """
+        results = []
+
+        for venue_id, perf in self._venue_performance.items():
+            if perf.total_orders < min_orders:
+                continue
+
+            if metric == "fill_rate":
+                value = perf.fill_rate
+                reverse = True  # Higher is better
+            elif metric == "latency":
+                value = perf.avg_latency_ms
+                reverse = False  # Lower is better
+            elif metric == "slippage":
+                value = perf.avg_slippage_bps
+                reverse = False  # Lower is better
+            else:
+                continue
+
+            results.append((venue_id, value))
+
+        results.sort(key=lambda x: x[1], reverse=reverse)
+        return results[:limit]
+
+    # =========================================================================
+    # FILL RATE OPTIMIZATION (P2)
+    # =========================================================================
+
+    def route_order_optimized(
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        max_price: float | None = None,
+        min_price: float | None = None,
+        urgency: str = "normal"
+    ) -> RouteDecision:
+        """
+        Route order with fill rate optimization (P2).
+
+        Uses historical performance data to optimize routing for best
+        expected fill rate while considering price and latency.
+
+        Args:
+            symbol: Instrument symbol
+            side: Order side ("buy" or "sell")
+            quantity: Order quantity
+            max_price: Maximum price for buys
+            min_price: Minimum price for sells
+            urgency: Order urgency ("low", "normal", "high")
+                - low: Prioritize price
+                - normal: Balance price/fill/latency
+                - high: Prioritize fill rate and latency
+
+        Returns:
+            RouteDecision optimized for fill probability
+        """
+        quotes = self.get_quotes(symbol)
+        if not quotes:
+            return self.route_order(symbol, side, quantity, max_price=max_price, min_price=min_price)
+
+        is_buy = side.lower() == "buy"
+
+        # Score each venue based on multiple factors
+        venue_scores = []
+
+        for q in quotes:
+            venue = self._venues.get(q.venue_id)
+            if not venue or not venue.enabled:
+                continue
+
+            # Check price constraints
+            if is_buy:
+                if max_price is not None and q.ask > max_price:
+                    continue
+                if q.ask_size <= 0:
+                    continue
+                price = q.ask
+                available = q.ask_size
+            else:
+                if min_price is not None and q.bid < min_price:
+                    continue
+                if q.bid_size <= 0:
+                    continue
+                price = q.bid
+                available = q.bid_size
+
+            # Get performance data
+            perf = self._venue_performance.get(q.venue_id)
+
+            # Calculate scores
+            fill_score = 0.5  # Default if no history
+            latency_score = 0.5
+            if perf and perf.total_orders >= 5:
+                fill_score = perf.fill_rate
+                # Skip venues with very low fill rate
+                if fill_score < self._min_fill_rate_threshold:
+                    logger.debug(f"Skipping {q.venue_id}: fill_rate {fill_score:.2%} < threshold")
+                    continue
+                # Normalize latency (assuming 0-50ms range)
+                latency_score = max(0, 1.0 - (perf.avg_latency_ms / 50.0))
+
+            # Price score (best price = 1.0)
+            best_price = min(q2.ask for q2 in quotes if q2.ask > 0) if is_buy else max(q2.bid for q2 in quotes if q2.bid > 0)
+            if is_buy:
+                price_score = best_price / price if price > 0 else 0
+            else:
+                price_score = price / best_price if best_price > 0 else 0
+
+            # Liquidity score (can fill full order = 1.0)
+            liquidity_score = min(1.0, available / quantity)
+
+            # Adjust weights based on urgency
+            if urgency == "high":
+                weights = {"fill": 0.5, "latency": 0.3, "price": 0.1, "liquidity": 0.1}
+            elif urgency == "low":
+                weights = {"fill": 0.2, "latency": 0.1, "price": 0.5, "liquidity": 0.2}
+            else:  # normal
+                weights = {"fill": self._fill_rate_weight, "latency": self._latency_weight,
+                          "price": self._price_weight, "liquidity": 0.1}
+
+            # Calculate composite score
+            total_score = (
+                weights["fill"] * fill_score +
+                weights["latency"] * latency_score +
+                weights["price"] * price_score +
+                weights["liquidity"] * liquidity_score
+            )
+
+            venue_scores.append({
+                "venue_id": q.venue_id,
+                "quote": q,
+                "price": price,
+                "available": available,
+                "total_score": total_score,
+                "fill_score": fill_score,
+                "latency_score": latency_score,
+                "price_score": price_score,
+                "fee_bps": venue.get_fee_bps(is_maker=False),
+            })
+
+        if not venue_scores:
+            # Fall back to standard routing
+            return self.route_order(symbol, side, quantity, max_price=max_price, min_price=min_price)
+
+        # Sort by total score (highest first)
+        venue_scores.sort(key=lambda x: x["total_score"], reverse=True)
+
+        # Route to best venue (or split if needed)
+        best = venue_scores[0]
+
+        if best["available"] >= quantity:
+            # Single venue can fill entire order
+            decision = RouteDecision(
+                routes=[(best["venue_id"], quantity, best["price"])],
+                total_quantity=quantity,
+                strategy_used=RoutingStrategy.ADAPTIVE,
+                expected_avg_price=best["price"],
+                expected_total_fee_bps=best["fee_bps"],
+                rationale=(
+                    f"Optimized routing to {best['venue_id']}: "
+                    f"score={best['total_score']:.2f}, fill_rate={best['fill_score']:.2%}"
+                ),
+            )
+        else:
+            # Split across multiple venues
+            routes = []
+            remaining = quantity
+            total_value = 0.0
+            total_fee_weighted = 0.0
+
+            for vs in venue_scores[:self._max_venue_split]:
+                if remaining <= 0:
+                    break
+                alloc = min(vs["available"], remaining)
+                if alloc >= self._min_split_size:
+                    routes.append((vs["venue_id"], alloc, vs["price"]))
+                    remaining -= alloc
+                    total_value += alloc * vs["price"]
+                    total_fee_weighted += alloc * vs["fee_bps"]
+
+            if routes:
+                total_qty = sum(r[1] for r in routes)
+                decision = RouteDecision(
+                    routes=routes,
+                    total_quantity=total_qty,
+                    strategy_used=RoutingStrategy.SPLIT_ORDER,
+                    expected_avg_price=total_value / total_qty if total_qty > 0 else 0,
+                    expected_total_fee_bps=total_fee_weighted / total_qty if total_qty > 0 else 0,
+                    rationale=f"Optimized split across {len(routes)} venues based on fill rates",
+                )
+            else:
+                decision = self.route_order(symbol, side, quantity, max_price=max_price, min_price=min_price)
+
+        self._routing_history.append(decision)
+        return decision
+
+    def update_venue_latency(self, venue_id: str, latency_ms: float) -> None:
+        """
+        Update measured latency for a venue (P2).
+
+        Call this after measuring actual round-trip latency to update
+        the venue's latency estimate.
+
+        Args:
+            venue_id: Venue identifier
+            latency_ms: Measured latency in milliseconds
+        """
+        venue = self._venues.get(venue_id)
+        if venue:
+            # Exponential moving average update
+            alpha = 0.2  # Weight for new observation
+            venue.avg_latency_ms = alpha * latency_ms + (1 - alpha) * venue.avg_latency_ms
+            logger.debug(f"Updated {venue_id} latency to {venue.avg_latency_ms:.2f}ms")
+
+    def get_fill_rate_analysis(self) -> dict[str, Any]:
+        """
+        Get analysis of fill rates across venues (P2).
+
+        Returns:
+            Dictionary with fill rate analysis including:
+            - best_fill_venues: Top venues by fill rate
+            - worst_fill_venues: Bottom venues by fill rate
+            - average_fill_rate: Overall average
+            - recommendations: Suggested routing changes
+        """
+        if not self._venue_performance:
+            return {
+                "best_fill_venues": [],
+                "worst_fill_venues": [],
+                "average_fill_rate": 0.0,
+                "recommendations": ["No execution data available yet"],
+            }
+
+        # Calculate metrics
+        fill_rates = []
+        for venue_id, perf in self._venue_performance.items():
+            if perf.total_orders >= 5:  # Minimum sample
+                fill_rates.append((venue_id, perf.fill_rate, perf.total_orders))
+
+        if not fill_rates:
+            return {
+                "best_fill_venues": [],
+                "worst_fill_venues": [],
+                "average_fill_rate": 0.0,
+                "recommendations": ["Insufficient execution data for analysis"],
+            }
+
+        fill_rates.sort(key=lambda x: x[1], reverse=True)
+        avg_fill = np.mean([x[1] for x in fill_rates])
+
+        recommendations = []
+        # Check for underperforming venues
+        for venue_id, rate, orders in fill_rates:
+            if rate < self._min_fill_rate_threshold:
+                recommendations.append(
+                    f"Consider disabling {venue_id}: fill rate {rate:.1%} is below threshold"
+                )
+
+        if not recommendations:
+            recommendations.append("All venues performing within acceptable parameters")
+
+        return {
+            "best_fill_venues": [(v, f"{r:.1%}") for v, r, _ in fill_rates[:3]],
+            "worst_fill_venues": [(v, f"{r:.1%}") for v, r, _ in fill_rates[-3:]],
+            "average_fill_rate": float(avg_fill),
+            "total_venues_analyzed": len(fill_rates),
+            "recommendations": recommendations,
         }

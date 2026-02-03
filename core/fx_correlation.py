@@ -79,7 +79,11 @@ class FXMarketDepth:
     def mid_price(self) -> float | None:
         """Calculate mid price."""
         if self.bid_levels and self.ask_levels:
-            return (self.bid_levels[0][0] + self.ask_levels[0][0]) / 2
+            bid_price = self.bid_levels[0][0]
+            ask_price = self.ask_levels[0][0]
+            # Guard against invalid prices
+            if bid_price > 0 and ask_price > 0:
+                return (bid_price + ask_price) / 2
         return None
 
     def to_dict(self) -> dict:
@@ -451,6 +455,42 @@ class FXCorrelationRegimeDetector:
         correlation = numerator / denominator
         return max(-1.0, min(1.0, correlation))
 
+    def get_correlation_matrix(self, pairs: list[str] | None = None) -> tuple[list[str], list[list[float]]]:
+        """
+        Get full correlation matrix for pairs (FX-P1-1 Fix).
+
+        Returns a guaranteed symmetric correlation matrix.
+
+        Args:
+            pairs: List of pairs to include (defaults to G10_PAIRS)
+
+        Returns:
+            Tuple of (pair_names, correlation_matrix)
+        """
+        if pairs is None:
+            pairs = self.G10_PAIRS
+
+        n = len(pairs)
+        corr_matrix = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+
+        # Calculate correlations
+        for i in range(n):
+            for j in range(i + 1, n):
+                corr = self._calculate_correlation(pairs[i], pairs[j])
+                if corr is not None:
+                    corr_matrix[i][j] = corr
+                    corr_matrix[j][i] = corr  # Ensure symmetry
+
+        # FX-P1-1: Force symmetry after construction (defensive)
+        # corr[i][j] = (corr[i][j] + corr[j][i]) / 2
+        for i in range(n):
+            for j in range(i + 1, n):
+                avg = (corr_matrix[i][j] + corr_matrix[j][i]) / 2
+                corr_matrix[i][j] = avg
+                corr_matrix[j][i] = avg
+
+        return pairs, corr_matrix
+
     def _calculate_regime_probabilities(
         self,
         indicators: RegimeIndicators,
@@ -587,3 +627,585 @@ class FXCorrelationRegimeDetector:
         })
 
         return history
+
+
+# =============================================================================
+# ROLLING CORRELATION WINDOWS (P3 Enhancement)
+# =============================================================================
+
+@dataclass
+class RollingCorrelationResult:
+    """Result of rolling correlation analysis."""
+    pair1: str
+    pair2: str
+    window_size: int
+    correlations: list[float]
+    timestamps: list[datetime]
+    current_correlation: float | None
+    trend: str  # "increasing", "decreasing", "stable"
+    volatility: float  # Correlation volatility
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "pair1": self.pair1,
+            "pair2": self.pair2,
+            "window_size": self.window_size,
+            "current_correlation": self.current_correlation,
+            "trend": self.trend,
+            "correlation_volatility": self.volatility,
+            "num_observations": len(self.correlations),
+        }
+
+
+class RollingCorrelationAnalyzer:
+    """
+    Rolling correlation window analysis (P3 Enhancement).
+
+    Tracks how correlations evolve over multiple time windows.
+    """
+
+    # Standard window sizes (in days)
+    WINDOW_SIZES = [5, 10, 20, 60, 120]
+
+    def __init__(self, max_history: int = 252):
+        """
+        Initialize rolling correlation analyzer.
+
+        Args:
+            max_history: Maximum number of daily returns to store
+        """
+        self.max_history = max_history
+        self._returns: dict[str, deque] = defaultdict(lambda: deque(maxlen=max_history))
+        self._timestamps: deque = deque(maxlen=max_history)
+
+    def update_returns(self, pair: str, daily_return: float, timestamp: datetime | None = None) -> None:
+        """Update daily return for a pair."""
+        self._returns[pair].append(daily_return)
+        if timestamp and (not self._timestamps or timestamp != self._timestamps[-1]):
+            self._timestamps.append(timestamp or datetime.now(timezone.utc))
+
+    def calculate_rolling_correlation(
+        self,
+        pair1: str,
+        pair2: str,
+        window_size: int = 20,
+    ) -> RollingCorrelationResult | None:
+        """
+        Calculate rolling correlation between two pairs.
+
+        Args:
+            pair1: First currency pair
+            pair2: Second currency pair
+            window_size: Rolling window size in days
+
+        Returns:
+            RollingCorrelationResult or None if insufficient data
+        """
+        returns1 = list(self._returns.get(pair1, []))
+        returns2 = list(self._returns.get(pair2, []))
+
+        if len(returns1) < window_size or len(returns2) < window_size:
+            return None
+
+        # Align lengths
+        min_len = min(len(returns1), len(returns2))
+        returns1 = returns1[-min_len:]
+        returns2 = returns2[-min_len:]
+
+        # Calculate rolling correlations
+        correlations = []
+        timestamps = list(self._timestamps)[-min_len:]
+
+        for i in range(window_size - 1, min_len):
+            window1 = returns1[i - window_size + 1:i + 1]
+            window2 = returns2[i - window_size + 1:i + 1]
+
+            corr = self._pearson_correlation(window1, window2)
+            if corr is not None:
+                correlations.append(corr)
+
+        if not correlations:
+            return None
+
+        # Determine trend
+        trend = self._determine_trend(correlations)
+
+        # Calculate correlation volatility
+        volatility = statistics.stdev(correlations) if len(correlations) > 1 else 0.0
+
+        return RollingCorrelationResult(
+            pair1=pair1,
+            pair2=pair2,
+            window_size=window_size,
+            correlations=correlations,
+            timestamps=timestamps[window_size - 1:] if timestamps else [],
+            current_correlation=correlations[-1] if correlations else None,
+            trend=trend,
+            volatility=volatility,
+        )
+
+    def calculate_multi_window_correlations(
+        self,
+        pair1: str,
+        pair2: str,
+        windows: list[int] | None = None,
+    ) -> dict[int, RollingCorrelationResult | None]:
+        """
+        Calculate correlations across multiple window sizes.
+
+        Args:
+            pair1: First currency pair
+            pair2: Second currency pair
+            windows: List of window sizes (default: WINDOW_SIZES)
+
+        Returns:
+            Dict mapping window size to correlation result
+        """
+        windows = windows or self.WINDOW_SIZES
+
+        return {
+            window: self.calculate_rolling_correlation(pair1, pair2, window)
+            for window in windows
+        }
+
+    def _pearson_correlation(self, x: list[float], y: list[float]) -> float | None:
+        """Calculate Pearson correlation coefficient."""
+        n = len(x)
+        if n < 2:
+            return None
+
+        mean_x = sum(x) / n
+        mean_y = sum(y) / n
+
+        numerator = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y))
+        var_x = sum((xi - mean_x) ** 2 for xi in x)
+        var_y = sum((yi - mean_y) ** 2 for yi in y)
+
+        denominator = math.sqrt(var_x * var_y)
+        if denominator < 1e-12:
+            return 0.0
+
+        return max(-1.0, min(1.0, numerator / denominator))
+
+    def _determine_trend(self, correlations: list[float]) -> str:
+        """Determine trend from correlation series."""
+        if len(correlations) < 5:
+            return "stable"
+
+        recent = correlations[-5:]
+        older = correlations[-10:-5] if len(correlations) >= 10 else correlations[:5]
+
+        recent_avg = sum(recent) / len(recent)
+        older_avg = sum(older) / len(older)
+
+        diff = recent_avg - older_avg
+
+        if diff > 0.1:
+            return "increasing"
+        elif diff < -0.1:
+            return "decreasing"
+        return "stable"
+
+
+# =============================================================================
+# CORRELATION REGIME DETECTION (P3 Enhancement)
+# =============================================================================
+
+class CorrelationRegime(str, Enum):
+    """Correlation regime states."""
+    HIGH_CORRELATION = "high_correlation"  # All pairs moving together
+    LOW_CORRELATION = "low_correlation"  # Pairs moving independently
+    TRANSITIONING = "transitioning"  # Regime change in progress
+    BREAKDOWN = "breakdown"  # Historical correlations breaking down
+
+
+@dataclass
+class CorrelationRegimeState:
+    """Current correlation regime state."""
+    regime: CorrelationRegime
+    confidence: float
+    avg_correlation: float
+    correlation_dispersion: float  # Std dev of correlations
+    regime_duration_days: int
+    timestamp: datetime
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "regime": self.regime.value,
+            "confidence": self.confidence,
+            "avg_correlation": self.avg_correlation,
+            "correlation_dispersion": self.correlation_dispersion,
+            "regime_duration_days": self.regime_duration_days,
+            "timestamp": self.timestamp.isoformat(),
+        }
+
+
+class CorrelationRegimeDetector:
+    """
+    Detects correlation regime changes (P3 Enhancement).
+
+    Monitors overall correlation levels and dispersion to identify
+    regime shifts that impact portfolio diversification.
+    """
+
+    # Thresholds for regime classification
+    HIGH_CORR_THRESHOLD = 0.6
+    LOW_CORR_THRESHOLD = 0.3
+    DISPERSION_THRESHOLD = 0.2
+
+    def __init__(self, lookback_days: int = 60):
+        """
+        Initialize correlation regime detector.
+
+        Args:
+            lookback_days: Days of history for regime detection
+        """
+        self.lookback_days = lookback_days
+        self._correlation_history: deque = deque(maxlen=lookback_days)
+        self._current_regime = CorrelationRegime.LOW_CORRELATION
+        self._regime_start: datetime | None = None
+
+    def update_correlations(self, correlation_matrix: list[list[float]]) -> None:
+        """
+        Update with new correlation matrix.
+
+        Args:
+            correlation_matrix: NxN correlation matrix
+        """
+        # Extract upper triangle (excluding diagonal)
+        n = len(correlation_matrix)
+        correlations = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                correlations.append(correlation_matrix[i][j])
+
+        if correlations:
+            self._correlation_history.append({
+                "timestamp": datetime.now(timezone.utc),
+                "avg": statistics.mean(correlations),
+                "std": statistics.stdev(correlations) if len(correlations) > 1 else 0.0,
+                "correlations": correlations,
+            })
+
+    def detect_regime(self) -> CorrelationRegimeState:
+        """
+        Detect current correlation regime.
+
+        Returns:
+            CorrelationRegimeState with current regime and metrics
+        """
+        if not self._correlation_history:
+            return CorrelationRegimeState(
+                regime=CorrelationRegime.LOW_CORRELATION,
+                confidence=0.5,
+                avg_correlation=0.0,
+                correlation_dispersion=0.0,
+                regime_duration_days=0,
+                timestamp=datetime.now(timezone.utc),
+            )
+
+        # Get recent correlations
+        recent = list(self._correlation_history)[-10:]
+        avg_correlations = [r["avg"] for r in recent]
+        avg_dispersions = [r["std"] for r in recent]
+
+        current_avg = statistics.mean(avg_correlations)
+        current_dispersion = statistics.mean(avg_dispersions)
+
+        # Determine regime
+        new_regime, confidence = self._classify_regime(current_avg, current_dispersion)
+
+        # Check for regime change
+        if new_regime != self._current_regime:
+            if confidence > 0.7:
+                self._current_regime = new_regime
+                self._regime_start = datetime.now(timezone.utc)
+                logger.info(f"Correlation regime changed to: {new_regime.value}")
+
+        # Calculate duration
+        duration_days = 0
+        if self._regime_start:
+            duration_days = (datetime.now(timezone.utc) - self._regime_start).days
+
+        return CorrelationRegimeState(
+            regime=self._current_regime,
+            confidence=confidence,
+            avg_correlation=current_avg,
+            correlation_dispersion=current_dispersion,
+            regime_duration_days=duration_days,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+    def _classify_regime(
+        self,
+        avg_correlation: float,
+        dispersion: float,
+    ) -> tuple[CorrelationRegime, float]:
+        """Classify correlation regime."""
+        # High correlation regime
+        if avg_correlation > self.HIGH_CORR_THRESHOLD:
+            if dispersion < self.DISPERSION_THRESHOLD:
+                return CorrelationRegime.HIGH_CORRELATION, 0.9
+            else:
+                return CorrelationRegime.TRANSITIONING, 0.6
+
+        # Low correlation regime
+        if avg_correlation < self.LOW_CORR_THRESHOLD:
+            return CorrelationRegime.LOW_CORRELATION, 0.85
+
+        # Check for breakdown (high dispersion with moderate avg)
+        if dispersion > self.DISPERSION_THRESHOLD * 1.5:
+            return CorrelationRegime.BREAKDOWN, 0.75
+
+        # Transitioning
+        return CorrelationRegime.TRANSITIONING, 0.5
+
+    def get_diversification_effectiveness(self) -> float:
+        """
+        Calculate diversification effectiveness score.
+
+        Returns:
+            Score from 0-100 where higher = better diversification
+        """
+        if not self._correlation_history:
+            return 50.0
+
+        recent = self._correlation_history[-1]
+        avg_corr = abs(recent["avg"])
+
+        # Lower correlation = better diversification
+        return max(0, (1 - avg_corr) * 100)
+
+
+# =============================================================================
+# CROSS-CURRENCY BASIS TRACKING (P3 Enhancement)
+# =============================================================================
+
+@dataclass
+class CrossCurrencyBasis:
+    """Cross-currency basis swap information."""
+    pair: str  # e.g., "EURUSD"
+    tenor: str  # e.g., "3M", "1Y"
+    basis_bps: float  # Basis in basis points
+    timestamp: datetime
+    direction: str  # "bid" or "ask" for funding premium
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "pair": self.pair,
+            "tenor": self.tenor,
+            "basis_bps": self.basis_bps,
+            "timestamp": self.timestamp.isoformat(),
+            "direction": self.direction,
+        }
+
+
+class CrossCurrencyBasisTracker:
+    """
+    Tracks cross-currency basis swaps (P3 Enhancement).
+
+    Monitors funding costs across currency pairs for:
+    - Hedging cost estimation
+    - Carry trade adjustments
+    - Liquidity stress detection
+    """
+
+    # Standard tenors
+    TENORS = ["1M", "3M", "6M", "1Y", "2Y", "5Y"]
+
+    # Major basis pairs
+    MAJOR_PAIRS = ["EURUSD", "USDJPY", "GBPUSD", "AUDUSD", "USDCAD", "USDCHF"]
+
+    def __init__(self, history_days: int = 90):
+        """
+        Initialize basis tracker.
+
+        Args:
+            history_days: Days of history to maintain
+        """
+        self.history_days = history_days
+        # Key: (pair, tenor) -> deque of CrossCurrencyBasis
+        self._basis_history: dict[tuple[str, str], deque] = defaultdict(
+            lambda: deque(maxlen=history_days)
+        )
+        self._alerts: list[dict] = []
+
+    def update_basis(self, basis: CrossCurrencyBasis) -> None:
+        """Update basis for a pair/tenor."""
+        key = (basis.pair, basis.tenor)
+        self._basis_history[key].append(basis)
+
+        # Check for alerts
+        self._check_basis_alerts(basis)
+
+    def get_current_basis(self, pair: str, tenor: str) -> CrossCurrencyBasis | None:
+        """Get most recent basis for pair/tenor."""
+        key = (pair, tenor)
+        history = self._basis_history.get(key)
+        if history:
+            return history[-1]
+        return None
+
+    def get_basis_curve(self, pair: str) -> dict[str, float | None]:
+        """
+        Get full basis curve for a pair.
+
+        Returns:
+            Dict mapping tenor to basis (bps)
+        """
+        curve = {}
+        for tenor in self.TENORS:
+            basis = self.get_current_basis(pair, tenor)
+            curve[tenor] = basis.basis_bps if basis else None
+        return curve
+
+    def get_hedging_cost(
+        self,
+        pair: str,
+        tenor: str,
+        notional_millions: float,
+    ) -> dict | None:
+        """
+        Calculate hedging cost estimate.
+
+        Args:
+            pair: Currency pair
+            tenor: Hedge tenor
+            notional_millions: Notional in millions
+
+        Returns:
+            Dict with cost estimates
+        """
+        basis = self.get_current_basis(pair, tenor)
+        if not basis:
+            return None
+
+        # Annual cost in basis points
+        annual_cost_bps = abs(basis.basis_bps)
+
+        # Adjust for tenor
+        tenor_fraction = self._tenor_to_fraction(tenor)
+        period_cost_bps = annual_cost_bps * tenor_fraction
+
+        # Cost in currency
+        period_cost_amount = notional_millions * 1_000_000 * period_cost_bps / 10_000
+
+        return {
+            "pair": pair,
+            "tenor": tenor,
+            "notional_millions": notional_millions,
+            "basis_bps": basis.basis_bps,
+            "annual_cost_bps": annual_cost_bps,
+            "period_cost_bps": period_cost_bps,
+            "period_cost_amount": period_cost_amount,
+            "direction": basis.direction,
+        }
+
+    def get_basis_z_score(self, pair: str, tenor: str) -> float | None:
+        """
+        Calculate z-score of current basis vs history.
+
+        Returns:
+            Z-score (positive = wider than normal)
+        """
+        key = (pair, tenor)
+        history = list(self._basis_history.get(key, []))
+
+        if len(history) < 20:
+            return None
+
+        basis_values = [b.basis_bps for b in history]
+        current = basis_values[-1]
+
+        mean = statistics.mean(basis_values[:-1])
+        std = statistics.stdev(basis_values[:-1])
+
+        if std < 0.1:
+            return 0.0
+
+        return (current - mean) / std
+
+    def detect_stress(self) -> dict:
+        """
+        Detect funding stress across currency pairs.
+
+        Returns:
+            Dict with stress indicators
+        """
+        stress_indicators = {
+            "overall_stress": "normal",
+            "stress_score": 0.0,
+            "stressed_pairs": [],
+            "widening_pairs": [],
+        }
+
+        stress_scores = []
+
+        for pair in self.MAJOR_PAIRS:
+            # Check 3M basis (most liquid tenor)
+            z_score = self.get_basis_z_score(pair, "3M")
+
+            if z_score is not None:
+                stress_scores.append(abs(z_score))
+
+                if z_score > 2.0:
+                    stress_indicators["stressed_pairs"].append({
+                        "pair": pair,
+                        "z_score": z_score,
+                    })
+                elif z_score > 1.5:
+                    stress_indicators["widening_pairs"].append({
+                        "pair": pair,
+                        "z_score": z_score,
+                    })
+
+        if stress_scores:
+            avg_stress = statistics.mean(stress_scores)
+            stress_indicators["stress_score"] = avg_stress
+
+            if avg_stress > 2.0:
+                stress_indicators["overall_stress"] = "high"
+            elif avg_stress > 1.0:
+                stress_indicators["overall_stress"] = "elevated"
+
+        return stress_indicators
+
+    def _tenor_to_fraction(self, tenor: str) -> float:
+        """Convert tenor string to year fraction."""
+        tenor_map = {
+            "1M": 1/12,
+            "3M": 0.25,
+            "6M": 0.5,
+            "1Y": 1.0,
+            "2Y": 2.0,
+            "5Y": 5.0,
+        }
+        return tenor_map.get(tenor, 1.0)
+
+    def _check_basis_alerts(self, basis: CrossCurrencyBasis) -> None:
+        """Check for alertable basis movements."""
+        z_score = self.get_basis_z_score(basis.pair, basis.tenor)
+
+        if z_score is not None and abs(z_score) > 2.5:
+            alert = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": "basis_stress",
+                "pair": basis.pair,
+                "tenor": basis.tenor,
+                "basis_bps": basis.basis_bps,
+                "z_score": z_score,
+                "severity": "high" if abs(z_score) > 3.0 else "medium",
+            }
+            self._alerts.append(alert)
+            logger.warning(f"Cross-currency basis alert: {basis.pair} {basis.tenor} z-score={z_score:.2f}")
+
+    def get_alerts(self, since_hours: int = 24) -> list[dict]:
+        """Get recent alerts."""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+        return [
+            a for a in self._alerts
+            if datetime.fromisoformat(a["timestamp"]) >= cutoff
+        ]

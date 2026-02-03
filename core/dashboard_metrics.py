@@ -904,6 +904,442 @@ class OptionsDashboardMetrics:
         }
 
 
+# =========================================================================
+# REAL-TIME P&L METRICS (P3: Add real-time P&L metrics)
+# =========================================================================
+
+@dataclass
+class RealTimePnLMetrics:
+    """
+    Real-time P&L metrics for dashboard display (P3 monitoring improvement).
+
+    Provides granular P&L tracking with attribution and time series.
+    """
+    # Current P&L
+    unrealized_pnl: float = 0.0
+    realized_pnl: float = 0.0
+    total_pnl: float = 0.0
+
+    # Daily P&L
+    daily_unrealized_pnl: float = 0.0
+    daily_realized_pnl: float = 0.0
+    daily_total_pnl: float = 0.0
+    daily_pnl_pct: float = 0.0
+
+    # P&L by time period
+    hourly_pnl: float = 0.0
+    weekly_pnl: float = 0.0
+    monthly_pnl: float = 0.0
+    ytd_pnl: float = 0.0
+
+    # P&L attribution by source
+    pnl_by_strategy: dict[str, float] = field(default_factory=dict)
+    pnl_by_asset_class: dict[str, float] = field(default_factory=dict)
+    pnl_by_symbol: dict[str, float] = field(default_factory=dict)
+
+    # P&L time series (last N data points for charting)
+    pnl_history: list[dict] = field(default_factory=list)
+
+    # Benchmarks
+    vs_benchmark_pnl: float = 0.0
+    benchmark_name: str = "SPY"
+
+    # High/Low tracking
+    daily_high_pnl: float = 0.0
+    daily_low_pnl: float = 0.0
+    intraday_swing: float = 0.0
+
+    # Metadata
+    last_updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    trading_day_start: datetime | None = None
+
+    def record_pnl_point(self, pnl: float, timestamp: datetime | None = None) -> None:
+        """Record a P&L data point for time series."""
+        ts = timestamp or datetime.now(timezone.utc)
+        self.pnl_history.append({
+            "timestamp": ts.isoformat(),
+            "pnl": pnl,
+        })
+        # Keep last 500 points
+        if len(self.pnl_history) > 500:
+            self.pnl_history = self.pnl_history[-500:]
+
+        # Update high/low
+        if pnl > self.daily_high_pnl:
+            self.daily_high_pnl = pnl
+        if pnl < self.daily_low_pnl:
+            self.daily_low_pnl = pnl
+        self.intraday_swing = self.daily_high_pnl - self.daily_low_pnl
+
+    def get_alerts(self) -> list[DashboardAlert]:
+        """Generate P&L-specific alerts."""
+        alerts = []
+        now = datetime.now(timezone.utc)
+
+        # Large daily loss
+        if self.daily_pnl_pct < -0.02:  # -2%
+            alerts.append(DashboardAlert(
+                level=AlertLevel.WARNING if self.daily_pnl_pct > -0.03 else AlertLevel.CRITICAL,
+                category="pnl",
+                message=f"Daily P&L at {self.daily_pnl_pct*100:.2f}%",
+                timestamp=now,
+                metric_name="daily_pnl_pct",
+                current_value=self.daily_pnl_pct,
+                threshold=-0.02,
+            ))
+
+        # Large intraday swing
+        if self.intraday_swing > abs(self.total_pnl) * 0.5 and self.intraday_swing > 1000:
+            alerts.append(DashboardAlert(
+                level=AlertLevel.INFO,
+                category="pnl",
+                message=f"Large intraday P&L swing: ${self.intraday_swing:,.0f}",
+                timestamp=now,
+                metric_name="intraday_swing",
+                current_value=self.intraday_swing,
+            ))
+
+        return alerts
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "current": {
+                "unrealized": self.unrealized_pnl,
+                "realized": self.realized_pnl,
+                "total": self.total_pnl,
+            },
+            "daily": {
+                "unrealized": self.daily_unrealized_pnl,
+                "realized": self.daily_realized_pnl,
+                "total": self.daily_total_pnl,
+                "pct": self.daily_pnl_pct * 100,
+                "high": self.daily_high_pnl,
+                "low": self.daily_low_pnl,
+                "swing": self.intraday_swing,
+            },
+            "periods": {
+                "hourly": self.hourly_pnl,
+                "weekly": self.weekly_pnl,
+                "monthly": self.monthly_pnl,
+                "ytd": self.ytd_pnl,
+            },
+            "attribution": {
+                "by_strategy": self.pnl_by_strategy,
+                "by_asset_class": self.pnl_by_asset_class,
+                "by_symbol": dict(sorted(
+                    self.pnl_by_symbol.items(),
+                    key=lambda x: abs(x[1]),
+                    reverse=True
+                )[:10]),  # Top 10 by absolute P&L
+            },
+            "benchmark": {
+                "name": self.benchmark_name,
+                "vs_benchmark": self.vs_benchmark_pnl,
+            },
+            "history": self.pnl_history[-50:],  # Last 50 points for chart
+            "alerts": [a.to_dict() for a in self.get_alerts()],
+            "last_updated": self.last_updated.isoformat(),
+        }
+
+
+# =========================================================================
+# POSITION SUMMARY METRICS (P3: Add position summary metrics)
+# =========================================================================
+
+@dataclass
+class PositionSummaryMetrics:
+    """
+    Position summary metrics for dashboard display (P3 monitoring improvement).
+
+    Provides overview of all positions with key stats.
+    """
+    # Position counts
+    total_positions: int = 0
+    long_positions: int = 0
+    short_positions: int = 0
+
+    # Value metrics
+    total_market_value: float = 0.0
+    long_market_value: float = 0.0
+    short_market_value: float = 0.0
+    gross_exposure: float = 0.0
+    net_exposure: float = 0.0
+
+    # P&L summary
+    total_unrealized_pnl: float = 0.0
+    positions_in_profit: int = 0
+    positions_in_loss: int = 0
+    win_rate: float = 0.0
+
+    # Top positions
+    top_positions: list[dict] = field(default_factory=list)
+    largest_winner: dict = field(default_factory=dict)
+    largest_loser: dict = field(default_factory=dict)
+
+    # Concentration
+    largest_position_pct: float = 0.0
+    top_5_concentration_pct: float = 0.0
+
+    # By asset class
+    positions_by_asset_class: dict[str, int] = field(default_factory=dict)
+    exposure_by_asset_class: dict[str, float] = field(default_factory=dict)
+
+    # By sector (for equities)
+    positions_by_sector: dict[str, int] = field(default_factory=dict)
+    exposure_by_sector: dict[str, float] = field(default_factory=dict)
+
+    # Age metrics
+    avg_holding_period_days: float = 0.0
+    oldest_position_days: int = 0
+    newest_position_days: int = 0
+
+    # Metadata
+    last_updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def get_alerts(self) -> list[DashboardAlert]:
+        """Generate position-specific alerts."""
+        alerts = []
+        now = datetime.now(timezone.utc)
+
+        # High concentration
+        if self.largest_position_pct > 0.15:
+            alerts.append(DashboardAlert(
+                level=AlertLevel.WARNING,
+                category="positions",
+                message=f"Largest position is {self.largest_position_pct*100:.1f}% of portfolio",
+                timestamp=now,
+                metric_name="largest_position_pct",
+                current_value=self.largest_position_pct,
+                threshold=0.15,
+            ))
+
+        # Low win rate
+        if self.total_positions > 5 and self.win_rate < 0.4:
+            alerts.append(DashboardAlert(
+                level=AlertLevel.INFO,
+                category="positions",
+                message=f"Position win rate at {self.win_rate*100:.1f}%",
+                timestamp=now,
+                metric_name="win_rate",
+                current_value=self.win_rate,
+                threshold=0.4,
+            ))
+
+        return alerts
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "counts": {
+                "total": self.total_positions,
+                "long": self.long_positions,
+                "short": self.short_positions,
+                "in_profit": self.positions_in_profit,
+                "in_loss": self.positions_in_loss,
+            },
+            "values": {
+                "total_market_value": self.total_market_value,
+                "long_value": self.long_market_value,
+                "short_value": self.short_market_value,
+                "gross_exposure": self.gross_exposure,
+                "net_exposure": self.net_exposure,
+            },
+            "pnl": {
+                "total_unrealized": self.total_unrealized_pnl,
+                "win_rate_pct": self.win_rate * 100,
+            },
+            "top_positions": self.top_positions[:10],
+            "winners_losers": {
+                "largest_winner": self.largest_winner,
+                "largest_loser": self.largest_loser,
+            },
+            "concentration": {
+                "largest_pct": self.largest_position_pct * 100,
+                "top_5_pct": self.top_5_concentration_pct * 100,
+            },
+            "by_asset_class": {
+                "positions": self.positions_by_asset_class,
+                "exposure": self.exposure_by_asset_class,
+            },
+            "by_sector": {
+                "positions": self.positions_by_sector,
+                "exposure": self.exposure_by_sector,
+            },
+            "holding_period": {
+                "avg_days": self.avg_holding_period_days,
+                "oldest_days": self.oldest_position_days,
+                "newest_days": self.newest_position_days,
+            },
+            "alerts": [a.to_dict() for a in self.get_alerts()],
+            "last_updated": self.last_updated.isoformat(),
+        }
+
+
+# =========================================================================
+# RISK EXPOSURE METRICS (P3: Add risk exposure metrics)
+# =========================================================================
+
+@dataclass
+class RiskExposureMetrics:
+    """
+    Risk exposure metrics for dashboard display (P3 monitoring improvement).
+
+    Provides detailed risk exposure breakdown.
+    """
+    # Market exposure
+    beta_adjusted_exposure: float = 0.0
+    dollar_delta: float = 0.0
+
+    # Factor exposures
+    factor_exposures: dict[str, float] = field(default_factory=dict)
+
+    # Geographic exposure
+    exposure_by_country: dict[str, float] = field(default_factory=dict)
+    exposure_by_region: dict[str, float] = field(default_factory=dict)
+
+    # Currency exposure
+    exposure_by_currency: dict[str, float] = field(default_factory=dict)
+    fx_hedged_pct: float = 0.0
+
+    # Sector/Industry exposure
+    exposure_by_sector: dict[str, float] = field(default_factory=dict)
+    exposure_by_industry: dict[str, float] = field(default_factory=dict)
+
+    # Market cap exposure
+    large_cap_exposure: float = 0.0
+    mid_cap_exposure: float = 0.0
+    small_cap_exposure: float = 0.0
+
+    # Style exposures
+    value_exposure: float = 0.0
+    growth_exposure: float = 0.0
+    momentum_exposure: float = 0.0
+
+    # Liquidity
+    avg_daily_volume_coverage: float = 0.0  # Days to liquidate at ADV
+    illiquid_positions_pct: float = 0.0
+
+    # Correlation
+    avg_position_correlation: float = 0.0
+    max_correlated_pair: tuple[str, str, float] = ("", "", 0.0)
+
+    # Stress scenarios
+    scenario_impacts: dict[str, float] = field(default_factory=dict)
+
+    # Limits utilization
+    limit_utilization: dict[str, dict[str, float]] = field(default_factory=dict)
+
+    # Metadata
+    last_updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def get_alerts(self) -> list[DashboardAlert]:
+        """Generate exposure-specific alerts."""
+        alerts = []
+        now = datetime.now(timezone.utc)
+
+        # High factor exposure
+        for factor, exposure in self.factor_exposures.items():
+            if abs(exposure) > 0.3:  # >30% factor exposure
+                alerts.append(DashboardAlert(
+                    level=AlertLevel.WARNING,
+                    category="exposure",
+                    message=f"High {factor} factor exposure: {exposure*100:.1f}%",
+                    timestamp=now,
+                    metric_name=f"factor_{factor}",
+                    current_value=exposure,
+                    threshold=0.3,
+                ))
+
+        # High geographic concentration
+        for country, exposure in self.exposure_by_country.items():
+            if exposure > 0.5:  # >50% in single country
+                alerts.append(DashboardAlert(
+                    level=AlertLevel.INFO,
+                    category="exposure",
+                    message=f"High {country} geographic exposure: {exposure*100:.1f}%",
+                    timestamp=now,
+                    metric_name=f"country_{country}",
+                    current_value=exposure,
+                    threshold=0.5,
+                ))
+
+        # High currency exposure (unhedged)
+        for currency, exposure in self.exposure_by_currency.items():
+            if currency != "USD" and exposure > 0.2:  # >20% non-USD
+                alerts.append(DashboardAlert(
+                    level=AlertLevel.INFO,
+                    category="exposure",
+                    message=f"Unhedged {currency} exposure: {exposure*100:.1f}%",
+                    timestamp=now,
+                    metric_name=f"currency_{currency}",
+                    current_value=exposure,
+                    threshold=0.2,
+                ))
+
+        # Liquidity concern
+        if self.avg_daily_volume_coverage > 5:
+            alerts.append(DashboardAlert(
+                level=AlertLevel.WARNING,
+                category="exposure",
+                message=f"Portfolio takes {self.avg_daily_volume_coverage:.1f} days to liquidate at ADV",
+                timestamp=now,
+                metric_name="liquidity_days",
+                current_value=self.avg_daily_volume_coverage,
+                threshold=5.0,
+            ))
+
+        return alerts
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "market": {
+                "beta_adjusted": self.beta_adjusted_exposure,
+                "dollar_delta": self.dollar_delta,
+            },
+            "factors": self.factor_exposures,
+            "geographic": {
+                "by_country": self.exposure_by_country,
+                "by_region": self.exposure_by_region,
+            },
+            "currency": {
+                "by_currency": self.exposure_by_currency,
+                "hedged_pct": self.fx_hedged_pct * 100,
+            },
+            "sector": {
+                "by_sector": self.exposure_by_sector,
+                "by_industry": self.exposure_by_industry,
+            },
+            "market_cap": {
+                "large_cap": self.large_cap_exposure,
+                "mid_cap": self.mid_cap_exposure,
+                "small_cap": self.small_cap_exposure,
+            },
+            "style": {
+                "value": self.value_exposure,
+                "growth": self.growth_exposure,
+                "momentum": self.momentum_exposure,
+            },
+            "liquidity": {
+                "days_to_liquidate": self.avg_daily_volume_coverage,
+                "illiquid_pct": self.illiquid_positions_pct * 100,
+            },
+            "correlation": {
+                "avg_correlation": self.avg_position_correlation,
+                "max_correlated_pair": {
+                    "symbol1": self.max_correlated_pair[0],
+                    "symbol2": self.max_correlated_pair[1],
+                    "correlation": self.max_correlated_pair[2],
+                },
+            },
+            "stress_scenarios": self.scenario_impacts,
+            "limits": self.limit_utilization,
+            "alerts": [a.to_dict() for a in self.get_alerts()],
+            "last_updated": self.last_updated.isoformat(),
+        }
+
+
 class DashboardMetricsCollector:
     """
     Collects and aggregates metrics for all dashboards.
@@ -917,6 +1353,11 @@ class DashboardMetricsCollector:
         self.execution_metrics = ExecutionDashboardMetrics()
         self.options_metrics = OptionsDashboardMetrics()
 
+        # P3: Additional metrics
+        self.pnl_metrics = RealTimePnLMetrics()
+        self.position_metrics = PositionSummaryMetrics()
+        self.exposure_metrics = RiskExposureMetrics()
+
     def get_all_alerts(self) -> list[DashboardAlert]:
         """Get all alerts from all dashboards."""
         alerts = []
@@ -924,6 +1365,11 @@ class DashboardMetricsCollector:
         alerts.extend(self.compliance_metrics.get_alerts())
         alerts.extend(self.execution_metrics.get_alerts())
         alerts.extend(self.options_metrics.get_alerts())
+
+        # P3: Include new metric alerts
+        alerts.extend(self.pnl_metrics.get_alerts())
+        alerts.extend(self.position_metrics.get_alerts())
+        alerts.extend(self.exposure_metrics.get_alerts())
 
         # Sort by level (critical first)
         level_order = {
@@ -941,6 +1387,43 @@ class DashboardMetricsCollector:
             "compliance": self.compliance_metrics.to_dict(),
             "execution": self.execution_metrics.to_dict(),
             "options": self.options_metrics.to_dict(),
+            "pnl": self.pnl_metrics.to_dict(),
+            "positions": self.position_metrics.to_dict(),
+            "exposure": self.exposure_metrics.to_dict(),
             "all_alerts": [a.to_dict() for a in self.get_all_alerts()],
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def get_quick_summary(self) -> dict:
+        """Get a quick summary for dashboard header."""
+        return {
+            "pnl": {
+                "daily_total": self.pnl_metrics.daily_total_pnl,
+                "daily_pct": self.pnl_metrics.daily_pnl_pct * 100,
+                "unrealized": self.pnl_metrics.unrealized_pnl,
+            },
+            "positions": {
+                "total": self.position_metrics.total_positions,
+                "long": self.position_metrics.long_positions,
+                "short": self.position_metrics.short_positions,
+            },
+            "risk": {
+                "drawdown_pct": self.risk_metrics.current_drawdown * 100,
+                "var_95_pct": self.risk_metrics.portfolio_var_95 * 100,
+                "leverage": self.risk_metrics.leverage_ratio,
+            },
+            "execution": {
+                "orders_today": self.execution_metrics.orders_today,
+                "fill_rate_pct": self.execution_metrics.fill_rate_pct,
+            },
+            "compliance": {
+                "score": self.compliance_metrics.calculate_compliance_score(),
+                "alerts_pending": self.compliance_metrics.surveillance_alerts_pending,
+            },
+            "alert_counts": {
+                "critical": len([a for a in self.get_all_alerts() if a.level == AlertLevel.CRITICAL]),
+                "warning": len([a for a in self.get_all_alerts() if a.level == AlertLevel.WARNING]),
+                "info": len([a for a in self.get_all_alerts() if a.level == AlertLevel.INFO]),
+            },
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }

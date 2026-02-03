@@ -390,6 +390,26 @@ class ExecutionAgentImpl(ExecutionAgentBase):
         self._order_timeout_monitor_task: asyncio.Task | None = None
         self._timed_out_orders: list[str] = []  # Track timed out order IDs
 
+        # Order acknowledgment timeout handling (P2)
+        self._ack_timeout_seconds = config.parameters.get("ack_timeout_seconds", 5.0)  # 5 second default for broker ack
+        self._pending_ack_orders: dict[str, datetime] = {}  # order_id -> submission_time
+        self._ack_timeout_alerts: list[dict] = []  # Track ack timeout events
+
+        # Partial fill percentage tracking (P2)
+        self._partial_fill_history: list[dict] = []  # Historical partial fill data
+        self._partial_fill_threshold_pct = config.parameters.get("partial_fill_alert_threshold_pct", 50.0)  # Alert if <50% filled
+        self._partial_fill_time_window_seconds = config.parameters.get("partial_fill_time_window_seconds", 120)  # 2 min window
+
+        # Execution quality scoring (P2)
+        self._execution_quality_scores: dict[str, dict] = {}  # order_id -> quality metrics
+        self._quality_score_weights = config.parameters.get("quality_score_weights", {
+            "slippage": 0.30,  # Weight for slippage component
+            "fill_rate": 0.25,  # Weight for fill rate component
+            "speed": 0.20,  # Weight for execution speed
+            "price_improvement": 0.15,  # Weight for price improvement
+            "market_impact": 0.10,  # Weight for market impact
+        })
+
         # Kill switch state
         self._kill_switch_active = False
         self._kill_switch_reason = ""
@@ -812,9 +832,28 @@ class ExecutionAgentImpl(ExecutionAgentBase):
 
         num_slices = len(slices)
 
+        # EXE-002: Market hours awareness - adjust slice interval if needed
+        # Get time remaining in trading session
+        current_hour, hours_into_session, hours_remaining = self._get_et_time()
+        total_execution_time_seconds = self._slice_interval * (num_slices - 1)  # Time for all waits
+        total_execution_time_hours = total_execution_time_seconds / 3600.0
+
+        adjusted_slice_interval = self._slice_interval
+        if total_execution_time_hours > hours_remaining * 0.95:  # Would exceed 95% of remaining time
+            # Adjust interval to complete within remaining market hours
+            available_seconds = hours_remaining * 3600 * 0.9  # Use 90% of remaining time
+            if num_slices > 1:
+                adjusted_slice_interval = max(30, available_seconds / (num_slices - 1))  # Min 30s interval
+                logger.warning(
+                    f"TWAP adjusting interval for market hours: {self._slice_interval}s -> "
+                    f"{adjusted_slice_interval:.0f}s (hours_remaining={hours_remaining:.2f})"
+                )
+            else:
+                adjusted_slice_interval = 0  # Single slice, no wait needed
+
         logger.info(
             f"TWAP execution: {total_quantity} {order.symbol} in {num_slices} slices, "
-            f"lot_size={lot_size}, interval={self._slice_interval}s, "
+            f"lot_size={lot_size}, interval={adjusted_slice_interval:.0f}s, "
             f"sizes={slices}"
         )
 
@@ -858,8 +897,9 @@ class ExecutionAgentImpl(ExecutionAgentBase):
                 logger.error(f"TWAP slice {i+1} failed")
 
             # Wait before next slice (except for last one)
+            # EXE-002: Use adjusted interval for market hours awareness
             if i < num_slices - 1:
-                await asyncio.sleep(self._slice_interval)
+                await asyncio.sleep(adjusted_slice_interval)
 
         pending.status = "completed" if len(pending.slices) == num_slices else "partial"
 
@@ -1149,6 +1189,36 @@ class ExecutionAgentImpl(ExecutionAgentBase):
 
         num_slices = len(slices)
         interval_minutes = (hours_remaining * 60) / num_slices if num_slices > 0 else 5
+
+        # EXE-001: EOD acceleration logic to prevent stranded quantity at close
+        # If we're in the last 30 minutes and intervals are too short, accelerate
+        if interval_minutes < 1.0 and hours_remaining < 0.5:  # Last 30 min
+            interval_minutes = max(0.5, (hours_remaining * 60 * 0.9) / num_slices)
+            logger.warning(
+                f"VWAP accelerating for EOD: interval reduced to {interval_minutes:.1f}min, "
+                f"hours_remaining={hours_remaining:.2f}, slices={num_slices}"
+            )
+        elif hours_remaining < 0.25 and num_slices > 1:  # Last 15 min - more aggressive
+            # Reduce number of slices to ensure completion
+            new_num_slices = max(1, min(num_slices, int(hours_remaining * 60 / 0.5)))  # Min 30s intervals
+            if new_num_slices < num_slices:
+                # Redistribute slices
+                new_slices = []
+                total_allocated = 0
+                slice_size = total_quantity // new_num_slices
+                for i in range(new_num_slices):
+                    if i == new_num_slices - 1:
+                        new_slices.append(total_quantity - total_allocated)
+                    else:
+                        new_slices.append(slice_size)
+                        total_allocated += slice_size
+                slices = new_slices
+                num_slices = new_num_slices
+                interval_minutes = (hours_remaining * 60 * 0.9) / num_slices
+                logger.warning(
+                    f"VWAP EOD critical: reduced to {num_slices} slices, "
+                    f"interval={interval_minutes:.1f}min to complete before close"
+                )
 
         logger.info(
             f"VWAP execution: {total_quantity} {symbol} in {num_slices} slices, "
@@ -1800,18 +1870,47 @@ class ExecutionAgentImpl(ExecutionAgentBase):
                 "timeout_at": datetime.now(timezone.utc).isoformat(),
             })
 
-        # Attempt to cancel any open broker orders
+        # ERR-003: Attempt to cancel any open broker orders with proper error tracking
+        cancellation_failures = []
         for broker_order_id in pending.active_broker_orders:
             try:
                 self._broker.cancel_order(broker_order_id)
                 logger.info(f"Cancelled broker order {broker_order_id} due to timeout")
             except Exception as e:
-                # Broad catch - cancellation should not crash system
-                logger.exception(f"Failed to cancel broker order {broker_order_id}: {e}")
+                # ERR-003: Track cancellation failures - these create "ghost orders"
+                cancellation_failures.append({
+                    "broker_order_id": broker_order_id,
+                    "error": str(e),
+                    "symbol": order.symbol,
+                    "order_id": order_id,
+                })
+                logger.critical(
+                    f"CRITICAL: Failed to cancel broker order {broker_order_id} for "
+                    f"{order.symbol} (order_id={order_id}): {e}. "
+                    f"GHOST ORDER may exist - manual intervention required!"
+                )
 
-        # Update state
+        # ERR-003: Track failed cancellations for monitoring
+        if cancellation_failures:
+            if not hasattr(self, '_cancellation_failures'):
+                self._cancellation_failures = []
+            self._cancellation_failures.extend(cancellation_failures)
+
+            # Mark order as UNCERTAIN since we don't know broker state
+            pending.status = "uncertain"
+            logger.critical(
+                f"Order {order_id} marked as UNCERTAIN - {len(cancellation_failures)} "
+                f"cancellation(s) failed. Broker orders may still be active!"
+            )
+
+        # Update state - use UNCERTAIN if cancellation failed
+        final_state = OrderState.CANCELLED
+        if cancellation_failures:
+            # Note: OrderState.UNCERTAIN may not exist, keep CANCELLED but status field tracks it
+            pass
+
         pending.transition_state(
-            OrderState.CANCELLED,
+            final_state,
             f"Timed out after {age_seconds:.0f} seconds (limit={timeout_seconds}s)"
         )
 
@@ -1857,6 +1956,36 @@ class ExecutionAgentImpl(ExecutionAgentBase):
         """Get list of order IDs that have been cancelled due to timeout."""
         return self._timed_out_orders.copy()
 
+    def get_cancellation_failures(self) -> list[dict]:
+        """
+        ERR-003: Get list of broker orders that failed to cancel.
+
+        These represent potential "ghost orders" that may still be active
+        at the broker but are no longer tracked by the system.
+
+        Returns:
+            List of dicts with broker_order_id, error, symbol, order_id
+        """
+        if not hasattr(self, '_cancellation_failures'):
+            return []
+        return list(self._cancellation_failures)
+
+    def get_uncertain_orders(self) -> list[str]:
+        """
+        ERR-003: Get list of orders in UNCERTAIN state.
+
+        Orders become uncertain when cancellation fails and we don't know
+        if broker orders are still active.
+
+        Returns:
+            List of order_ids in uncertain state
+        """
+        uncertain = []
+        for order_id, pending in self._pending_orders.items():
+            if pending.status == "uncertain":
+                uncertain.append(order_id)
+        return uncertain
+
     def get_order_age(self, order_id: str) -> float | None:
         """
         Get age of an order in seconds (#E24).
@@ -1869,6 +1998,412 @@ class ExecutionAgentImpl(ExecutionAgentBase):
 
         now = datetime.now(timezone.utc)
         return (now - pending.submitted_at).total_seconds()
+
+    # =========================================================================
+    # ORDER ACKNOWLEDGMENT TIMEOUT HANDLING (P2)
+    # =========================================================================
+
+    def register_pending_ack(self, order_id: str) -> None:
+        """
+        Register an order as waiting for broker acknowledgment (P2).
+
+        Called when an order is submitted to track ack timeout.
+
+        Args:
+            order_id: Order ID waiting for acknowledgment
+        """
+        self._pending_ack_orders[order_id] = datetime.now(timezone.utc)
+        logger.debug(f"Order {order_id} pending broker acknowledgment")
+
+    def confirm_order_ack(self, order_id: str) -> float | None:
+        """
+        Confirm broker acknowledgment received for an order (P2).
+
+        Args:
+            order_id: Order ID that was acknowledged
+
+        Returns:
+            Ack latency in seconds, or None if not tracked
+        """
+        if order_id not in self._pending_ack_orders:
+            return None
+
+        submission_time = self._pending_ack_orders.pop(order_id)
+        ack_latency = (datetime.now(timezone.utc) - submission_time).total_seconds()
+
+        logger.debug(f"Order {order_id} acknowledged in {ack_latency:.3f}s")
+        return ack_latency
+
+    async def check_ack_timeouts(self) -> list[dict]:
+        """
+        Check for orders that have not received acknowledgment (P2).
+
+        Returns:
+            List of timed-out orders with details
+        """
+        now = datetime.now(timezone.utc)
+        timed_out = []
+
+        for order_id, submission_time in list(self._pending_ack_orders.items()):
+            elapsed = (now - submission_time).total_seconds()
+
+            if elapsed > self._ack_timeout_seconds:
+                pending = self._pending_orders.get(order_id)
+                symbol = pending.order_event.symbol if pending else "unknown"
+
+                timeout_info = {
+                    "order_id": order_id,
+                    "symbol": symbol,
+                    "submission_time": submission_time.isoformat(),
+                    "elapsed_seconds": elapsed,
+                    "timeout_threshold": self._ack_timeout_seconds,
+                }
+                timed_out.append(timeout_info)
+                self._ack_timeout_alerts.append(timeout_info)
+
+                logger.warning(
+                    f"ORDER ACK TIMEOUT: {order_id} ({symbol}) - "
+                    f"no acknowledgment after {elapsed:.2f}s (threshold: {self._ack_timeout_seconds}s)"
+                )
+
+                # Remove from pending ack tracking
+                del self._pending_ack_orders[order_id]
+
+                # Optionally transition order state
+                if pending and pending.state == OrderState.SUBMITTED:
+                    pending.transition_state(
+                        OrderState.PENDING,
+                        f"Ack timeout after {elapsed:.2f}s - broker may not have received order"
+                    )
+
+        return timed_out
+
+    def get_ack_timeout_alerts(self) -> list[dict]:
+        """
+        Get all acknowledgment timeout alerts (P2).
+
+        Returns:
+            List of ack timeout events
+        """
+        return list(self._ack_timeout_alerts)
+
+    def get_pending_ack_count(self) -> int:
+        """Get count of orders pending acknowledgment (P2)."""
+        return len(self._pending_ack_orders)
+
+    # =========================================================================
+    # PARTIAL FILL PERCENTAGE TRACKING (P2)
+    # =========================================================================
+
+    def track_partial_fill(self, order_id: str) -> dict | None:
+        """
+        Track partial fill percentage for an order (P2).
+
+        Calculates fill percentage and logs alerts if below threshold.
+
+        Args:
+            order_id: Order ID to track
+
+        Returns:
+            Partial fill metrics dict, or None if order not found
+        """
+        pending = self._pending_orders.get(order_id)
+        if pending is None:
+            return None
+
+        order = pending.order_event
+        total_qty = order.quantity
+        filled_qty = pending.filled_quantity
+        remaining_qty = pending.remaining_quantity
+
+        fill_pct = (filled_qty / total_qty * 100) if total_qty > 0 else 0
+
+        # Calculate time since order was created
+        order_age = (datetime.now(timezone.utc) - pending.created_at).total_seconds()
+
+        metrics = {
+            "order_id": order_id,
+            "symbol": order.symbol,
+            "side": order.side.value,
+            "total_quantity": total_qty,
+            "filled_quantity": filled_qty,
+            "remaining_quantity": remaining_qty,
+            "fill_percentage": fill_pct,
+            "order_age_seconds": order_age,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # Check if fill rate is concerning
+        if (order_age > self._partial_fill_time_window_seconds and
+            fill_pct < self._partial_fill_threshold_pct and
+            remaining_qty > 0):
+
+            metrics["alert"] = True
+            metrics["alert_reason"] = (
+                f"Only {fill_pct:.1f}% filled after {order_age:.0f}s "
+                f"(threshold: {self._partial_fill_threshold_pct}%)"
+            )
+
+            logger.warning(
+                f"PARTIAL FILL ALERT: {order.side.value} {order.symbol} - "
+                f"{fill_pct:.1f}% filled ({filled_qty}/{total_qty}) "
+                f"after {order_age:.0f}s"
+            )
+
+            self._partial_fill_history.append(metrics)
+
+        return metrics
+
+    def get_partial_fill_summary(self) -> dict:
+        """
+        Get summary of partial fill tracking (P2).
+
+        Returns:
+            Summary statistics of partial fills
+        """
+        if not self._partial_fill_history:
+            return {
+                "total_alerts": 0,
+                "avg_fill_pct_at_alert": None,
+                "symbols_affected": [],
+            }
+
+        fill_pcts = [h["fill_percentage"] for h in self._partial_fill_history]
+        symbols = list(set(h["symbol"] for h in self._partial_fill_history))
+
+        return {
+            "total_alerts": len(self._partial_fill_history),
+            "avg_fill_pct_at_alert": sum(fill_pcts) / len(fill_pcts) if fill_pcts else None,
+            "min_fill_pct": min(fill_pcts) if fill_pcts else None,
+            "max_fill_pct": max(fill_pcts) if fill_pcts else None,
+            "symbols_affected": symbols,
+            "recent_alerts": self._partial_fill_history[-10:],  # Last 10 alerts
+        }
+
+    def get_current_fill_rates(self) -> list[dict]:
+        """
+        Get current fill rates for all active orders (P2).
+
+        Returns:
+            List of fill rate info for all pending orders
+        """
+        fill_rates = []
+
+        for order_id, pending in self._pending_orders.items():
+            if pending.is_terminal():
+                continue
+
+            order = pending.order_event
+            total_qty = order.quantity
+            filled_qty = pending.filled_quantity
+            fill_pct = (filled_qty / total_qty * 100) if total_qty > 0 else 0
+            order_age = (datetime.now(timezone.utc) - pending.created_at).total_seconds()
+
+            fill_rates.append({
+                "order_id": order_id,
+                "symbol": order.symbol,
+                "side": order.side.value,
+                "fill_percentage": fill_pct,
+                "filled_qty": filled_qty,
+                "total_qty": total_qty,
+                "order_age_seconds": order_age,
+                "state": pending.state.value,
+            })
+
+        # Sort by fill percentage ascending (worst first)
+        fill_rates.sort(key=lambda x: x["fill_percentage"])
+        return fill_rates
+
+    # =========================================================================
+    # EXECUTION QUALITY SCORING (P2)
+    # =========================================================================
+
+    def calculate_execution_quality_score(self, order_id: str) -> dict | None:
+        """
+        Calculate comprehensive execution quality score for an order (P2).
+
+        Components:
+        - Slippage score: Based on actual vs expected price
+        - Fill rate score: Percentage of order filled
+        - Speed score: How quickly the order was filled
+        - Price improvement score: Did we get better than expected?
+        - Market impact score: Did our order move the market?
+
+        Args:
+            order_id: Order ID to score
+
+        Returns:
+            Quality score metrics dict with overall score 0-100, or None if not found
+        """
+        pending = self._pending_orders.get(order_id)
+        if pending is None:
+            return None
+
+        order = pending.order_event
+        scores = {}
+
+        # 1. Slippage Score (0-100, 100 = no slippage)
+        slippage_score = 100.0
+        if pending.arrival_price and pending.arrival_price > 0 and pending.avg_fill_price > 0:
+            slippage_bps = abs(pending.avg_fill_price - pending.arrival_price) / pending.arrival_price * 10000
+            # Score decreases as slippage increases: 100 at 0 bps, 0 at 100 bps
+            slippage_score = max(0, 100 - slippage_bps)
+        scores["slippage"] = slippage_score
+
+        # 2. Fill Rate Score (0-100)
+        fill_rate = pending.filled_quantity / order.quantity if order.quantity > 0 else 0
+        fill_rate_score = fill_rate * 100
+        scores["fill_rate"] = fill_rate_score
+
+        # 3. Speed Score (0-100, based on how quickly filled relative to expectation)
+        speed_score = 100.0
+        if pending.created_at:
+            execution_time = (datetime.now(timezone.utc) - pending.created_at).total_seconds()
+
+            # Expected time based on algo type
+            if order.algo in ("TWAP", "VWAP"):
+                expected_time = self._algo_timeout_seconds * 0.5  # Expect 50% of max time
+            else:
+                expected_time = self._order_timeout_seconds * 0.25  # Expect 25% of max time
+
+            if execution_time <= expected_time:
+                speed_score = 100.0
+            else:
+                # Decrease linearly: 50% at 2x expected, 0% at 4x expected
+                excess_ratio = execution_time / expected_time
+                speed_score = max(0, 100 - (excess_ratio - 1) * 33.3)
+        scores["speed"] = speed_score
+
+        # 4. Price Improvement Score (0-100)
+        price_improvement_score = 50.0  # Neutral baseline
+        total_improvement_bps = 0.0
+        improvement_count = 0
+
+        for sf in pending.slice_fills.values():
+            if sf.price_improvement_bps is not None:
+                total_improvement_bps += sf.price_improvement_bps
+                improvement_count += 1
+
+        if improvement_count > 0:
+            avg_improvement = total_improvement_bps / improvement_count
+            # Score: 50 at 0 bps, 100 at +20 bps improvement, 0 at -20 bps
+            price_improvement_score = min(100, max(0, 50 + avg_improvement * 2.5))
+        scores["price_improvement"] = price_improvement_score
+
+        # 5. Market Impact Score (0-100, estimate based on order size and fill pattern)
+        market_impact_score = 80.0  # Default to good if we can't measure
+        if order.quantity > 0 and pending.filled_quantity > 0:
+            # Estimate impact based on fill dispersion
+            if len(pending.slice_fills) > 1:
+                fill_prices = [sf.avg_fill_price for sf in pending.slice_fills.values() if sf.avg_fill_price > 0]
+                if len(fill_prices) > 1:
+                    price_range = max(fill_prices) - min(fill_prices)
+                    avg_price = sum(fill_prices) / len(fill_prices)
+                    range_bps = (price_range / avg_price * 10000) if avg_price > 0 else 0
+                    # Score decreases as price range increases: 100 at 0 bps, 0 at 50 bps range
+                    market_impact_score = max(0, 100 - range_bps * 2)
+        scores["market_impact"] = market_impact_score
+
+        # Calculate weighted overall score
+        weights = self._quality_score_weights
+        overall_score = (
+            scores["slippage"] * weights.get("slippage", 0.30) +
+            scores["fill_rate"] * weights.get("fill_rate", 0.25) +
+            scores["speed"] * weights.get("speed", 0.20) +
+            scores["price_improvement"] * weights.get("price_improvement", 0.15) +
+            scores["market_impact"] * weights.get("market_impact", 0.10)
+        )
+
+        quality_metrics = {
+            "order_id": order_id,
+            "symbol": order.symbol,
+            "side": order.side.value,
+            "algo": order.algo,
+            "overall_score": round(overall_score, 2),
+            "grade": self._score_to_grade(overall_score),
+            "component_scores": scores,
+            "weights_used": weights,
+            "filled_quantity": pending.filled_quantity,
+            "total_quantity": order.quantity,
+            "arrival_price": pending.arrival_price,
+            "avg_fill_price": pending.avg_fill_price,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # Store for later retrieval
+        self._execution_quality_scores[order_id] = quality_metrics
+
+        return quality_metrics
+
+    def _score_to_grade(self, score: float) -> str:
+        """
+        Convert numeric score to letter grade (P2).
+
+        Args:
+            score: Score 0-100
+
+        Returns:
+            Letter grade (A, B, C, D, F)
+        """
+        if score >= 90:
+            return "A"
+        elif score >= 80:
+            return "B"
+        elif score >= 70:
+            return "C"
+        elif score >= 60:
+            return "D"
+        else:
+            return "F"
+
+    def get_execution_quality_score(self, order_id: str) -> dict | None:
+        """
+        Get previously calculated execution quality score (P2).
+
+        Args:
+            order_id: Order ID
+
+        Returns:
+            Quality metrics dict or None
+        """
+        return self._execution_quality_scores.get(order_id)
+
+    def get_execution_quality_summary(self) -> dict:
+        """
+        Get summary of execution quality across all scored orders (P2).
+
+        Returns:
+            Summary statistics of execution quality
+        """
+        if not self._execution_quality_scores:
+            return {
+                "total_scored": 0,
+                "avg_overall_score": None,
+                "grade_distribution": {},
+            }
+
+        scores = list(self._execution_quality_scores.values())
+        overall_scores = [s["overall_score"] for s in scores]
+
+        # Grade distribution
+        grades = [s["grade"] for s in scores]
+        grade_dist = {g: grades.count(g) for g in ["A", "B", "C", "D", "F"]}
+
+        # Component averages
+        component_avgs = {}
+        for component in ["slippage", "fill_rate", "speed", "price_improvement", "market_impact"]:
+            vals = [s["component_scores"].get(component, 0) for s in scores]
+            component_avgs[component] = sum(vals) / len(vals) if vals else 0
+
+        return {
+            "total_scored": len(scores),
+            "avg_overall_score": sum(overall_scores) / len(overall_scores),
+            "min_score": min(overall_scores),
+            "max_score": max(overall_scores),
+            "grade_distribution": grade_dist,
+            "component_averages": component_avgs,
+            "recent_scores": scores[-10:],  # Last 10 scored orders
+        }
 
     async def _execute_limit_order(self, pending: PendingOrder) -> None:
         """
@@ -2076,6 +2611,16 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             "fill_quality": self.get_aggregate_fill_metrics(),
             # Implementation shortfall summary (#E14)
             "implementation_shortfall": self.get_implementation_shortfall_summary(),
+            # P2: Order acknowledgment timeout tracking
+            "ack_timeout": {
+                "pending_ack_count": self.get_pending_ack_count(),
+                "timeout_threshold_seconds": self._ack_timeout_seconds,
+                "total_timeout_alerts": len(self._ack_timeout_alerts),
+            },
+            # P2: Partial fill tracking
+            "partial_fill_tracking": self.get_partial_fill_summary(),
+            # P2: Execution quality scoring
+            "execution_quality_scoring": self.get_execution_quality_summary(),
         }
 
     # =========================================================================

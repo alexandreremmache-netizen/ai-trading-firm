@@ -110,26 +110,75 @@ class StrategyStats:
     @property
     def kelly_fraction(self) -> float:
         """
-        Calculate full Kelly fraction.
+        Calculate full Kelly fraction for optimal position sizing.
+
+        The Kelly criterion, developed by John L. Kelly Jr. at Bell Labs (1956),
+        determines the optimal fraction of capital to risk on a series of
+        favorable bets to maximize long-term geometric growth rate.
 
         Kelly formula: f* = (bp - q) / b
-        where:
-            b = avg_win / avg_loss (win/loss ratio)
-            p = win_rate
-            q = 1 - p (loss rate)
 
-        Returns the optimal fraction of capital to risk.
+        Where:
+            f* = optimal fraction of bankroll to wager
+            b  = odds received on the bet (avg_win / avg_loss)
+                 Also called "odds" or "win/loss ratio"
+            p  = probability of winning (win_rate)
+            q  = probability of losing (1 - p)
+
+        Derivation (simplified):
+            We want to maximize E[log(1 + f*X)] where X is the bet outcome.
+            Taking the derivative and setting to zero:
+            d/df[p*log(1+f*b) + q*log(1-f)] = 0
+            p*b/(1+f*b) - q/(1-f) = 0
+            Solving for f: f* = (bp - q) / b
+
+        Example:
+            Win rate = 60% (p=0.6), avg_win = 2%, avg_loss = 1%
+            b = 0.02 / 0.01 = 2.0
+            f* = (2.0 * 0.6 - 0.4) / 2.0 = 0.8 / 2.0 = 0.40 (40%)
+
+        Properties of Kelly:
+            - Maximizes long-term growth rate (geometric mean)
+            - Never risks bankruptcy (f* is always < 100% for finite odds)
+            - Drawdowns can be severe (half-Kelly often preferred in practice)
+
+        Returns:
+            Optimal fraction of capital to risk (0.0 to ~1.0)
+            Returns 0.0 if inputs are invalid or expectancy is negative.
+
+        Note:
+            In practice, "half-Kelly" or "quarter-Kelly" is often used to
+            reduce volatility at the cost of some growth rate.
         """
-        if self.avg_loss == 0:
+        # KELLY-P0-1: Guard against division by zero or near-zero avg_loss
+        if self.avg_loss <= 0 or self.avg_loss < 1e-10:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"avg_loss is zero or near-zero ({self.avg_loss}), returning 0 for Kelly fraction"
+            )
             return 0.0
 
+        # Calculate b (odds): how much you win per unit risked
         b = self.avg_win / self.avg_loss
-        p = self.win_rate
-        q = 1 - p
+        p = self.win_rate  # Probability of winning
+        q = 1 - p  # Probability of losing
 
+        # Apply Kelly formula: f* = (b*p - q) / b
+        # Equivalent to: f* = p - q/b
         kelly = (b * p - q) / b
 
-        return max(0, kelly)  # Never negative
+        # KELLY-P0-2: Handle negative Kelly (negative expectancy strategy)
+        # If f* < 0, the strategy has negative expected value - don't bet
+        if kelly < 0:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Negative Kelly fraction ({kelly:.4f}) indicates negative expectancy. "
+                f"Strategy has negative edge: win_rate={p:.2%}, avg_win={self.avg_win:.4f}, "
+                f"avg_loss={self.avg_loss:.4f}. Returning 0."
+            )
+            return 0.0
+
+        return kelly
 
     @classmethod
     def from_dollar_pnl(
@@ -321,7 +370,8 @@ class PositionSizer:
         symbol: str,
         portfolio_value: float,
         asset_volatility: float,
-        target_vol: float | None = None
+        target_vol: float | None = None,
+        max_position_multiplier: float = 3.0
     ) -> PositionSizeResult:
         """
         Calculate position size using volatility targeting.
@@ -333,6 +383,8 @@ class PositionSizer:
             portfolio_value: Total portfolio value
             asset_volatility: Asset's annualized volatility
             target_vol: Target portfolio volatility (default: config value)
+            max_position_multiplier: Maximum leverage multiplier to prevent
+                excessive positions in low volatility environments (default: 3.0)
 
         Returns:
             PositionSizeResult with calculated size
@@ -357,6 +409,17 @@ class PositionSizer:
         # Calculate raw fraction
         raw_fraction = target_vol / asset_volatility
         adjusted = raw_fraction
+
+        # SIZE-P1-1: Limit leverage in low volatility environments
+        # This prevents excessive position sizes when asset volatility is unusually low
+        if adjusted > max_position_multiplier:
+            logger.warning(
+                f"Vol target sizing for {symbol}: raw_fraction={raw_fraction:.2f} exceeds "
+                f"max_position_multiplier={max_position_multiplier:.1f}. "
+                f"Asset vol={asset_volatility:.2%} may be unusually low."
+            )
+            adjusted = max_position_multiplier
+            adjustments.append(f"Capped at max leverage multiplier {max_position_multiplier:.1f}x")
 
         # Apply constraints
         if adjusted > self._max_position_pct / 100:
@@ -646,10 +709,26 @@ class PositionSizer:
         - Max: (w'μ - rf) / sqrt(w'Σw)  [max Sharpe]
         - Or: Min: w'Σw  s.t. w'μ = target  [min var for target return]
 
+        IMPORTANT (PM-11): For better estimation stability, callers should use
+        a shrunk covariance matrix. The VaRCalculator.calculate_shrunk_covariance()
+        method provides Ledoit-Wolf shrinkage which is recommended for:
+        - Small sample sizes (< 10x the number of assets)
+        - High-dimensional portfolios
+        - Out-of-sample performance
+
+        Example:
+            from core.var_calculator import VaRCalculator
+            var_calc = VaRCalculator()
+            shrunk_cov = var_calc.calculate_shrunk_covariance(returns_df)
+            results = sizer.optimize_portfolio_mean_variance(
+                symbols, expected_returns, shrunk_cov, portfolio_value
+            )
+
         Args:
             symbols: List of asset symbols
             expected_returns: Expected returns by symbol (annual)
-            covariance_matrix: Covariance matrix (NxN numpy array)
+            covariance_matrix: Covariance matrix (NxN numpy array).
+                Recommended: Use shrunk covariance from VaRCalculator.
             portfolio_value: Total portfolio value
             target_return: Target portfolio return (None = max Sharpe)
             risk_free_rate: Risk-free rate for Sharpe calculation
@@ -991,6 +1070,244 @@ class PositionSizer:
             weights = np.ones(n) / n
 
         return weights
+
+    # =========================================================================
+    # DRAWDOWN-BASED SIZING (P2)
+    # =========================================================================
+
+    def calculate_drawdown_adjusted_size(
+        self,
+        symbol: str,
+        base_size_pct: float,
+        portfolio_value: float,
+        current_drawdown: float,
+        max_acceptable_drawdown: float = 0.20,
+        drawdown_sensitivity: float = 2.0
+    ) -> PositionSizeResult:
+        """
+        Adjust position size based on current portfolio drawdown (P2).
+
+        Reduces position sizes as drawdown increases to limit further losses
+        and preserve capital during adverse periods.
+
+        Formula: adjusted_size = base_size * (1 - (drawdown / max_dd) ^ sensitivity)
+
+        Args:
+            symbol: Asset symbol
+            base_size_pct: Base position size as percentage
+            portfolio_value: Total portfolio value
+            current_drawdown: Current drawdown as decimal (e.g., 0.10 = 10%)
+            max_acceptable_drawdown: Maximum acceptable drawdown (default: 20%)
+            drawdown_sensitivity: How aggressively to reduce size (default: 2.0)
+                Higher values = more aggressive reduction
+
+        Returns:
+            PositionSizeResult with drawdown-adjusted size
+        """
+        adjustments = []
+
+        # Ensure drawdown is positive
+        dd = abs(current_drawdown)
+
+        if dd <= 0:
+            # No drawdown, use base size
+            return PositionSizeResult(
+                symbol=symbol,
+                method=SizingMethod.VOL_TARGET,
+                raw_fraction=base_size_pct / 100,
+                adjusted_fraction=base_size_pct / 100,
+                position_size_pct=base_size_pct,
+                position_value=portfolio_value * base_size_pct / 100,
+                rationale="No drawdown, using base size",
+                adjustments=["drawdown_adjustment=1.0"],
+            )
+
+        # Calculate reduction factor
+        dd_ratio = min(dd / max_acceptable_drawdown, 1.0)
+        reduction_factor = 1.0 - (dd_ratio ** drawdown_sensitivity)
+        reduction_factor = max(0.1, reduction_factor)  # Minimum 10% of base size
+
+        adjustments.append(f"Drawdown reduction: {(1-reduction_factor)*100:.1f}%")
+
+        # Apply reduction
+        adjusted_pct = base_size_pct * reduction_factor
+
+        # Apply constraints
+        if adjusted_pct > self._max_position_pct:
+            adjusted_pct = self._max_position_pct
+            adjustments.append(f"Capped at max {self._max_position_pct}%")
+
+        if adjusted_pct < self._min_position_pct:
+            adjusted_pct = self._min_position_pct
+            adjustments.append(f"Floor at min {self._min_position_pct}%")
+
+        # If drawdown exceeds max, halt new positions
+        if dd >= max_acceptable_drawdown:
+            adjusted_pct = 0
+            adjustments.append(f"HALTED: Drawdown {dd:.1%} >= max {max_acceptable_drawdown:.1%}")
+
+        return PositionSizeResult(
+            symbol=symbol,
+            method=SizingMethod.VOL_TARGET,
+            raw_fraction=base_size_pct / 100,
+            adjusted_fraction=adjusted_pct / 100,
+            position_size_pct=adjusted_pct,
+            position_value=portfolio_value * adjusted_pct / 100,
+            rationale=f"Drawdown-adjusted: base={base_size_pct:.1f}%, dd={dd:.1%}, factor={reduction_factor:.2f}",
+            adjustments=adjustments,
+        )
+
+    def calculate_volatility_targeted_size(
+        self,
+        symbol: str,
+        portfolio_value: float,
+        asset_volatility: float,
+        target_contribution_vol: float,
+        current_portfolio_vol: float | None = None,
+        max_vol_contribution: float = 0.05
+    ) -> PositionSizeResult:
+        """
+        Calculate position size targeting specific volatility contribution (P2).
+
+        Sizes position so its marginal contribution to portfolio volatility
+        equals the target. More sophisticated than simple vol targeting.
+
+        Args:
+            symbol: Asset symbol
+            portfolio_value: Total portfolio value
+            asset_volatility: Asset's annualized volatility
+            target_contribution_vol: Target volatility contribution (e.g., 0.02 = 2%)
+            current_portfolio_vol: Current portfolio volatility (optional)
+            max_vol_contribution: Maximum vol contribution per position (default: 5%)
+
+        Returns:
+            PositionSizeResult with volatility-targeted size
+        """
+        adjustments = []
+
+        if asset_volatility <= 0:
+            return PositionSizeResult(
+                symbol=symbol,
+                method=SizingMethod.VOL_TARGET,
+                raw_fraction=0,
+                adjusted_fraction=0,
+                position_size_pct=0,
+                position_value=0,
+                rationale="Invalid asset volatility",
+            )
+
+        # Basic calculation: weight = target_vol / asset_vol
+        raw_weight = target_contribution_vol / asset_volatility
+        adjusted_weight = raw_weight
+
+        # Cap vol contribution
+        if target_contribution_vol > max_vol_contribution:
+            adjusted_weight = max_vol_contribution / asset_volatility
+            adjustments.append(f"Vol contribution capped at {max_vol_contribution:.1%}")
+
+        # If we have portfolio context, adjust for correlation
+        if current_portfolio_vol is not None and current_portfolio_vol > 0:
+            # Simple adjustment: reduce if adding to high vol portfolio
+            vol_headroom = max(0, self._vol_target - current_portfolio_vol)
+            if vol_headroom < target_contribution_vol:
+                adjusted_weight = vol_headroom / asset_volatility
+                adjustments.append(f"Reduced for portfolio vol headroom: {vol_headroom:.2%}")
+
+        # Apply standard constraints
+        if adjusted_weight > self._max_position_pct / 100:
+            adjusted_weight = self._max_position_pct / 100
+            adjustments.append(f"Capped at max {self._max_position_pct}%")
+
+        if adjusted_weight < self._min_position_pct / 100:
+            adjusted_weight = self._min_position_pct / 100
+            adjustments.append(f"Floor at min {self._min_position_pct}%")
+
+        return PositionSizeResult(
+            symbol=symbol,
+            method=SizingMethod.VOL_TARGET,
+            raw_fraction=raw_weight,
+            adjusted_fraction=adjusted_weight,
+            position_size_pct=adjusted_weight * 100,
+            position_value=portfolio_value * adjusted_weight,
+            rationale=f"Vol-targeted: target_contrib={target_contribution_vol:.2%}, asset_vol={asset_volatility:.2%}",
+            adjustments=adjustments,
+        )
+
+    def calculate_risk_parity_weights(
+        self,
+        symbols: list[str],
+        volatilities: dict[str, float],
+        correlations: dict[tuple[str, str], float] | None = None
+    ) -> dict[str, float]:
+        """
+        Calculate risk parity weights from volatilities (P2 simplified version).
+
+        Simpler than full optimization - uses inverse volatility weighting
+        with optional correlation adjustment.
+
+        Args:
+            symbols: List of symbols
+            volatilities: Symbol volatilities
+            correlations: Optional pairwise correlations
+
+        Returns:
+            Dictionary of symbol to weight (sums to 1.0)
+        """
+        if not symbols or not volatilities:
+            return {}
+
+        # Get volatilities for all symbols
+        vols = []
+        valid_symbols = []
+        for s in symbols:
+            vol = volatilities.get(s)
+            if vol is not None and vol > 0:
+                vols.append(vol)
+                valid_symbols.append(s)
+
+        if not vols:
+            return {s: 1.0 / len(symbols) for s in symbols}
+
+        vols = np.array(vols)
+
+        # Inverse volatility weighting (basic risk parity)
+        inv_vols = 1.0 / vols
+        weights = inv_vols / np.sum(inv_vols)
+
+        # Optional correlation adjustment
+        if correlations is not None and len(valid_symbols) > 1:
+            # Build correlation matrix
+            n = len(valid_symbols)
+            corr_matrix = np.eye(n)
+            for i, s1 in enumerate(valid_symbols):
+                for j, s2 in enumerate(valid_symbols):
+                    if i != j:
+                        corr = correlations.get((s1, s2)) or correlations.get((s2, s1))
+                        if corr is not None:
+                            corr_matrix[i, j] = corr
+
+            # Build covariance matrix
+            vol_diag = np.diag(vols)
+            cov_matrix = vol_diag @ corr_matrix @ vol_diag
+
+            # Iteratively adjust weights for equal risk contribution
+            for _ in range(10):  # Simple iteration
+                port_vol = np.sqrt(weights @ cov_matrix @ weights)
+                if port_vol <= 0:
+                    break
+
+                marginal_risk = cov_matrix @ weights
+                risk_contrib = weights * marginal_risk / port_vol
+
+                # Target equal contribution
+                target_contrib = port_vol / n
+                adjustment = target_contrib / (risk_contrib + 1e-10)
+                adjustment = np.clip(adjustment, 0.5, 2.0)  # Limit adjustment
+
+                weights = weights * adjustment
+                weights = weights / np.sum(weights)
+
+        return {valid_symbols[i]: float(weights[i]) for i in range(len(valid_symbols))}
 
     def get_efficient_frontier(
         self,

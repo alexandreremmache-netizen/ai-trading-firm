@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -47,6 +48,27 @@ class PairState:
     hedge_ratio: float = 1.0
     half_life: float = 0.0
     last_signal: SignalDirection = SignalDirection.FLAT
+    # P2: Cointegration monitoring
+    cointegration_score: float = 0.0  # ADF test statistic
+    cointegration_pvalue: float = 1.0  # ADF p-value
+    is_cointegrated: bool = False
+    cointegration_last_check: datetime | None = None
+    cointegration_breakdown_count: int = 0  # Times cointegration broke down
+    # P2: Pair selection optimization
+    pair_quality_score: float = 0.0  # Overall pair quality (0-1)
+    spread_volatility: float = 0.0
+    mean_reversion_strength: float = 0.0
+
+
+@dataclass
+class ZScoreAlert:
+    """Alert for z-score threshold breach (P2)."""
+    pair_key: str
+    timestamp: datetime
+    zscore: float
+    alert_level: str  # "warning", "critical", "extreme"
+    direction: str  # "high" or "low"
+    message: str
 
 
 class StatArbAgent(SignalAgent):
@@ -83,6 +105,23 @@ class StatArbAgent(SignalAgent):
         # State for each pair
         self._pairs: dict[str, PairState] = {}
         self._lookback_size = self._lookback_days * 390  # Minute bars
+
+        # P2: Z-score alert thresholds
+        self._zscore_warning = config.parameters.get("zscore_warning_threshold", 2.5)
+        self._zscore_critical = config.parameters.get("zscore_critical_threshold", 3.0)
+        self._zscore_extreme = config.parameters.get("zscore_extreme_threshold", 4.0)
+        self._zscore_alerts: list[ZScoreAlert] = []
+        self._max_alerts = config.parameters.get("max_zscore_alerts", 100)
+
+        # P2: Cointegration monitoring
+        self._cointegration_check_interval = config.parameters.get("cointegration_check_interval", 100)  # bars
+        self._cointegration_pvalue_threshold = config.parameters.get("cointegration_pvalue_threshold", 0.05)
+        self._cointegration_breakdown_threshold = config.parameters.get("cointegration_breakdown_threshold", 3)
+        self._bar_counter = 0
+
+        # P2: Pair selection optimization
+        self._min_pair_quality = config.parameters.get("min_pair_quality_score", 0.4)
+        self._pair_ranking_enabled = config.parameters.get("pair_ranking_enabled", True)
 
     async def initialize(self) -> None:
         """Initialize pairs state."""
@@ -131,6 +170,12 @@ class StatArbAgent(SignalAgent):
         for signal in signals:
             await self._event_bus.publish_signal(signal)
             self._audit_logger.log_event(signal)
+
+        # P2: Periodic cointegration check
+        self._bar_counter += 1
+        if self._bar_counter >= self._cointegration_check_interval:
+            self._bar_counter = 0
+            await self._check_all_cointegrations()
 
     async def _check_pair_signal(
         self,
@@ -182,6 +227,15 @@ class StatArbAgent(SignalAgent):
         zscore = (spread[-1] - spread_mean) / spread_std
         pair_state.zscore = zscore
 
+        # P2: Update spread volatility for pair quality scoring
+        pair_state.spread_volatility = spread_std
+
+        # P2: Check for z-score alerts
+        self._check_zscore_alerts(pair_key, zscore)
+
+        # P2: Update pair quality score
+        self._update_pair_quality(pair_key, pair_state, spread_array)
+
         # Generate signal based on z-score
         return self._generate_zscore_signal(pair_key, pair_state, zscore)
 
@@ -202,8 +256,9 @@ class StatArbAgent(SignalAgent):
         try:
             beta = np.cov(prices_a, prices_b)[0, 1] / np.var(prices_b)
             return max(0.1, min(10.0, beta))  # Clamp to reasonable range
-        except Exception:
-            return 1.0
+        except Exception as e:
+            logger.error(f"Failed to calculate hedge ratio: {e}", exc_info=True)
+            return 1.0  # Fallback to 1:1 ratio
 
     def _generate_zscore_signal(
         self,
@@ -213,6 +268,12 @@ class StatArbAgent(SignalAgent):
     ) -> SignalEvent | None:
         """Generate signal based on z-score."""
         current_signal = pair_state.last_signal
+
+        # P2: Check if pair is tradeable
+        tradeable, reason = self.is_pair_tradeable(pair_key)
+        if not tradeable and self._pair_ranking_enabled:
+            logger.debug(f"StatArb: Skipping signal for {pair_key}: {reason}")
+            return None
 
         # Entry signals
         if zscore > self._zscore_entry and current_signal != SignalDirection.SHORT:
@@ -224,11 +285,12 @@ class StatArbAgent(SignalAgent):
                 symbol=pair_key,  # Pair identifier
                 direction=SignalDirection.SHORT,
                 strength=-min(1.0, zscore / 3.0),
-                confidence=self._calculate_confidence(zscore),
+                confidence=self._calculate_confidence(zscore, pair_state),
                 target_price=None,
                 rationale=(
                     f"Pair {pair_key} spread z-score={zscore:.2f} > {self._zscore_entry}. "
-                    f"Short {pair_state.symbol_a}, Long {pair_state.symbol_b}"
+                    f"Short {pair_state.symbol_a}, Long {pair_state.symbol_b}. "
+                    f"Quality={pair_state.pair_quality_score:.2f}"
                 ),
                 data_sources=(pair_state.symbol_a, pair_state.symbol_b, "IB_market_data"),
             )
@@ -242,11 +304,12 @@ class StatArbAgent(SignalAgent):
                 symbol=pair_key,
                 direction=SignalDirection.LONG,
                 strength=min(1.0, abs(zscore) / 3.0),
-                confidence=self._calculate_confidence(zscore),
+                confidence=self._calculate_confidence(zscore, pair_state),
                 target_price=None,
                 rationale=(
                     f"Pair {pair_key} spread z-score={zscore:.2f} < -{self._zscore_entry}. "
-                    f"Long {pair_state.symbol_a}, Short {pair_state.symbol_b}"
+                    f"Long {pair_state.symbol_a}, Short {pair_state.symbol_b}. "
+                    f"Quality={pair_state.pair_quality_score:.2f}"
                 ),
                 data_sources=(pair_state.symbol_a, pair_state.symbol_b, "IB_market_data"),
             )
@@ -267,15 +330,398 @@ class StatArbAgent(SignalAgent):
 
         return None
 
-    def _calculate_confidence(self, zscore: float) -> float:
+    def _calculate_confidence(self, zscore: float, pair_state: PairState | None = None) -> float:
         """
-        Calculate signal confidence based on z-score magnitude.
+        Calculate signal confidence based on z-score magnitude and pair quality (P2 enhanced).
 
-        TODO: Incorporate additional factors:
-        - Cointegration test p-value
+        Incorporates:
+        - Z-score magnitude
+        - Cointegration strength (P2)
+        - Pair quality score (P2)
         - Half-life of mean reversion
-        - Historical hit rate
         """
-        # Higher z-score = higher confidence (up to a point)
-        confidence = min(0.9, 0.5 + abs(zscore) * 0.1)
-        return confidence
+        # Base confidence from z-score
+        base_confidence = min(0.9, 0.5 + abs(zscore) * 0.1)
+
+        if pair_state is None:
+            return base_confidence
+
+        # P2: Adjust confidence based on cointegration
+        if pair_state.is_cointegrated:
+            # Stronger cointegration (lower p-value) = higher confidence
+            coint_boost = (1 - pair_state.cointegration_pvalue) * 0.1
+            base_confidence = min(0.95, base_confidence + coint_boost)
+        else:
+            # Not cointegrated = reduce confidence
+            base_confidence *= 0.7
+
+        # P2: Adjust based on pair quality score
+        quality_multiplier = 0.8 + pair_state.pair_quality_score * 0.4  # 0.8 to 1.2
+        base_confidence *= quality_multiplier
+
+        return min(0.95, max(0.1, base_confidence))
+
+    # =========================================================================
+    # P2: Z-SCORE ALERTS
+    # =========================================================================
+
+    def _check_zscore_alerts(self, pair_key: str, zscore: float) -> None:
+        """
+        Check for z-score threshold breaches and generate alerts (P2).
+
+        Alert levels:
+        - Warning: |z| > 2.5
+        - Critical: |z| > 3.0
+        - Extreme: |z| > 4.0 (potential regime break or data issue)
+        """
+        from datetime import datetime, timezone
+
+        abs_zscore = abs(zscore)
+        direction = "high" if zscore > 0 else "low"
+
+        alert_level = None
+        if abs_zscore >= self._zscore_extreme:
+            alert_level = "extreme"
+        elif abs_zscore >= self._zscore_critical:
+            alert_level = "critical"
+        elif abs_zscore >= self._zscore_warning:
+            alert_level = "warning"
+
+        if alert_level:
+            message = (
+                f"Pair {pair_key}: Z-score {alert_level.upper()} alert - "
+                f"zscore={zscore:.2f} ({direction})"
+            )
+
+            alert = ZScoreAlert(
+                pair_key=pair_key,
+                timestamp=datetime.now(timezone.utc),
+                zscore=zscore,
+                alert_level=alert_level,
+                direction=direction,
+                message=message,
+            )
+
+            self._zscore_alerts.append(alert)
+
+            # Trim old alerts
+            if len(self._zscore_alerts) > self._max_alerts:
+                self._zscore_alerts = self._zscore_alerts[-self._max_alerts:]
+
+            # Log based on severity
+            if alert_level == "extreme":
+                logger.warning(f"StatArb: {message}")
+            elif alert_level == "critical":
+                logger.info(f"StatArb: {message}")
+            else:
+                logger.debug(f"StatArb: {message}")
+
+    def get_zscore_alerts(self, hours: int = 24) -> list[dict]:
+        """
+        Get recent z-score alerts (P2).
+
+        Args:
+            hours: Lookback period
+
+        Returns:
+            List of alert dictionaries
+        """
+        from datetime import datetime, timezone, timedelta
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+        return [
+            {
+                "pair_key": a.pair_key,
+                "timestamp": a.timestamp.isoformat(),
+                "zscore": a.zscore,
+                "alert_level": a.alert_level,
+                "direction": a.direction,
+                "message": a.message,
+            }
+            for a in self._zscore_alerts
+            if a.timestamp >= cutoff
+        ]
+
+    # =========================================================================
+    # P2: COINTEGRATION MONITORING
+    # =========================================================================
+
+    async def _check_all_cointegrations(self) -> None:
+        """
+        Check cointegration status for all pairs (P2).
+
+        Monitors for cointegration breakdown which signals pair may no longer be tradeable.
+        """
+        from datetime import datetime, timezone
+
+        for pair_key, pair_state in self._pairs.items():
+            if len(pair_state.price_a) < 100 or len(pair_state.price_b) < 100:
+                continue
+
+            prices_a = np.array(list(pair_state.price_a))
+            prices_b = np.array(list(pair_state.price_b))
+
+            # Align lengths
+            min_len = min(len(prices_a), len(prices_b))
+            prices_a = prices_a[-min_len:]
+            prices_b = prices_b[-min_len:]
+
+            # Perform ADF test on spread
+            spread = prices_a - pair_state.hedge_ratio * prices_b
+
+            adf_stat, pvalue = self._adf_test(spread)
+
+            pair_state.cointegration_score = adf_stat
+            pair_state.cointegration_pvalue = pvalue
+            pair_state.cointegration_last_check = datetime.now(timezone.utc)
+
+            was_cointegrated = pair_state.is_cointegrated
+            pair_state.is_cointegrated = pvalue < self._cointegration_pvalue_threshold
+
+            # Check for breakdown
+            if was_cointegrated and not pair_state.is_cointegrated:
+                pair_state.cointegration_breakdown_count += 1
+                logger.warning(
+                    f"StatArb: Cointegration breakdown detected for {pair_key} "
+                    f"(p-value={pvalue:.4f}, breakdown #{pair_state.cointegration_breakdown_count})"
+                )
+
+                # If too many breakdowns, consider disabling the pair
+                if pair_state.cointegration_breakdown_count >= self._cointegration_breakdown_threshold:
+                    logger.error(
+                        f"StatArb: Pair {pair_key} has broken down {pair_state.cointegration_breakdown_count} times - "
+                        f"consider removing from trading"
+                    )
+
+            elif not was_cointegrated and pair_state.is_cointegrated:
+                logger.info(
+                    f"StatArb: Cointegration restored for {pair_key} (p-value={pvalue:.4f})"
+                )
+
+    def _adf_test(self, series: np.ndarray) -> tuple[float, float]:
+        """
+        Perform Augmented Dickey-Fuller test for stationarity (P2).
+
+        Returns:
+            Tuple of (ADF statistic, p-value)
+        """
+        try:
+            # Simple ADF implementation without statsmodels
+            # H0: series has a unit root (non-stationary)
+            # Reject H0 if ADF stat < critical value
+
+            n = len(series)
+            if n < 20:
+                return 0.0, 1.0
+
+            # Calculate differences
+            diff = np.diff(series)
+            lag_series = series[:-1]
+
+            # Simple regression: diff = alpha + beta * lag + epsilon
+            # ADF statistic = beta / se(beta)
+            x = lag_series - np.mean(lag_series)
+            y = diff - np.mean(diff)
+
+            beta = np.sum(x * y) / np.sum(x ** 2) if np.sum(x ** 2) > 0 else 0
+
+            # Estimate standard error
+            residuals = y - beta * x
+            mse = np.sum(residuals ** 2) / (n - 2) if n > 2 else 1
+            se_beta = np.sqrt(mse / np.sum(x ** 2)) if np.sum(x ** 2) > 0 else 1
+
+            adf_stat = beta / se_beta if se_beta > 0 else 0
+
+            # Approximate p-value using critical values
+            # Critical values at 1%, 5%, 10% for n=100 are approximately -3.5, -2.9, -2.6
+            if adf_stat < -3.5:
+                pvalue = 0.01
+            elif adf_stat < -2.9:
+                pvalue = 0.05
+            elif adf_stat < -2.6:
+                pvalue = 0.10
+            elif adf_stat < -1.9:
+                pvalue = 0.25
+            else:
+                pvalue = 0.50 + min(0.49, abs(adf_stat) * 0.1)
+
+            return adf_stat, pvalue
+
+        except Exception as e:
+            logger.error(f"ADF test failed: {e}", exc_info=True)
+            return 0.0, 1.0
+
+    def get_cointegration_status(self) -> dict[str, dict]:
+        """
+        Get cointegration status for all pairs (P2).
+
+        Returns:
+            Dictionary mapping pair_key to cointegration metrics
+        """
+        return {
+            pair_key: {
+                "is_cointegrated": ps.is_cointegrated,
+                "score": ps.cointegration_score,
+                "pvalue": ps.cointegration_pvalue,
+                "breakdown_count": ps.cointegration_breakdown_count,
+                "last_check": ps.cointegration_last_check.isoformat() if ps.cointegration_last_check else None,
+            }
+            for pair_key, ps in self._pairs.items()
+        }
+
+    # =========================================================================
+    # P2: PAIR SELECTION OPTIMIZATION
+    # =========================================================================
+
+    def _update_pair_quality(
+        self,
+        pair_key: str,
+        pair_state: PairState,
+        spread_array: np.ndarray,
+    ) -> None:
+        """
+        Update pair quality score for pair selection optimization (P2).
+
+        Quality factors:
+        1. Cointegration strength (lower p-value = better)
+        2. Mean reversion speed (lower half-life = better)
+        3. Spread volatility (moderate is ideal)
+        4. Historical performance
+        """
+        # Factor 1: Cointegration strength (0 to 0.3)
+        if pair_state.cointegration_pvalue < 0.01:
+            coint_score = 0.3
+        elif pair_state.cointegration_pvalue < 0.05:
+            coint_score = 0.2
+        elif pair_state.cointegration_pvalue < 0.10:
+            coint_score = 0.1
+        else:
+            coint_score = 0.0
+
+        # Factor 2: Mean reversion speed via half-life (0 to 0.3)
+        half_life = self._estimate_half_life(spread_array)
+        pair_state.half_life = half_life
+
+        if half_life <= 0:
+            reversion_score = 0.0
+        elif half_life < 5:  # Very fast
+            reversion_score = 0.3
+        elif half_life < 10:  # Fast
+            reversion_score = 0.25
+        elif half_life < 20:  # Moderate
+            reversion_score = 0.15
+        elif half_life < 50:  # Slow
+            reversion_score = 0.05
+        else:
+            reversion_score = 0.0
+
+        pair_state.mean_reversion_strength = reversion_score / 0.3  # Normalize to 0-1
+
+        # Factor 3: Spread volatility (0 to 0.2)
+        # Want moderate volatility - too low means no opportunity, too high means risk
+        spread_vol = pair_state.spread_volatility
+        spread_mean = np.mean(spread_array) if len(spread_array) > 0 else 1
+        vol_ratio = spread_vol / abs(spread_mean) if spread_mean != 0 else 0
+
+        if 0.05 < vol_ratio < 0.20:  # Ideal range
+            vol_score = 0.2
+        elif 0.02 < vol_ratio < 0.30:  # Acceptable
+            vol_score = 0.1
+        else:
+            vol_score = 0.0
+
+        # Factor 4: Trading history (0 to 0.2)
+        # Pairs with more data are more reliable
+        data_points = min(len(pair_state.spread_history), self._lookback_size)
+        data_score = min(0.2, data_points / self._lookback_size * 0.2)
+
+        # Total quality score
+        pair_state.pair_quality_score = coint_score + reversion_score + vol_score + data_score
+
+        logger.debug(
+            f"StatArb: Pair {pair_key} quality score = {pair_state.pair_quality_score:.3f} "
+            f"(coint={coint_score:.2f}, rev={reversion_score:.2f}, vol={vol_score:.2f}, data={data_score:.2f})"
+        )
+
+    def _estimate_half_life(self, spread: np.ndarray) -> float:
+        """
+        Estimate mean reversion half-life using OLS (P2).
+
+        Half-life = -ln(2) / theta where theta is the mean reversion coefficient.
+        """
+        try:
+            n = len(spread)
+            if n < 20:
+                return float('inf')
+
+            # Ornstein-Uhlenbeck: dS = theta * (mu - S) * dt + sigma * dW
+            # Regression: spread[t] - spread[t-1] = theta * (mu - spread[t-1])
+            lag_spread = spread[:-1]
+            diff_spread = np.diff(spread)
+
+            # OLS regression
+            x = lag_spread - np.mean(lag_spread)
+            y = diff_spread
+
+            theta = -np.sum(x * y) / np.sum(x ** 2) if np.sum(x ** 2) > 0 else 0
+
+            if theta <= 0:
+                return float('inf')
+
+            half_life = -np.log(2) / np.log(1 - theta) if theta < 1 else theta
+            return max(0, half_life)
+
+        except Exception as e:
+            logger.error(f"Half-life estimation failed: {e}", exc_info=True)
+            return float('inf')
+
+    def get_pair_rankings(self) -> list[dict]:
+        """
+        Get pairs ranked by quality score (P2).
+
+        Returns:
+            List of pairs sorted by quality score (best first)
+        """
+        rankings = []
+        for pair_key, ps in self._pairs.items():
+            rankings.append({
+                "pair_key": pair_key,
+                "quality_score": ps.pair_quality_score,
+                "is_cointegrated": ps.is_cointegrated,
+                "half_life": ps.half_life,
+                "zscore": ps.zscore,
+                "breakdown_count": ps.cointegration_breakdown_count,
+                "tradeable": (
+                    ps.is_cointegrated and
+                    ps.pair_quality_score >= self._min_pair_quality and
+                    ps.cointegration_breakdown_count < self._cointegration_breakdown_threshold
+                ),
+            })
+
+        # Sort by quality score descending
+        rankings.sort(key=lambda x: x["quality_score"], reverse=True)
+        return rankings
+
+    def is_pair_tradeable(self, pair_key: str) -> tuple[bool, str]:
+        """
+        Check if a pair is tradeable based on quality metrics (P2).
+
+        Returns:
+            Tuple of (is_tradeable, reason)
+        """
+        if pair_key not in self._pairs:
+            return False, f"Pair {pair_key} not found"
+
+        ps = self._pairs[pair_key]
+
+        if not ps.is_cointegrated:
+            return False, f"Pair {pair_key} is not cointegrated (p={ps.cointegration_pvalue:.4f})"
+
+        if ps.pair_quality_score < self._min_pair_quality:
+            return False, f"Pair {pair_key} quality score too low ({ps.pair_quality_score:.3f} < {self._min_pair_quality})"
+
+        if ps.cointegration_breakdown_count >= self._cointegration_breakdown_threshold:
+            return False, f"Pair {pair_key} has too many breakdowns ({ps.cointegration_breakdown_count})"
+
+        return True, "OK"

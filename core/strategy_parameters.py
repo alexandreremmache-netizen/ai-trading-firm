@@ -19,7 +19,7 @@ import logging
 import math
 import statistics
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Any, Callable, Iterator
 from collections import defaultdict
@@ -581,8 +581,9 @@ class ParameterSensitivityAnalyzer:
                 if metric_value > best_metric:
                     best_metric = metric_value
                     best_params = test_params.copy()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Parameter evaluation failed for {test_params}: {e}")
+                continue  # More explicit than pass
 
             iteration += 1
 
@@ -675,4 +676,654 @@ class StrategyParameterSet:
             "macd_signal": MACDParameters.SIGNAL_PERIOD_BOUNDS,
             "bb_period": BollingerBandsParameters.PERIOD_BOUNDS,
             "bb_std_dev": BollingerBandsParameters.STD_DEV_BOUNDS,
+        }
+
+
+# =============================================================================
+# PARAMETER SENSITIVITY ANALYSIS EXTENSIONS (P3 Enhancement)
+# =============================================================================
+
+@dataclass
+class ParameterInteraction:
+    """Measures interaction between two parameters."""
+    param1: str
+    param2: str
+    interaction_score: float  # -1 to 1, magnitude indicates strength
+    joint_optimal: tuple[float, float] | None
+    synergy: bool  # True if parameters work better together
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "param1": self.param1,
+            "param2": self.param2,
+            "interaction_score": self.interaction_score,
+            "joint_optimal": self.joint_optimal,
+            "synergy": self.synergy,
+        }
+
+
+class ExtendedSensitivityAnalyzer:
+    """
+    Extended parameter sensitivity analysis (P3 Enhancement).
+
+    Adds interaction analysis and advanced sensitivity metrics.
+    """
+
+    def __init__(
+        self,
+        strategy_evaluator: Callable[[dict], dict[str, float]],
+    ):
+        """
+        Initialize extended analyzer.
+
+        Args:
+            strategy_evaluator: Function that evaluates strategy performance
+        """
+        self.evaluator = strategy_evaluator
+        self._interaction_cache: dict[tuple[str, str], ParameterInteraction] = {}
+
+    def analyze_parameter_interaction(
+        self,
+        baseline_params: dict[str, Any],
+        param1: str,
+        param2: str,
+        bounds1: ParameterBounds,
+        bounds2: ParameterBounds,
+        num_samples: int = 5,
+        metric: str = "sharpe_ratio",
+    ) -> ParameterInteraction:
+        """
+        Analyze interaction between two parameters.
+
+        Args:
+            baseline_params: Baseline parameter values
+            param1, param2: Parameters to analyze
+            bounds1, bounds2: Bounds for each parameter
+            num_samples: Grid samples per parameter
+            metric: Performance metric to use
+
+        Returns:
+            ParameterInteraction describing the relationship
+        """
+        # Generate test values
+        step1 = (bounds1.max_value - bounds1.min_value) / (num_samples - 1)
+        step2 = (bounds2.max_value - bounds2.min_value) / (num_samples - 1)
+
+        values1 = [bounds1.min_value + i * step1 for i in range(num_samples)]
+        values2 = [bounds2.min_value + i * step2 for i in range(num_samples)]
+
+        # Evaluate grid
+        results = {}
+        for v1 in values1:
+            for v2 in values2:
+                test_params = baseline_params.copy()
+                test_params[param1] = v1
+                test_params[param2] = v2
+
+                try:
+                    metrics = self.evaluator(test_params)
+                    results[(v1, v2)] = metrics.get(metric, 0)
+                except Exception:
+                    results[(v1, v2)] = float('-inf')
+
+        # Find joint optimal
+        joint_optimal = max(results.items(), key=lambda x: x[1])[0]
+
+        # Calculate interaction score
+        # Compare: f(a,b) vs f(a,baseline_b) + f(baseline_a,b) - f(baseline_a,baseline_b)
+        baseline_v1 = baseline_params.get(param1, bounds1.default_value)
+        baseline_v2 = baseline_params.get(param2, bounds2.default_value)
+
+        interaction_scores = []
+        for v1 in values1:
+            for v2 in values2:
+                if v1 == baseline_v1 or v2 == baseline_v2:
+                    continue
+
+                actual = results.get((v1, v2), 0)
+                p1_effect = results.get((v1, baseline_v2), 0) - results.get((baseline_v1, baseline_v2), 0)
+                p2_effect = results.get((baseline_v1, v2), 0) - results.get((baseline_v1, baseline_v2), 0)
+                expected = results.get((baseline_v1, baseline_v2), 0) + p1_effect + p2_effect
+
+                if expected != 0:
+                    interaction = (actual - expected) / abs(expected)
+                    interaction_scores.append(interaction)
+
+        avg_interaction = statistics.mean(interaction_scores) if interaction_scores else 0.0
+
+        # Determine synergy
+        synergy = avg_interaction > 0.1  # Positive interaction indicates synergy
+
+        result = ParameterInteraction(
+            param1=param1,
+            param2=param2,
+            interaction_score=max(-1, min(1, avg_interaction)),
+            joint_optimal=joint_optimal,
+            synergy=synergy,
+        )
+
+        self._interaction_cache[(param1, param2)] = result
+        return result
+
+    def analyze_all_interactions(
+        self,
+        baseline_params: dict[str, Any],
+        parameter_bounds: dict[str, ParameterBounds],
+        metric: str = "sharpe_ratio",
+    ) -> list[ParameterInteraction]:
+        """
+        Analyze all pairwise parameter interactions.
+
+        Args:
+            baseline_params: Baseline parameter values
+            parameter_bounds: Bounds for each parameter
+            metric: Performance metric to use
+
+        Returns:
+            List of ParameterInteraction for all pairs
+        """
+        interactions = []
+        params = list(parameter_bounds.keys())
+
+        for i, param1 in enumerate(params):
+            for param2 in params[i + 1:]:
+                interaction = self.analyze_parameter_interaction(
+                    baseline_params,
+                    param1,
+                    param2,
+                    parameter_bounds[param1],
+                    parameter_bounds[param2],
+                    metric=metric,
+                )
+                interactions.append(interaction)
+
+        return interactions
+
+    def get_parameter_importance_ranking(
+        self,
+        baseline_params: dict[str, Any],
+        parameter_bounds: dict[str, ParameterBounds],
+        metric: str = "sharpe_ratio",
+    ) -> list[tuple[str, float]]:
+        """
+        Rank parameters by their impact on performance.
+
+        Args:
+            baseline_params: Baseline parameter values
+            parameter_bounds: Bounds for each parameter
+            metric: Performance metric to use
+
+        Returns:
+            List of (parameter_name, importance_score) sorted by importance
+        """
+        importance = {}
+        baseline_metrics = self.evaluator(baseline_params)
+        baseline_value = baseline_metrics.get(metric, 0)
+
+        for param_name, bounds in parameter_bounds.items():
+            # Test at min and max
+            test_params = baseline_params.copy()
+
+            test_params[param_name] = bounds.min_value
+            try:
+                min_metrics = self.evaluator(test_params)
+                min_value = min_metrics.get(metric, 0)
+            except Exception:
+                min_value = baseline_value
+
+            test_params[param_name] = bounds.max_value
+            try:
+                max_metrics = self.evaluator(test_params)
+                max_value = max_metrics.get(metric, 0)
+            except Exception:
+                max_value = baseline_value
+
+            # Importance = range of metric values
+            importance[param_name] = abs(max_value - min_value)
+
+        # Sort by importance (descending)
+        ranked = sorted(importance.items(), key=lambda x: -x[1])
+        return ranked
+
+
+# =============================================================================
+# PARAMETER OPTIMIZATION BOUNDS (P3 Enhancement)
+# =============================================================================
+
+class OptimizationConstraint(str, Enum):
+    """Types of optimization constraints."""
+    INDEPENDENT = "independent"  # Parameter optimized independently
+    LINKED = "linked"  # Parameter linked to another
+    BOUNDED_BY = "bounded_by"  # Upper bound determined by another param
+    RATIO = "ratio"  # Maintain ratio with another param
+
+
+@dataclass
+class AdvancedParameterBounds:
+    """
+    Advanced parameter bounds with constraints (P3 Enhancement).
+
+    Extends ParameterBounds with inter-parameter constraints.
+    """
+    name: str
+    min_value: float
+    max_value: float
+    default_value: float
+    step: float = 1.0
+    description: str = ""
+    constraint_type: OptimizationConstraint = OptimizationConstraint.INDEPENDENT
+    constraint_reference: str | None = None  # Reference parameter for constraint
+    constraint_factor: float = 1.0  # Factor for ratio/bounded constraints
+
+    def __post_init__(self) -> None:
+        """Validate bounds configuration."""
+        if self.min_value > self.max_value:
+            raise ValueError(f"min_value ({self.min_value}) > max_value ({self.max_value})")
+        if not self.min_value <= self.default_value <= self.max_value:
+            raise ValueError(
+                f"default_value ({self.default_value}) not in "
+                f"[{self.min_value}, {self.max_value}]"
+            )
+
+    def get_effective_bounds(
+        self,
+        reference_value: float | None = None,
+    ) -> tuple[float, float]:
+        """
+        Get effective bounds considering constraints.
+
+        Args:
+            reference_value: Value of the reference parameter if constrained
+
+        Returns:
+            Tuple of (effective_min, effective_max)
+        """
+        if reference_value is None or self.constraint_type == OptimizationConstraint.INDEPENDENT:
+            return (self.min_value, self.max_value)
+
+        if self.constraint_type == OptimizationConstraint.BOUNDED_BY:
+            # Max is bounded by reference * factor
+            effective_max = min(self.max_value, reference_value * self.constraint_factor)
+            return (self.min_value, effective_max)
+
+        if self.constraint_type == OptimizationConstraint.RATIO:
+            # Value must be reference * factor (within tolerance)
+            target = reference_value * self.constraint_factor
+            tolerance = (self.max_value - self.min_value) * 0.1
+            return (max(self.min_value, target - tolerance),
+                    min(self.max_value, target + tolerance))
+
+        return (self.min_value, self.max_value)
+
+    def to_parameter_bounds(self) -> ParameterBounds:
+        """Convert to basic ParameterBounds."""
+        return ParameterBounds(
+            min_value=self.min_value,
+            max_value=self.max_value,
+            default_value=self.default_value,
+            step=self.step,
+            description=self.description,
+        )
+
+
+class ConstrainedOptimizer:
+    """
+    Parameter optimizer with constraint support (P3 Enhancement).
+
+    Handles inter-parameter constraints during optimization.
+    """
+
+    def __init__(
+        self,
+        strategy_evaluator: Callable[[dict], dict[str, float]],
+        bounds: dict[str, AdvancedParameterBounds],
+    ):
+        """
+        Initialize constrained optimizer.
+
+        Args:
+            strategy_evaluator: Function that evaluates strategy performance
+            bounds: Advanced bounds for each parameter
+        """
+        self.evaluator = strategy_evaluator
+        self.bounds = bounds
+        self._dependency_order = self._compute_dependency_order()
+
+    def _compute_dependency_order(self) -> list[str]:
+        """Compute order to optimize parameters based on dependencies."""
+        # Independent parameters first, then dependent ones
+        independent = []
+        dependent = []
+
+        for name, bound in self.bounds.items():
+            if bound.constraint_type == OptimizationConstraint.INDEPENDENT:
+                independent.append(name)
+            else:
+                dependent.append(name)
+
+        return independent + dependent
+
+    def optimize(
+        self,
+        baseline_params: dict[str, Any],
+        objective_metric: str = "sharpe_ratio",
+        num_iterations: int = 100,
+    ) -> dict[str, Any]:
+        """
+        Find optimal parameters respecting constraints.
+
+        Args:
+            baseline_params: Starting parameter values
+            objective_metric: Metric to optimize
+            num_iterations: Max iterations
+
+        Returns:
+            Optimal parameter set
+        """
+        current_params = baseline_params.copy()
+        best_params = current_params.copy()
+        best_metric = float('-inf')
+
+        for _ in range(num_iterations):
+            # Optimize each parameter in dependency order
+            for param_name in self._dependency_order:
+                bound = self.bounds.get(param_name)
+                if not bound:
+                    continue
+
+                # Get reference value for constraints
+                ref_value = None
+                if bound.constraint_reference:
+                    ref_value = current_params.get(bound.constraint_reference)
+
+                # Get effective bounds
+                min_val, max_val = bound.get_effective_bounds(ref_value)
+
+                # Test a few values within bounds
+                test_values = [
+                    min_val,
+                    (min_val + max_val) / 2,
+                    max_val,
+                ]
+
+                for test_val in test_values:
+                    test_params = current_params.copy()
+                    test_params[param_name] = test_val
+
+                    try:
+                        metrics = self.evaluator(test_params)
+                        metric_value = metrics.get(objective_metric, float('-inf'))
+
+                        if metric_value > best_metric:
+                            best_metric = metric_value
+                            best_params = test_params.copy()
+                            current_params = test_params.copy()
+                    except Exception:
+                        continue
+
+        return best_params
+
+
+# =============================================================================
+# PARAMETER CHANGE HISTORY (P3 Enhancement)
+# =============================================================================
+
+@dataclass
+class ParameterChange:
+    """Record of a parameter change."""
+    parameter_name: str
+    old_value: Any
+    new_value: Any
+    timestamp: datetime
+    reason: str
+    changed_by: str  # User or system component
+    performance_before: dict[str, float] | None = None
+    performance_after: dict[str, float] | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "parameter_name": self.parameter_name,
+            "old_value": self.old_value,
+            "new_value": self.new_value,
+            "timestamp": self.timestamp.isoformat(),
+            "reason": self.reason,
+            "changed_by": self.changed_by,
+            "performance_before": self.performance_before,
+            "performance_after": self.performance_after,
+        }
+
+
+class ParameterChangeHistory:
+    """
+    Track parameter change history (P3 Enhancement).
+
+    Maintains audit trail of all parameter changes for analysis and rollback.
+    """
+
+    def __init__(self, max_history: int = 1000):
+        """
+        Initialize change history.
+
+        Args:
+            max_history: Maximum number of changes to store
+        """
+        self.max_history = max_history
+        self._history: deque = deque(maxlen=max_history)
+        self._current_params: dict[str, Any] = {}
+
+    def set_initial_params(self, params: dict[str, Any]) -> None:
+        """Set initial parameter values."""
+        self._current_params = params.copy()
+
+    def record_change(
+        self,
+        parameter_name: str,
+        new_value: Any,
+        reason: str,
+        changed_by: str = "system",
+        performance_before: dict[str, float] | None = None,
+        performance_after: dict[str, float] | None = None,
+    ) -> ParameterChange:
+        """
+        Record a parameter change.
+
+        Args:
+            parameter_name: Name of changed parameter
+            new_value: New parameter value
+            reason: Reason for change
+            changed_by: Who/what made the change
+            performance_before: Performance metrics before change
+            performance_after: Performance metrics after change
+
+        Returns:
+            ParameterChange record
+        """
+        old_value = self._current_params.get(parameter_name)
+
+        change = ParameterChange(
+            parameter_name=parameter_name,
+            old_value=old_value,
+            new_value=new_value,
+            timestamp=datetime.now(timezone.utc),
+            reason=reason,
+            changed_by=changed_by,
+            performance_before=performance_before,
+            performance_after=performance_after,
+        )
+
+        self._history.append(change)
+        self._current_params[parameter_name] = new_value
+
+        logger.info(
+            f"Parameter change recorded: {parameter_name} "
+            f"{old_value} -> {new_value} ({reason})"
+        )
+
+        return change
+
+    def get_history(
+        self,
+        parameter_name: str | None = None,
+        since: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[ParameterChange]:
+        """
+        Get parameter change history.
+
+        Args:
+            parameter_name: Filter by parameter (None for all)
+            since: Only changes after this time
+            limit: Maximum number of changes to return
+
+        Returns:
+            List of ParameterChange records
+        """
+        history = list(self._history)
+
+        if parameter_name:
+            history = [c for c in history if c.parameter_name == parameter_name]
+
+        if since:
+            history = [c for c in history if c.timestamp >= since]
+
+        if limit:
+            history = history[-limit:]
+
+        return history
+
+    def get_rollback_point(self, parameter_name: str, n_changes_back: int = 1) -> Any:
+        """
+        Get value from n changes ago for potential rollback.
+
+        Args:
+            parameter_name: Parameter to check
+            n_changes_back: How many changes to look back
+
+        Returns:
+            Previous value or None if not found
+        """
+        changes = self.get_history(parameter_name=parameter_name)
+
+        if len(changes) >= n_changes_back:
+            return changes[-(n_changes_back + 1)].old_value if len(changes) > n_changes_back else changes[0].old_value
+
+        return None
+
+    def rollback(
+        self,
+        parameter_name: str,
+        n_changes_back: int = 1,
+        reason: str = "manual_rollback",
+    ) -> ParameterChange | None:
+        """
+        Roll back a parameter to a previous value.
+
+        Args:
+            parameter_name: Parameter to roll back
+            n_changes_back: How many changes to undo
+            reason: Reason for rollback
+
+        Returns:
+            New ParameterChange record or None if rollback not possible
+        """
+        rollback_value = self.get_rollback_point(parameter_name, n_changes_back)
+
+        if rollback_value is not None:
+            return self.record_change(
+                parameter_name=parameter_name,
+                new_value=rollback_value,
+                reason=f"{reason} (n={n_changes_back})",
+                changed_by="rollback_system",
+            )
+
+        return None
+
+    def analyze_change_impact(
+        self,
+        parameter_name: str,
+    ) -> dict:
+        """
+        Analyze the impact of changes to a parameter.
+
+        Args:
+            parameter_name: Parameter to analyze
+
+        Returns:
+            Dict with impact analysis
+        """
+        changes = self.get_history(parameter_name=parameter_name)
+
+        if not changes:
+            return {"parameter": parameter_name, "total_changes": 0}
+
+        # Calculate statistics
+        performance_deltas = []
+        for change in changes:
+            if change.performance_before and change.performance_after:
+                for metric in change.performance_before:
+                    if metric in change.performance_after:
+                        before = change.performance_before[metric]
+                        after = change.performance_after[metric]
+                        if before != 0:
+                            delta = (after - before) / abs(before) * 100
+                            performance_deltas.append({
+                                "metric": metric,
+                                "delta_pct": delta,
+                                "timestamp": change.timestamp,
+                            })
+
+        return {
+            "parameter": parameter_name,
+            "total_changes": len(changes),
+            "first_change": changes[0].timestamp.isoformat() if changes else None,
+            "last_change": changes[-1].timestamp.isoformat() if changes else None,
+            "current_value": self._current_params.get(parameter_name),
+            "performance_impacts": performance_deltas[:10],  # Last 10 impacts
+        }
+
+    def export_history(self) -> list[dict]:
+        """Export complete history as list of dicts."""
+        return [c.to_dict() for c in self._history]
+
+    def get_change_frequency(
+        self,
+        parameter_name: str | None = None,
+        days: int = 30,
+    ) -> dict:
+        """
+        Get change frequency statistics.
+
+        Args:
+            parameter_name: Filter by parameter
+            days: Lookback period in days
+
+        Returns:
+            Dict with frequency statistics
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        changes = self.get_history(parameter_name=parameter_name, since=cutoff)
+
+        if not changes:
+            return {
+                "parameter": parameter_name or "all",
+                "days": days,
+                "total_changes": 0,
+                "changes_per_day": 0.0,
+            }
+
+        # Group by day
+        by_day: dict[str, int] = defaultdict(int)
+        for change in changes:
+            day_key = change.timestamp.date().isoformat()
+            by_day[day_key] += 1
+
+        return {
+            "parameter": parameter_name or "all",
+            "days": days,
+            "total_changes": len(changes),
+            "changes_per_day": len(changes) / days,
+            "days_with_changes": len(by_day),
+            "max_changes_per_day": max(by_day.values()) if by_day else 0,
         }

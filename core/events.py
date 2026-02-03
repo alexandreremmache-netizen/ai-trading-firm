@@ -84,6 +84,30 @@ class RiskAlertSeverity(Enum):
 
 
 @dataclass(frozen=True)
+class DataSource:
+    """
+    Structured data source information for compliance tracking.
+
+    Provides detailed provenance information for audit trails (API-004).
+    """
+    provider: str  # e.g., "interactive_brokers", "bloomberg", "internal"
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    api_version: str = "1.0.0"
+    endpoint: str = ""  # Optional: specific API endpoint used
+    request_id: str = ""  # Optional: request correlation ID
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "provider": self.provider,
+            "timestamp": self.timestamp.isoformat(),
+            "api_version": self.api_version,
+            "endpoint": self.endpoint,
+            "request_id": self.request_id,
+        }
+
+
+@dataclass(frozen=True)
 class Event:
     """
     Base event class.
@@ -94,10 +118,17 @@ class Event:
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     event_type: EventType = EventType.SYSTEM
     source_agent: str = "unknown"
+    schema_version: str = "1.0.0"  # API-001: Event versioning for backward compatibility
 
     def to_audit_dict(self) -> dict[str, Any]:
-        """Convert event to dictionary for audit logging."""
+        """
+        Convert event to dictionary for audit logging.
+
+        API-002: Includes class name for strict contract consistency.
+        """
         return {
+            "event_class": self.__class__.__name__,  # API-002: Class identification
+            "schema_version": self.schema_version,  # API-001: Version tracking
             "event_id": self.event_id,
             "timestamp": self.timestamp.isoformat(),
             "event_type": self.event_type.value,
@@ -631,12 +662,27 @@ VALID_ORDER_TRANSITIONS: dict[OrderState, tuple[OrderState, ...]] = {
 }
 
 
+class InvalidStateTransitionError(ValueError):
+    """Raised when an invalid order state transition is attempted (API-005)."""
+
+    def __init__(self, from_state: OrderState, to_state: OrderState):
+        self.from_state = from_state
+        self.to_state = to_state
+        valid_states = VALID_ORDER_TRANSITIONS.get(from_state, ())
+        valid_names = [s.value for s in valid_states] if valid_states else ["(none - terminal state)"]
+        super().__init__(
+            f"Invalid state transition from {from_state.value} to {to_state.value}. "
+            f"Valid transitions from {from_state.value}: {valid_names}"
+        )
+
+
 @dataclass(frozen=True)
 class OrderStateChangeEvent(Event):
     """
     Order state change event for tracking order lifecycle.
 
     Provides full audit trail of order state transitions.
+    API-005: Validates state transitions in __post_init__.
     """
     event_type: EventType = field(default=EventType.ORDER_STATE_CHANGE, init=False)
     order_id: str = ""
@@ -648,6 +694,16 @@ class OrderStateChangeEvent(Event):
     filled_quantity: int = 0  # Running total filled
     remaining_quantity: int = 0  # Remaining to fill
     avg_fill_price: float = 0.0  # Average fill price so far
+
+    def __post_init__(self) -> None:
+        """
+        Validate state transition on event creation (API-005).
+
+        Raises:
+            InvalidStateTransitionError: If the transition is not valid.
+        """
+        if not is_valid_state_transition(self.previous_state, self.new_state):
+            raise InvalidStateTransitionError(self.previous_state, self.new_state)
 
     def to_audit_dict(self) -> dict[str, Any]:
         """Convert to audit dictionary."""

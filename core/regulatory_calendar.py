@@ -937,3 +937,413 @@ class GiftEntertainmentLog:
             'approval_threshold_eur': self.approval_threshold,
             'annual_limit_eur': self.annual_limit,
         }
+
+
+# =============================================================================
+# COMPLIANCE STATUS DASHBOARD (P3 Enhancement)
+# =============================================================================
+
+@dataclass
+class AuditTrailEntry:
+    """Audit trail entry for compliance actions."""
+    entry_id: str
+    timestamp: datetime
+    action_type: str
+    actor: str
+    target: str
+    details: dict
+    ip_address: str = ""
+    session_id: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            'entry_id': self.entry_id,
+            'timestamp': self.timestamp.isoformat(),
+            'action_type': self.action_type,
+            'actor': self.actor,
+            'target': self.target,
+            'details': self.details,
+            'ip_address': self.ip_address,
+            'session_id': self.session_id,
+        }
+
+
+class ComplianceAuditTrail:
+    """
+    Enhanced audit trail for compliance actions (P3 Enhancement).
+
+    Provides comprehensive audit logging for regulatory requirements.
+    """
+
+    def __init__(self):
+        self._entries: list[AuditTrailEntry] = []
+        self._entry_counter = 0
+
+    def log_action(
+        self,
+        action_type: str,
+        actor: str,
+        target: str,
+        details: dict,
+        ip_address: str = "",
+        session_id: str = "",
+    ) -> AuditTrailEntry:
+        """
+        Log a compliance-related action.
+
+        Args:
+            action_type: Type of action (e.g., "report_submission", "approval")
+            actor: Who performed the action
+            target: What was acted upon
+            details: Additional details
+            ip_address: Source IP address
+            session_id: Session identifier
+
+        Returns:
+            AuditTrailEntry
+        """
+        self._entry_counter += 1
+        entry_id = f"AUD-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{self._entry_counter:06d}"
+
+        entry = AuditTrailEntry(
+            entry_id=entry_id,
+            timestamp=datetime.now(timezone.utc),
+            action_type=action_type,
+            actor=actor,
+            target=target,
+            details=details,
+            ip_address=ip_address,
+            session_id=session_id,
+        )
+
+        self._entries.append(entry)
+
+        # Keep last 10000 entries
+        if len(self._entries) > 10000:
+            self._entries = self._entries[-10000:]
+
+        logger.debug(f"Audit log: {action_type} by {actor} on {target}")
+        return entry
+
+    def get_entries(
+        self,
+        action_type: str | None = None,
+        actor: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Get filtered audit entries."""
+        entries = self._entries
+
+        if action_type:
+            entries = [e for e in entries if e.action_type == action_type]
+        if actor:
+            entries = [e for e in entries if e.actor == actor]
+        if start_date:
+            entries = [e for e in entries if e.timestamp >= start_date]
+        if end_date:
+            entries = [e for e in entries if e.timestamp <= end_date]
+
+        # Sort by timestamp descending
+        entries = sorted(entries, key=lambda e: e.timestamp, reverse=True)
+        return [e.to_dict() for e in entries[:limit]]
+
+    def get_summary(self, hours: int = 24) -> dict:
+        """Get audit trail summary for last N hours."""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        recent = [e for e in self._entries if e.timestamp >= cutoff]
+
+        by_action = {}
+        by_actor = {}
+        for entry in recent:
+            by_action[entry.action_type] = by_action.get(entry.action_type, 0) + 1
+            by_actor[entry.actor] = by_actor.get(entry.actor, 0) + 1
+
+        return {
+            'total_entries': len(recent),
+            'period_hours': hours,
+            'by_action_type': by_action,
+            'by_actor': by_actor,
+            'oldest_entry': recent[-1].timestamp.isoformat() if recent else None,
+            'newest_entry': recent[0].timestamp.isoformat() if recent else None,
+        }
+
+
+class ComplianceStatusDashboard:
+    """
+    Unified compliance status dashboard (P3 Enhancement).
+
+    Provides real-time compliance metrics and status.
+    """
+
+    def __init__(
+        self,
+        regulatory_calendar: RegulatoryCalendar | None = None,
+        training_manager: ComplianceTrainingManager | None = None,
+        ge_log: GiftEntertainmentLog | None = None,
+    ):
+        self._calendar = regulatory_calendar
+        self._training = training_manager
+        self._ge_log = ge_log
+        self._audit_trail = ComplianceAuditTrail()
+
+        # Custom metrics
+        self._custom_metrics: dict[str, dict] = {}
+        self._alerts: list[dict] = []
+
+    def set_calendar(self, calendar: RegulatoryCalendar) -> None:
+        """Set regulatory calendar."""
+        self._calendar = calendar
+
+    def set_training_manager(self, manager: ComplianceTrainingManager) -> None:
+        """Set training manager."""
+        self._training = manager
+
+    def set_ge_log(self, log: GiftEntertainmentLog) -> None:
+        """Set gift/entertainment log."""
+        self._ge_log = log
+
+    def add_custom_metric(
+        self,
+        metric_name: str,
+        value: float,
+        category: str,
+        threshold_warning: float | None = None,
+        threshold_critical: float | None = None,
+    ) -> None:
+        """Add a custom compliance metric."""
+        self._custom_metrics[metric_name] = {
+            'value': value,
+            'category': category,
+            'threshold_warning': threshold_warning,
+            'threshold_critical': threshold_critical,
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+            'status': self._calculate_metric_status(
+                value, threshold_warning, threshold_critical
+            ),
+        }
+
+    def _calculate_metric_status(
+        self,
+        value: float,
+        warning: float | None,
+        critical: float | None,
+    ) -> str:
+        """Calculate metric status based on thresholds."""
+        if critical is not None and value >= critical:
+            return "critical"
+        if warning is not None and value >= warning:
+            return "warning"
+        return "normal"
+
+    def add_alert(
+        self,
+        alert_type: str,
+        severity: str,
+        message: str,
+        details: dict | None = None,
+    ) -> dict:
+        """Add an alert to the dashboard."""
+        alert = {
+            'id': f"ALT-{len(self._alerts) + 1:06d}",
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'type': alert_type,
+            'severity': severity,
+            'message': message,
+            'details': details or {},
+            'acknowledged': False,
+        }
+        self._alerts.append(alert)
+
+        # Keep last 1000 alerts
+        if len(self._alerts) > 1000:
+            self._alerts = self._alerts[-1000:]
+
+        return alert
+
+    def acknowledge_alert(self, alert_id: str, acknowledged_by: str) -> bool:
+        """Acknowledge an alert."""
+        for alert in self._alerts:
+            if alert['id'] == alert_id:
+                alert['acknowledged'] = True
+                alert['acknowledged_by'] = acknowledged_by
+                alert['acknowledged_at'] = datetime.now(timezone.utc).isoformat()
+                return True
+        return False
+
+    def get_dashboard(self) -> dict:
+        """
+        Get complete compliance dashboard data.
+
+        Returns comprehensive compliance status for monitoring.
+        """
+        now = datetime.now(timezone.utc)
+
+        # Regulatory calendar status
+        calendar_status = {}
+        if self._calendar:
+            calendar_status = self._calendar.get_compliance_status()
+            upcoming = self._calendar.check_upcoming_deadlines(days_ahead=7)
+            calendar_status['upcoming_deadlines'] = len(upcoming)
+            calendar_status['deadline_alerts'] = upcoming[:5]
+
+        # Training compliance
+        training_status = {}
+        if self._training:
+            training_status = self._training.get_overall_compliance()
+            overdue = self._training.check_overdue()
+            training_status['overdue_count'] = len(overdue)
+
+        # Gift & Entertainment
+        ge_status = {}
+        if self._ge_log:
+            ge_status = self._ge_log.get_summary(year=now.year)
+
+        # Active alerts
+        active_alerts = [a for a in self._alerts if not a['acknowledged']]
+        critical_alerts = [a for a in active_alerts if a['severity'] == 'critical']
+
+        # Overall status
+        if len(critical_alerts) > 0:
+            overall_status = "critical"
+        elif len(active_alerts) > 5:
+            overall_status = "warning"
+        elif calendar_status.get('late', 0) > 0:
+            overall_status = "warning"
+        else:
+            overall_status = "healthy"
+
+        return {
+            'timestamp': now.isoformat(),
+            'overall_status': overall_status,
+            'regulatory_calendar': calendar_status,
+            'training_compliance': training_status,
+            'gift_entertainment': ge_status,
+            'alerts': {
+                'total': len(self._alerts),
+                'active': len(active_alerts),
+                'critical': len(critical_alerts),
+                'recent': active_alerts[:10],
+            },
+            'custom_metrics': self._custom_metrics,
+            'audit_summary': self._audit_trail.get_summary(hours=24),
+        }
+
+    def get_health_check(self) -> dict:
+        """Quick health check for monitoring systems."""
+        dashboard = self.get_dashboard()
+
+        return {
+            'status': dashboard['overall_status'],
+            'healthy': dashboard['overall_status'] == 'healthy',
+            'critical_alerts': dashboard['alerts']['critical'],
+            'timestamp': dashboard['timestamp'],
+        }
+
+    def log_compliance_action(
+        self,
+        action_type: str,
+        actor: str,
+        target: str,
+        details: dict,
+    ) -> AuditTrailEntry:
+        """Log a compliance action to the audit trail."""
+        return self._audit_trail.log_action(
+            action_type=action_type,
+            actor=actor,
+            target=target,
+            details=details,
+        )
+
+    def get_audit_trail(
+        self,
+        action_type: str | None = None,
+        hours: int = 24,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Get audit trail entries."""
+        start_date = datetime.now(timezone.utc) - timedelta(hours=hours)
+        return self._audit_trail.get_entries(
+            action_type=action_type,
+            start_date=start_date,
+            limit=limit,
+        )
+
+    def export_compliance_report(
+        self,
+        report_type: str = "daily",
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> dict:
+        """
+        Export compliance report for regulatory purposes.
+
+        Args:
+            report_type: "daily", "weekly", "monthly", or "custom"
+            start_date: Start date for custom range
+            end_date: End date for custom range
+
+        Returns:
+            Comprehensive compliance report
+        """
+        now = datetime.now(timezone.utc)
+
+        if report_type == "daily":
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = now
+        elif report_type == "weekly":
+            start = now - timedelta(days=7)
+            end = now
+        elif report_type == "monthly":
+            start = now - timedelta(days=30)
+            end = now
+        else:  # custom
+            start = datetime.combine(
+                start_date or date.today() - timedelta(days=30),
+                datetime.min.time(),
+                tzinfo=timezone.utc
+            )
+            end = datetime.combine(
+                end_date or date.today(),
+                datetime.max.time(),
+                tzinfo=timezone.utc
+            )
+
+        return {
+            'report_type': report_type,
+            'generated_at': now.isoformat(),
+            'period': {
+                'start': start.isoformat(),
+                'end': end.isoformat(),
+            },
+            'dashboard_snapshot': self.get_dashboard(),
+            'audit_trail': self._audit_trail.get_entries(
+                start_date=start,
+                end_date=end,
+                limit=1000,
+            ),
+            'metrics_summary': {
+                name: metric for name, metric in self._custom_metrics.items()
+            },
+            'alerts_summary': {
+                'total_in_period': len([
+                    a for a in self._alerts
+                    if start.isoformat() <= a['timestamp'] <= end.isoformat()
+                ]),
+                'by_severity': self._count_alerts_by_severity(start, end),
+            },
+        }
+
+    def _count_alerts_by_severity(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, int]:
+        """Count alerts by severity in period."""
+        counts: dict[str, int] = {}
+        for alert in self._alerts:
+            if start.isoformat() <= alert['timestamp'] <= end.isoformat():
+                severity = alert['severity']
+                counts[severity] = counts.get(severity, 0) + 1
+        return counts

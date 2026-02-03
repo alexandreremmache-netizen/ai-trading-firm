@@ -37,6 +37,12 @@ class SurveillanceAlertType(Enum):
     LAYERING = "layering"
     UNUSUAL_VOLUME = "unusual_volume"
     PRICE_MANIPULATION = "price_manipulation"
+    # P2: Cross-market surveillance patterns
+    CROSS_MARKET_MANIPULATION = "cross_market_manipulation"
+    COORDINATED_TRADING = "coordinated_trading"
+    # P2: Advanced pattern recognition
+    MOMENTUM_IGNITION = "momentum_ignition"
+    PAINTING_THE_TAPE = "painting_the_tape"
 
 
 class AlertSeverity(Enum):
@@ -71,6 +77,10 @@ class SurveillanceAlert:
     orders_involved: list[str] = field(default_factory=list)
     recommended_action: str = ""
     requires_review: bool = True
+    # P2: Alert prioritization
+    priority_score: float = 0.0  # 0-100, higher = more urgent
+    related_alerts: list[str] = field(default_factory=list)
+    symbols_involved: list[str] = field(default_factory=list)  # For cross-market
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for logging."""
@@ -236,6 +246,13 @@ class OrderRecord:
     cancel_timestamp: datetime | None = None
     modify_count: int = 0
 
+    @property
+    def order_lifetime_seconds(self) -> float | None:
+        """Calculate order lifetime in seconds (from submission to cancellation)."""
+        if self.cancel_timestamp is None:
+            return None
+        return (self.cancel_timestamp - self.timestamp).total_seconds()
+
 
 class SurveillanceAgent(BaseAgent):
     """
@@ -269,14 +286,49 @@ class SurveillanceAgent(BaseAgent):
         self._wash_trading_window_seconds = self._surveillance_config.get(
             "wash_trading_window_seconds", 60
         )
+        # Configurable lookback window for wash trading (SURV-P0-1)
+        self._wash_trading_lookback_minutes = self._surveillance_config.get(
+            "wash_trading_lookback_minutes", 60
+        )
+        # Wash trading net position threshold (% of total volume)
+        self._wash_trading_net_position_threshold = self._surveillance_config.get(
+            "wash_trading_net_position_threshold", 0.1
+        )  # Net position < 10% of volume is suspicious
+        # Wash trading minimum volume for detection
+        self._wash_trading_min_volume = self._surveillance_config.get(
+            "wash_trading_min_volume", 100
+        )
+
         self._spoofing_cancel_threshold = self._surveillance_config.get(
             "spoofing_cancel_threshold", 0.8
         )  # 80% cancel rate
+        # Spoofing: rapid cancellation threshold in seconds (SURV-P1-1)
+        self._spoofing_rapid_cancel_seconds = self._surveillance_config.get(
+            "spoofing_rapid_cancel_seconds", 1.0
+        )
+        # Spoofing: minimum repeat pattern count in window
+        self._spoofing_min_pattern_count = self._surveillance_config.get(
+            "spoofing_min_pattern_count", 3
+        )
+        # Spoofing: pattern detection window in minutes
+        self._spoofing_pattern_window_minutes = self._surveillance_config.get(
+            "spoofing_pattern_window_minutes", 5
+        )
+
         self._quote_stuffing_rate_per_second = self._surveillance_config.get(
             "quote_stuffing_rate_per_second", 10
         )
+
         self._layering_level_threshold = self._surveillance_config.get(
             "layering_level_threshold", 3
+        )
+        # Layering: time window for detecting coordinated cancellations (SURV-P1-2)
+        self._layering_cancel_window_seconds = self._surveillance_config.get(
+            "layering_cancel_window_seconds", 2.0
+        )
+        # Layering: minimum orders cancelled together
+        self._layering_min_orders_cancelled = self._surveillance_config.get(
+            "layering_min_orders_cancelled", 3
         )
 
         # Enable/disable specific detections
@@ -331,18 +383,67 @@ class SurveillanceAgent(BaseAgent):
             "cancel_rate": 0.0,
         })
 
+        # Compliance notifier for suspicious activity alerts (#C33)
+        self._compliance_notifier = None
+
+        # P2: Cross-market surveillance
+        self._cross_market_surveillance = self._surveillance_config.get(
+            "cross_market_surveillance", True
+        )
+        self._cross_market_correlation_threshold = self._surveillance_config.get(
+            "cross_market_correlation_threshold", 0.8
+        )
+        self._cross_market_time_window_seconds = self._surveillance_config.get(
+            "cross_market_time_window_seconds", 60
+        )
+        # Symbol correlation map for related instruments
+        self._symbol_correlations: dict[str, list[str]] = self._surveillance_config.get(
+            "symbol_correlations", {}
+        )
+
+        # P2: Pattern recognition improvements
+        self._momentum_ignition_detection = self._surveillance_config.get(
+            "momentum_ignition_detection", True
+        )
+        self._momentum_ignition_threshold = self._surveillance_config.get(
+            "momentum_ignition_threshold", 0.02
+        )  # 2% price move
+        self._painting_tape_detection = self._surveillance_config.get(
+            "painting_tape_detection", True
+        )
+
+        # P2: Alert prioritization
+        self._alert_priority_enabled = self._surveillance_config.get(
+            "alert_priority_enabled", True
+        )
+        self._priority_weights = {
+            "severity": self._surveillance_config.get("priority_weight_severity", 0.4),
+            "volume": self._surveillance_config.get("priority_weight_volume", 0.2),
+            "frequency": self._surveillance_config.get("priority_weight_frequency", 0.2),
+            "recency": self._surveillance_config.get("priority_weight_recency", 0.2),
+        }
+        # Track alert frequency by type for prioritization
+        self._alert_frequency: dict[str, int] = defaultdict(int)
+
         logger.info(
             f"SurveillanceAgent initialized: "
             f"wash={self._wash_trading_detection}, "
             f"spoof={self._spoofing_detection}, "
             f"quote_stuff={self._quote_stuffing_detection}, "
             f"layer={self._layering_detection}, "
-            f"stor_auto={self._stor_auto_generate}"
+            f"stor_auto={self._stor_auto_generate}, "
+            f"cross_market={self._cross_market_surveillance}, "
+            f"priority={self._alert_priority_enabled}"
         )
 
     async def initialize(self) -> None:
         """Initialize the agent."""
         logger.info("SurveillanceAgent initialized")
+
+    def set_compliance_notifier(self, compliance_notifier) -> None:
+        """Set compliance officer notifier (#C33)."""
+        self._compliance_notifier = compliance_notifier
+        logger.info("ComplianceOfficerNotifier connected to SurveillanceAgent")
 
     def get_subscribed_events(self) -> list[EventType]:
         """Subscribe to order and fill events."""
@@ -426,29 +527,124 @@ class SurveillanceAgent(BaseAgent):
         if self._layering_detection:
             await self._detect_layering(symbol)
 
+        # P2: Advanced pattern recognition
+        if self._momentum_ignition_detection:
+            await self._detect_momentum_ignition(symbol)
+
+        if self._painting_tape_detection:
+            await self._detect_painting_the_tape(symbol)
+
+        # P2: Cross-market surveillance
+        if self._cross_market_surveillance:
+            await self._detect_cross_market_manipulation(symbol)
+
     async def _detect_wash_trading(self, symbol: str) -> None:
         """
-        Detect potential wash trading.
+        Detect potential wash trading (SURV-P0-1 - Enhanced).
 
         Wash trading: Simultaneous or near-simultaneous buy and sell
         orders in the same instrument that result in no change in
         beneficial ownership.
+
+        Enhanced detection:
+        - Configurable lookback window
+        - Group by symbol and time window
+        - Check for offsetting trades (buy/sell pairs within window)
+        - Flag if net position change is small but volume is high
         """
         now = datetime.now(timezone.utc)
-        window_start = now - timedelta(seconds=self._wash_trading_window_seconds)
+        # Use configurable lookback window (SURV-P0-1)
+        lookback_start = now - timedelta(minutes=self._wash_trading_lookback_minutes)
 
-        # Get recent orders for this symbol
-        recent_orders = [
+        # Get all filled orders for this symbol within lookback window
+        filled_orders = [
             o for o in self._order_history
-            if o.symbol == symbol and o.timestamp >= window_start
+            if o.symbol == symbol
+            and o.timestamp >= lookback_start
+            and o.status == "filled"
         ]
 
-        if len(recent_orders) < 2:
+        if len(filled_orders) < 2:
             return
 
-        # Look for offsetting trades
-        buys = [o for o in recent_orders if o.side == "buy" and o.status == "filled"]
-        sells = [o for o in recent_orders if o.side == "sell" and o.status == "filled"]
+        # Group by time windows for pattern detection
+        window_size_seconds = self._wash_trading_window_seconds
+        time_windows: dict[int, list[OrderRecord]] = defaultdict(list)
+
+        for order in filled_orders:
+            # Group orders into time buckets
+            seconds_from_start = (order.timestamp - lookback_start).total_seconds()
+            window_index = int(seconds_from_start // window_size_seconds)
+            time_windows[window_index].append(order)
+
+        # Analyze each time window for offsetting patterns
+        for window_idx, orders_in_window in time_windows.items():
+            buys = [o for o in orders_in_window if o.side == "buy"]
+            sells = [o for o in orders_in_window if o.side == "sell"]
+
+            if not buys or not sells:
+                continue
+
+            # Calculate total volume and net position
+            total_buy_volume = sum(o.fill_quantity for o in buys)
+            total_sell_volume = sum(o.fill_quantity for o in sells)
+            total_volume = total_buy_volume + total_sell_volume
+            net_position = abs(total_buy_volume - total_sell_volume)
+
+            # Skip if volume below threshold
+            if total_volume < self._wash_trading_min_volume:
+                continue
+
+            # Check if net position change is small relative to total volume (SURV-P0-1)
+            net_position_ratio = net_position / total_volume if total_volume > 0 else 1.0
+
+            if net_position_ratio <= self._wash_trading_net_position_threshold:
+                # Further validate with price similarity check
+                buy_prices = [o.fill_price for o in buys if o.fill_price]
+                sell_prices = [o.fill_price for o in sells if o.fill_price]
+
+                if buy_prices and sell_prices:
+                    avg_buy_price = sum(buy_prices) / len(buy_prices)
+                    avg_sell_price = sum(sell_prices) / len(sell_prices)
+
+                    if avg_buy_price > 0:
+                        price_diff_pct = abs(avg_buy_price - avg_sell_price) / avg_buy_price
+
+                        # Suspicious if prices are similar (within 2%)
+                        if price_diff_pct < 0.02:
+                            severity = AlertSeverity.HIGH if net_position_ratio < 0.05 else AlertSeverity.MEDIUM
+                            order_ids = [o.order_id for o in orders_in_window]
+
+                            self._generate_alert(
+                                alert_type=SurveillanceAlertType.WASH_TRADING,
+                                severity=severity,
+                                symbol=symbol,
+                                description=(
+                                    f"Potential wash trading detected: "
+                                    f"High volume ({total_volume}) with minimal net position change "
+                                    f"({net_position_ratio:.1%}). Buy vol: {total_buy_volume}, "
+                                    f"Sell vol: {total_sell_volume}, Price diff: {price_diff_pct:.2%}"
+                                ),
+                                evidence={
+                                    "total_volume": total_volume,
+                                    "net_position": net_position,
+                                    "net_position_ratio": net_position_ratio,
+                                    "total_buy_volume": total_buy_volume,
+                                    "total_sell_volume": total_sell_volume,
+                                    "avg_buy_price": avg_buy_price,
+                                    "avg_sell_price": avg_sell_price,
+                                    "price_diff_pct": price_diff_pct,
+                                    "window_index": window_idx,
+                                    "orders_count": len(orders_in_window),
+                                    "lookback_minutes": self._wash_trading_lookback_minutes,
+                                },
+                                orders_involved=order_ids,
+                                recommended_action="Review trades for legitimate business purpose - high volume with offsetting positions",
+                            )
+
+        # Also check for specific pair matches (original logic enhanced)
+        buys = [o for o in filled_orders if o.side == "buy"]
+        sells = [o for o in filled_orders if o.side == "sell"]
 
         for buy in buys:
             for sell in sells:
@@ -492,11 +688,104 @@ class SurveillanceAgent(BaseAgent):
 
     async def _detect_spoofing(self, symbol: str) -> None:
         """
-        Detect potential spoofing.
+        Detect potential spoofing (SURV-P1-1 - Enhanced).
 
         Spoofing: Entering orders with intent to cancel before execution
         to create false impression of demand/supply.
+
+        Enhanced detection:
+        - Track order lifetime (time from submission to cancellation)
+        - Flag orders cancelled < 1 second after placement (configurable)
+        - Flag if pattern repeats > 3 times in 5 minutes (configurable)
         """
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(minutes=self._spoofing_pattern_window_minutes)
+
+        # Get recent orders for this symbol
+        recent = [
+            o for o in self._order_history
+            if o.symbol == symbol and o.timestamp >= window_start
+        ]
+
+        if not recent:
+            return
+
+        # SURV-P1-1: Detect rapid cancellations
+        rapid_cancellations = self._detect_rapid_cancellations(recent, symbol)
+
+        # Original spoofing detection based on cancel rate
+        await self._detect_spoofing_by_cancel_rate(symbol, recent)
+
+    def _detect_rapid_cancellations(self, orders: list[OrderRecord], symbol: str) -> list[SurveillanceAlert]:
+        """
+        Detect spoofing via rapid order cancellations (SURV-P1-1).
+
+        Flags orders cancelled within configurable threshold (default < 1 second)
+        and alerts if pattern repeats more than threshold times in the window.
+        """
+        alerts = []
+
+        # Find all rapidly cancelled orders
+        rapid_cancelled = [
+            o for o in orders
+            if o.status == "cancelled"
+            and o.order_lifetime_seconds is not None
+            and o.order_lifetime_seconds < self._spoofing_rapid_cancel_seconds
+        ]
+
+        if len(rapid_cancelled) >= self._spoofing_min_pattern_count:
+            # Pattern detected: multiple rapid cancellations
+            order_ids = [o.order_id for o in rapid_cancelled]
+            avg_lifetime = sum(o.order_lifetime_seconds or 0 for o in rapid_cancelled) / len(rapid_cancelled)
+
+            # Group by side to detect manipulation direction
+            rapid_buy_cancels = [o for o in rapid_cancelled if o.side == "buy"]
+            rapid_sell_cancels = [o for o in rapid_cancelled if o.side == "sell"]
+
+            # Check for one-sided pattern (stronger indication of manipulation)
+            total_rapid = len(rapid_cancelled)
+            buy_ratio = len(rapid_buy_cancels) / total_rapid if total_rapid > 0 else 0
+            sell_ratio = len(rapid_sell_cancels) / total_rapid if total_rapid > 0 else 0
+
+            # Severity based on pattern strength
+            if total_rapid >= self._spoofing_min_pattern_count * 2:
+                severity = AlertSeverity.CRITICAL
+            elif buy_ratio > 0.8 or sell_ratio > 0.8:
+                # One-sided rapid cancellations are more suspicious
+                severity = AlertSeverity.HIGH
+            else:
+                severity = AlertSeverity.MEDIUM
+
+            total_rapid_volume = sum(o.quantity for o in rapid_cancelled)
+
+            alert = self._generate_alert(
+                alert_type=SurveillanceAlertType.SPOOFING,
+                severity=severity,
+                symbol=symbol,
+                description=(
+                    f"Rapid cancellation pattern detected: {total_rapid} orders cancelled "
+                    f"within {self._spoofing_rapid_cancel_seconds}s (avg lifetime: {avg_lifetime:.3f}s). "
+                    f"Buy cancels: {len(rapid_buy_cancels)}, Sell cancels: {len(rapid_sell_cancels)}"
+                ),
+                evidence={
+                    "rapid_cancellation_count": total_rapid,
+                    "rapid_cancel_threshold_seconds": self._spoofing_rapid_cancel_seconds,
+                    "avg_order_lifetime_seconds": avg_lifetime,
+                    "rapid_buy_cancels": len(rapid_buy_cancels),
+                    "rapid_sell_cancels": len(rapid_sell_cancels),
+                    "total_volume_cancelled": total_rapid_volume,
+                    "detection_window_minutes": self._spoofing_pattern_window_minutes,
+                    "min_pattern_count": self._spoofing_min_pattern_count,
+                },
+                orders_involved=order_ids,
+                recommended_action="Investigate intent behind rapid order cancellations - potential spoofing activity",
+            )
+            alerts.append(alert)
+
+        return alerts
+
+    async def _detect_spoofing_by_cancel_rate(self, symbol: str, recent_orders: list[OrderRecord]) -> None:
+        """Original spoofing detection based on cancel rate patterns."""
         metrics = self._symbol_metrics[symbol]
 
         # Need minimum order count for meaningful analysis
@@ -506,17 +795,8 @@ class SurveillanceAgent(BaseAgent):
         cancel_rate = metrics["cancel_rate"]
 
         if cancel_rate >= self._spoofing_cancel_threshold:
-            # Check for pattern: large cancelled orders followed by executions
-            now = datetime.now(timezone.utc)
-            window_start = now - timedelta(minutes=5)
-
-            recent = [
-                o for o in self._order_history
-                if o.symbol == symbol and o.timestamp >= window_start
-            ]
-
-            cancelled = [o for o in recent if o.status == "cancelled"]
-            filled = [o for o in recent if o.status == "filled"]
+            cancelled = [o for o in recent_orders if o.status == "cancelled"]
+            filled = [o for o in recent_orders if o.status == "filled"]
 
             # Check for pattern: cancelled orders on one side, fills on opposite
             cancelled_buys = sum(o.quantity for o in cancelled if o.side == "buy")
@@ -604,11 +884,16 @@ class SurveillanceAgent(BaseAgent):
 
     async def _detect_layering(self, symbol: str) -> None:
         """
-        Detect potential layering.
+        Detect potential layering (SURV-P1-2 - Enhanced).
 
         Layering: Entering multiple orders at different price levels
         to create artificial depth, then cancelling after execution
         on the opposite side.
+
+        Enhanced detection:
+        - Detect multiple orders at different prices cancelled together
+        - Track coordinated cancellation timing
+        - Identify layering with opposite side execution correlation
         """
         now = datetime.now(timezone.utc)
         window_start = now - timedelta(minutes=1)
@@ -633,7 +918,10 @@ class SurveillanceAgent(BaseAgent):
             else:
                 sell_levels[order.price].append(order)
 
-        # Check for layering pattern
+        # SURV-P1-2: Detect coordinated cancellations at multiple price levels
+        self._detect_coordinated_layering_cancellations(symbol, recent_orders, buy_levels, sell_levels)
+
+        # Original layering detection
         for levels, side in [(buy_levels, "buy"), (sell_levels, "sell")]:
             if len(levels) >= self._layering_level_threshold:
                 # Check if most are cancelled
@@ -661,6 +949,142 @@ class SurveillanceAgent(BaseAgent):
                         recommended_action="Review order pattern for manipulation intent",
                     )
 
+    def _detect_coordinated_layering_cancellations(
+        self,
+        symbol: str,
+        orders: list[OrderRecord],
+        buy_levels: dict[float, list[OrderRecord]],
+        sell_levels: dict[float, list[OrderRecord]]
+    ) -> None:
+        """
+        Detect coordinated cancellations at multiple price levels (SURV-P1-2).
+
+        Identifies patterns where multiple orders at different prices are
+        cancelled within a short time window, indicating potential layering.
+        """
+        # Get all cancelled orders with cancel timestamps
+        cancelled_orders = [
+            o for o in orders
+            if o.status == "cancelled" and o.cancel_timestamp is not None
+        ]
+
+        if len(cancelled_orders) < self._layering_min_orders_cancelled:
+            return
+
+        # Sort by cancel timestamp
+        cancelled_orders.sort(key=lambda o: o.cancel_timestamp)  # type: ignore
+
+        # Find clusters of cancellations within the time window
+        clusters: list[list[OrderRecord]] = []
+        current_cluster: list[OrderRecord] = []
+
+        for order in cancelled_orders:
+            if not current_cluster:
+                current_cluster.append(order)
+            else:
+                # Check if this cancellation is within the window of the cluster start
+                first_cancel = current_cluster[0].cancel_timestamp
+                this_cancel = order.cancel_timestamp
+                if first_cancel and this_cancel:
+                    time_diff = (this_cancel - first_cancel).total_seconds()
+                    if time_diff <= self._layering_cancel_window_seconds:
+                        current_cluster.append(order)
+                    else:
+                        # Start new cluster
+                        if len(current_cluster) >= self._layering_min_orders_cancelled:
+                            clusters.append(current_cluster)
+                        current_cluster = [order]
+
+        # Don't forget the last cluster
+        if len(current_cluster) >= self._layering_min_orders_cancelled:
+            clusters.append(current_cluster)
+
+        # Analyze each cluster for layering pattern
+        for cluster in clusters:
+            # Get unique price levels in this cluster
+            unique_prices = set(o.price for o in cluster if o.price is not None)
+
+            if len(unique_prices) < self._layering_level_threshold:
+                continue  # Not enough price levels for layering
+
+            # Check if cluster is predominantly one-sided
+            buy_orders = [o for o in cluster if o.side == "buy"]
+            sell_orders = [o for o in cluster if o.side == "sell"]
+
+            total_in_cluster = len(cluster)
+            buy_ratio = len(buy_orders) / total_in_cluster if total_in_cluster > 0 else 0
+
+            # Layering is typically one-sided
+            if buy_ratio > 0.7 or buy_ratio < 0.3:
+                dominant_side = "buy" if buy_ratio > 0.7 else "sell"
+                dominant_orders = buy_orders if dominant_side == "buy" else sell_orders
+
+                # Calculate price spread
+                prices = [o.price for o in dominant_orders if o.price is not None]
+                if prices:
+                    price_spread = max(prices) - min(prices)
+                    price_spread_pct = price_spread / min(prices) if min(prices) > 0 else 0
+
+                    # Check for fills on opposite side around the same time
+                    cluster_start = cluster[0].cancel_timestamp
+                    cluster_end = cluster[-1].cancel_timestamp
+                    if cluster_start and cluster_end:
+                        # Look for opposite side fills within extended window
+                        opposite_side = "sell" if dominant_side == "buy" else "buy"
+                        extended_start = cluster_start - timedelta(seconds=5)
+                        extended_end = cluster_end + timedelta(seconds=5)
+
+                        opposite_fills = [
+                            o for o in orders
+                            if o.side == opposite_side
+                            and o.status == "filled"
+                            and o.timestamp >= extended_start
+                            and o.timestamp <= extended_end
+                        ]
+
+                        # Severity based on pattern strength
+                        if opposite_fills and len(unique_prices) >= self._layering_level_threshold * 2:
+                            severity = AlertSeverity.CRITICAL
+                        elif opposite_fills:
+                            severity = AlertSeverity.HIGH
+                        else:
+                            severity = AlertSeverity.MEDIUM
+
+                        total_cancelled_volume = sum(o.quantity for o in dominant_orders)
+                        opposite_fill_volume = sum(o.fill_quantity for o in opposite_fills)
+
+                        order_ids = [o.order_id for o in cluster]
+
+                        self._generate_alert(
+                            alert_type=SurveillanceAlertType.LAYERING,
+                            severity=severity,
+                            symbol=symbol,
+                            description=(
+                                f"Coordinated layering cancellation detected: {len(cluster)} {dominant_side} orders "
+                                f"at {len(unique_prices)} price levels cancelled within "
+                                f"{self._layering_cancel_window_seconds}s. "
+                                f"Opposite side fills: {len(opposite_fills)} ({opposite_fill_volume} qty)"
+                            ),
+                            evidence={
+                                "coordinated_cancellation": True,
+                                "dominant_side": dominant_side,
+                                "orders_cancelled": len(cluster),
+                                "price_levels": len(unique_prices),
+                                "price_spread": price_spread,
+                                "price_spread_pct": price_spread_pct,
+                                "cancel_window_seconds": self._layering_cancel_window_seconds,
+                                "total_cancelled_volume": total_cancelled_volume,
+                                "opposite_side_fills": len(opposite_fills),
+                                "opposite_fill_volume": opposite_fill_volume,
+                                "prices": sorted(prices),
+                            },
+                            orders_involved=order_ids,
+                            recommended_action=(
+                                "Investigate coordinated order cancellation pattern - "
+                                "potential layering manipulation with opposite side execution"
+                            ),
+                        )
+
     def _generate_alert(
         self,
         alert_type: SurveillanceAlertType,
@@ -669,11 +1093,23 @@ class SurveillanceAgent(BaseAgent):
         description: str,
         evidence: dict[str, Any],
         orders_involved: list[str] | None = None,
-        recommended_action: str = ""
+        recommended_action: str = "",
+        symbols_involved: list[str] | None = None,
     ) -> SurveillanceAlert:
         """Generate and store a surveillance alert."""
         self._alert_counter += 1
         alert_id = f"SURV-{self._alert_counter:06d}"
+
+        # P2: Calculate priority score
+        priority_score = self._calculate_priority_score(
+            alert_type=alert_type,
+            severity=severity,
+            symbol=symbol,
+            evidence=evidence,
+        )
+
+        # P2: Find related alerts
+        related_alerts = self._find_related_alerts(symbol, alert_type)
 
         alert = SurveillanceAlert(
             alert_id=alert_id,
@@ -686,9 +1122,15 @@ class SurveillanceAgent(BaseAgent):
             orders_involved=orders_involved or [],
             recommended_action=recommended_action,
             requires_review=severity in [AlertSeverity.MEDIUM, AlertSeverity.HIGH, AlertSeverity.CRITICAL],
+            priority_score=priority_score,
+            related_alerts=related_alerts,
+            symbols_involved=symbols_involved or [symbol],
         )
 
         self._alerts.append(alert)
+
+        # P2: Update alert frequency tracking
+        self._alert_frequency[f"{symbol}:{alert_type.value}"] += 1
 
         # Log the alert
         self._audit_logger.log_agent_event(
@@ -697,13 +1139,470 @@ class SurveillanceAgent(BaseAgent):
             details=alert.to_dict(),
         )
 
-        logger.warning(f"Surveillance alert: [{severity.value}] {alert_type.value} - {description}")
+        logger.warning(
+            f"Surveillance alert: [{severity.value}] {alert_type.value} - {description} "
+            f"(priority={priority_score:.1f})"
+        )
 
         # Auto-generate STOR for HIGH/CRITICAL alerts (#C2)
         if self._stor_auto_generate and self._should_generate_stor(severity):
             self._create_stor_from_alert(alert)
 
         return alert
+
+    # =========================================================================
+    # P2: ALERT PRIORITIZATION
+    # =========================================================================
+
+    def _calculate_priority_score(
+        self,
+        alert_type: SurveillanceAlertType,
+        severity: AlertSeverity,
+        symbol: str,
+        evidence: dict[str, Any],
+    ) -> float:
+        """
+        Calculate priority score for alert ordering (P2).
+
+        Score is 0-100, with higher scores being more urgent.
+
+        Factors:
+        1. Severity (40%): CRITICAL=100, HIGH=75, MEDIUM=50, LOW=25, INFO=10
+        2. Volume involved (20%): Higher volume = higher priority
+        3. Frequency (20%): Repeated patterns are more concerning
+        4. Recency (20%): Recent similar alerts boost priority
+        """
+        if not self._alert_priority_enabled:
+            return 50.0  # Default middle priority
+
+        # Factor 1: Severity score (0-100)
+        severity_scores = {
+            AlertSeverity.CRITICAL: 100,
+            AlertSeverity.HIGH: 75,
+            AlertSeverity.MEDIUM: 50,
+            AlertSeverity.LOW: 25,
+            AlertSeverity.INFO: 10,
+        }
+        severity_score = severity_scores.get(severity, 50)
+
+        # Factor 2: Volume score (0-100)
+        total_volume = evidence.get("total_volume", 0)
+        if total_volume == 0:
+            total_volume = evidence.get("total_cancelled_volume", 0)
+        if total_volume == 0:
+            total_volume = sum(
+                self._orders[oid].quantity
+                for oid in evidence.get("orders_involved", [])
+                if oid in self._orders
+            )
+
+        # Scale volume: 1000 shares = 50, 10000 = 100
+        volume_score = min(100, 50 + (total_volume / 200))
+
+        # Factor 3: Frequency score (0-100)
+        freq_key = f"{symbol}:{alert_type.value}"
+        frequency = self._alert_frequency.get(freq_key, 0)
+        # 5+ occurrences = max score
+        frequency_score = min(100, frequency * 20)
+
+        # Factor 4: Recency score (0-100)
+        # Check for similar alerts in last hour
+        recent_similar = len([
+            a for a in self._alerts[-100:]
+            if a.symbol == symbol
+            and a.alert_type == alert_type
+            and (datetime.now(timezone.utc) - a.timestamp).total_seconds() < 3600
+        ])
+        recency_score = min(100, recent_similar * 25)
+
+        # Weighted combination
+        priority_score = (
+            severity_score * self._priority_weights["severity"] +
+            volume_score * self._priority_weights["volume"] +
+            frequency_score * self._priority_weights["frequency"] +
+            recency_score * self._priority_weights["recency"]
+        )
+
+        return round(priority_score, 1)
+
+    def _find_related_alerts(
+        self,
+        symbol: str,
+        alert_type: SurveillanceAlertType,
+    ) -> list[str]:
+        """
+        Find related alerts for correlation analysis (P2).
+
+        Returns alert IDs of potentially related alerts.
+        """
+        related = []
+
+        # Look for alerts in last 24 hours
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+
+        for alert in self._alerts[-200:]:
+            if alert.timestamp < cutoff:
+                continue
+
+            # Same symbol and type
+            if alert.symbol == symbol and alert.alert_type == alert_type:
+                related.append(alert.alert_id)
+
+            # Same symbol, different type (might be related manipulation)
+            elif alert.symbol == symbol:
+                related.append(alert.alert_id)
+
+            # Related symbol (cross-market)
+            elif symbol in self._symbol_correlations:
+                if alert.symbol in self._symbol_correlations[symbol]:
+                    related.append(alert.alert_id)
+
+        return related[-10:]  # Limit to 10 most recent
+
+    def get_prioritized_alerts(
+        self,
+        hours: int = 24,
+        limit: int = 20,
+    ) -> list[SurveillanceAlert]:
+        """
+        Get alerts sorted by priority score (P2).
+
+        Args:
+            hours: Lookback period
+            limit: Maximum number of alerts to return
+
+        Returns:
+            List of alerts sorted by priority (highest first)
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+        recent_alerts = [a for a in self._alerts if a.timestamp >= cutoff]
+        recent_alerts.sort(key=lambda a: a.priority_score, reverse=True)
+
+        return recent_alerts[:limit]
+
+    # =========================================================================
+    # P2: CROSS-MARKET SURVEILLANCE
+    # =========================================================================
+
+    async def _detect_cross_market_manipulation(self, symbol: str) -> None:
+        """
+        Detect potential cross-market manipulation (P2).
+
+        Monitors for coordinated activity across related instruments:
+        - Stock and its options
+        - Stock and related ETFs
+        - Correlated pairs
+
+        MAR Article 12(1)(c) prohibits manipulation across related instruments.
+        """
+        if symbol not in self._symbol_correlations:
+            return
+
+        related_symbols = self._symbol_correlations[symbol]
+        if not related_symbols:
+            return
+
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(seconds=self._cross_market_time_window_seconds)
+
+        # Get orders for this symbol and related symbols
+        primary_orders = [
+            o for o in self._order_history
+            if o.symbol == symbol and o.timestamp >= window_start
+        ]
+
+        related_orders = [
+            o for o in self._order_history
+            if o.symbol in related_symbols and o.timestamp >= window_start
+        ]
+
+        if len(primary_orders) < 3 or len(related_orders) < 3:
+            return
+
+        # Check for coordinated cancellation pattern
+        primary_cancels = [o for o in primary_orders if o.status == "cancelled"]
+        related_cancels = [o for o in related_orders if o.status == "cancelled"]
+
+        if len(primary_cancels) >= 3 and len(related_cancels) >= 3:
+            # Check if cancellations are synchronized (within 5 seconds)
+            synchronized_pairs = 0
+            for pc in primary_cancels:
+                if pc.cancel_timestamp is None:
+                    continue
+                for rc in related_cancels:
+                    if rc.cancel_timestamp is None:
+                        continue
+                    time_diff = abs((pc.cancel_timestamp - rc.cancel_timestamp).total_seconds())
+                    if time_diff < 5:
+                        synchronized_pairs += 1
+                        break
+
+            if synchronized_pairs >= 3:
+                all_symbols = [symbol] + related_symbols
+                order_ids = [o.order_id for o in primary_cancels + related_cancels]
+
+                self._generate_alert(
+                    alert_type=SurveillanceAlertType.CROSS_MARKET_MANIPULATION,
+                    severity=AlertSeverity.HIGH,
+                    symbol=symbol,
+                    description=(
+                        f"Coordinated cancellation pattern detected across related instruments: "
+                        f"{symbol} and {related_symbols}. {synchronized_pairs} synchronized "
+                        f"cancellation pairs within {self._cross_market_time_window_seconds}s"
+                    ),
+                    evidence={
+                        "primary_symbol": symbol,
+                        "related_symbols": related_symbols,
+                        "primary_cancels": len(primary_cancels),
+                        "related_cancels": len(related_cancels),
+                        "synchronized_pairs": synchronized_pairs,
+                        "time_window_seconds": self._cross_market_time_window_seconds,
+                    },
+                    orders_involved=order_ids,
+                    recommended_action="Review cross-market activity for MAR Article 12(1)(c) violation",
+                    symbols_involved=all_symbols,
+                )
+
+        # Check for coordinated directional trading
+        primary_buys = sum(1 for o in primary_orders if o.side == "buy" and o.status == "filled")
+        primary_sells = sum(1 for o in primary_orders if o.side == "sell" and o.status == "filled")
+        related_buys = sum(1 for o in related_orders if o.side == "buy" and o.status == "filled")
+        related_sells = sum(1 for o in related_orders if o.side == "sell" and o.status == "filled")
+
+        # Detect coordinated one-sided trading
+        if (primary_buys > primary_sells * 2 and related_buys > related_sells * 2):
+            if primary_buys >= 5 and related_buys >= 5:
+                self._generate_alert(
+                    alert_type=SurveillanceAlertType.COORDINATED_TRADING,
+                    severity=AlertSeverity.MEDIUM,
+                    symbol=symbol,
+                    description=(
+                        f"Coordinated buying detected across {symbol} and related instruments: "
+                        f"Primary buys={primary_buys}, Related buys={related_buys}"
+                    ),
+                    evidence={
+                        "primary_symbol": symbol,
+                        "related_symbols": related_symbols,
+                        "primary_buys": primary_buys,
+                        "primary_sells": primary_sells,
+                        "related_buys": related_buys,
+                        "related_sells": related_sells,
+                    },
+                    recommended_action="Review for potential coordinated manipulation",
+                    symbols_involved=[symbol] + related_symbols,
+                )
+
+    def set_symbol_correlations(self, correlations: dict[str, list[str]]) -> None:
+        """
+        Set symbol correlation map for cross-market surveillance (P2).
+
+        Args:
+            correlations: Dict mapping symbol to list of related symbols
+        """
+        self._symbol_correlations = correlations
+        logger.info(f"SurveillanceAgent: Updated symbol correlations for {len(correlations)} symbols")
+
+    # =========================================================================
+    # P2: ADVANCED PATTERN RECOGNITION
+    # =========================================================================
+
+    async def _detect_momentum_ignition(self, symbol: str) -> None:
+        """
+        Detect potential momentum ignition (P2).
+
+        Momentum ignition: A strategy that involves entering orders or trades
+        with the intent of starting or exacerbating a trend, and then trading
+        out at a profit.
+
+        MAR Article 12(2)(a)(i) - manipulative orders to start a trend.
+
+        Detection:
+        1. Rapid price movement (>2%) following aggressive orders
+        2. Followed by reversal trades from same account
+        """
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(minutes=5)
+
+        recent_orders = [
+            o for o in self._order_history
+            if o.symbol == symbol and o.timestamp >= window_start
+        ]
+
+        if len(recent_orders) < 10:
+            return
+
+        # Group by minute to detect rapid activity
+        filled_orders = [o for o in recent_orders if o.status == "filled" and o.fill_price]
+        if len(filled_orders) < 5:
+            return
+
+        # Check for price movement pattern
+        filled_orders.sort(key=lambda o: o.timestamp)
+
+        # Get early and late prices
+        early_prices = [o.fill_price for o in filled_orders[:3] if o.fill_price]
+        late_prices = [o.fill_price for o in filled_orders[-3:] if o.fill_price]
+
+        if not early_prices or not late_prices:
+            return
+
+        avg_early = sum(early_prices) / len(early_prices)
+        avg_late = sum(late_prices) / len(late_prices)
+
+        if avg_early <= 0:
+            return
+
+        price_change_pct = (avg_late - avg_early) / avg_early
+
+        # Check for significant price movement
+        if abs(price_change_pct) >= self._momentum_ignition_threshold:
+            # Check for reversal - early orders one direction, late orders opposite
+            early_buys = sum(1 for o in filled_orders[:5] if o.side == "buy")
+            early_sells = sum(1 for o in filled_orders[:5] if o.side == "sell")
+            late_buys = sum(1 for o in filled_orders[-5:] if o.side == "buy")
+            late_sells = sum(1 for o in filled_orders[-5:] if o.side == "sell")
+
+            # Pattern: heavy buying then heavy selling (or vice versa)
+            if (early_buys > early_sells * 2 and late_sells > late_buys * 2):
+                self._generate_alert(
+                    alert_type=SurveillanceAlertType.MOMENTUM_IGNITION,
+                    severity=AlertSeverity.HIGH,
+                    symbol=symbol,
+                    description=(
+                        f"Potential momentum ignition: {symbol} moved {price_change_pct:.2%} "
+                        f"with early aggressive buying ({early_buys} buys) followed by "
+                        f"selling reversal ({late_sells} sells)"
+                    ),
+                    evidence={
+                        "price_change_pct": price_change_pct,
+                        "early_avg_price": avg_early,
+                        "late_avg_price": avg_late,
+                        "early_buys": early_buys,
+                        "early_sells": early_sells,
+                        "late_buys": late_buys,
+                        "late_sells": late_sells,
+                        "total_orders": len(filled_orders),
+                    },
+                    orders_involved=[o.order_id for o in filled_orders],
+                    recommended_action="Investigate for momentum ignition - MAR Article 12(2)(a)(i)",
+                )
+            elif (early_sells > early_buys * 2 and late_buys > late_sells * 2):
+                self._generate_alert(
+                    alert_type=SurveillanceAlertType.MOMENTUM_IGNITION,
+                    severity=AlertSeverity.HIGH,
+                    symbol=symbol,
+                    description=(
+                        f"Potential momentum ignition: {symbol} moved {price_change_pct:.2%} "
+                        f"with early aggressive selling ({early_sells} sells) followed by "
+                        f"buying reversal ({late_buys} buys)"
+                    ),
+                    evidence={
+                        "price_change_pct": price_change_pct,
+                        "early_avg_price": avg_early,
+                        "late_avg_price": avg_late,
+                        "early_buys": early_buys,
+                        "early_sells": early_sells,
+                        "late_buys": late_buys,
+                        "late_sells": late_sells,
+                        "total_orders": len(filled_orders),
+                    },
+                    orders_involved=[o.order_id for o in filled_orders],
+                    recommended_action="Investigate for momentum ignition - MAR Article 12(2)(a)(i)",
+                )
+
+    async def _detect_painting_the_tape(self, symbol: str) -> None:
+        """
+        Detect potential painting the tape (P2).
+
+        Painting the tape: A series of transactions designed to create
+        the appearance of active trading or to move the price, typically
+        involving small trades at increasing/decreasing prices.
+
+        MAR Article 12(1)(a)(i) - fictitious devices or deception.
+
+        Detection:
+        1. Many small trades in rapid succession
+        2. Consistent price direction (stair-stepping)
+        3. Similar trade sizes
+        """
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(minutes=10)
+
+        filled_orders = [
+            o for o in self._order_history
+            if o.symbol == symbol
+            and o.timestamp >= window_start
+            and o.status == "filled"
+            and o.fill_price
+        ]
+
+        if len(filled_orders) < 10:
+            return
+
+        # Sort by timestamp
+        filled_orders.sort(key=lambda o: o.timestamp)
+
+        # Check for stair-stepping pattern
+        prices = [o.fill_price for o in filled_orders if o.fill_price]
+        quantities = [o.fill_quantity for o in filled_orders]
+
+        if len(prices) < 10:
+            return
+
+        # Count consecutive price increases/decreases
+        increases = 0
+        decreases = 0
+        for i in range(1, len(prices)):
+            if prices[i] > prices[i - 1]:
+                increases += 1
+            elif prices[i] < prices[i - 1]:
+                decreases += 1
+
+        total_moves = increases + decreases
+        if total_moves == 0:
+            return
+
+        # Pattern: >70% moves in one direction
+        direction_ratio = max(increases, decreases) / total_moves
+
+        # Check for similar trade sizes (coefficient of variation < 0.5)
+        avg_qty = sum(quantities) / len(quantities)
+        if avg_qty <= 0:
+            return
+        qty_std = (sum((q - avg_qty) ** 2 for q in quantities) / len(quantities)) ** 0.5
+        cv = qty_std / avg_qty
+
+        # Suspicious if direction is consistent AND trade sizes are similar AND trades are small
+        max_qty = max(quantities)
+        if direction_ratio > 0.7 and cv < 0.5 and max_qty < 500:
+            direction = "up" if increases > decreases else "down"
+            price_change = (prices[-1] - prices[0]) / prices[0] if prices[0] > 0 else 0
+
+            self._generate_alert(
+                alert_type=SurveillanceAlertType.PAINTING_THE_TAPE,
+                severity=AlertSeverity.MEDIUM,
+                symbol=symbol,
+                description=(
+                    f"Potential painting the tape: {len(filled_orders)} small trades "
+                    f"({avg_qty:.0f} avg size) moving price {direction} "
+                    f"({price_change:.2%} total move, {direction_ratio:.0%} directional)"
+                ),
+                evidence={
+                    "trade_count": len(filled_orders),
+                    "avg_quantity": avg_qty,
+                    "quantity_cv": cv,
+                    "direction": direction,
+                    "direction_ratio": direction_ratio,
+                    "price_increases": increases,
+                    "price_decreases": decreases,
+                    "total_price_change_pct": price_change,
+                    "start_price": prices[0],
+                    "end_price": prices[-1],
+                },
+                orders_involved=[o.order_id for o in filled_orders],
+                recommended_action="Review for painting the tape - MAR Article 12(1)(a)(i)",
+            )
 
     def _should_generate_stor(self, severity: AlertSeverity) -> bool:
         """Check if severity meets threshold for STOR generation."""
@@ -835,7 +1734,7 @@ class SurveillanceAgent(BaseAgent):
         stor.submitted_timestamp = datetime.now(timezone.utc)
 
         # Generate mock NCA reference
-        stor.nca_reference = f"AMF-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        stor.nca_reference = f"AMF-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
 
         # Log submission
         self._audit_logger.log_agent_event(
@@ -853,20 +1752,67 @@ class SurveillanceAgent(BaseAgent):
         return True
 
     def _validate_stor(self, stor: STORReport) -> list[str]:
-        """Validate STOR before submission."""
+        """
+        Validate STOR before submission per MAR Article 16 requirements.
+
+        MAR Article 16 required fields:
+        1. Reporting entity identification (LEI, name, country)
+        2. Contact person details
+        3. Instrument identification (ISIN or name + venue)
+        4. Description and type of suspicious activity
+        5. Dates of suspicious activity
+        6. Evidence and supporting documentation
+        """
         errors = []
 
+        # 1. Reporting entity identification (mandatory)
         if not stor.reporting_entity_lei:
-            errors.append("Missing reporting entity LEI")
+            errors.append("MAR Art.16(1): Missing reporting entity LEI")
+        elif len(stor.reporting_entity_lei) != 20:
+            errors.append("MAR Art.16(1): Invalid LEI format (must be 20 characters)")
 
+        if not stor.reporting_entity_name:
+            errors.append("MAR Art.16(1): Missing reporting entity name")
+
+        if not stor.reporting_entity_country:
+            errors.append("MAR Art.16(1): Missing reporting entity country")
+
+        # 2. Contact person details (mandatory for follow-up)
+        if not stor.contact_person_name:
+            errors.append("MAR Art.16(2): Missing contact person name")
+
+        if not stor.contact_person_email and not stor.contact_person_phone:
+            errors.append("MAR Art.16(2): Missing contact details (email or phone required)")
+
+        # 3. Instrument identification (mandatory)
         if not stor.instrument_isin and not stor.instrument_name:
-            errors.append("Missing instrument identification")
+            errors.append("MAR Art.16(3): Missing instrument identification (ISIN or name required)")
 
+        if not stor.trading_venue_mic:
+            errors.append("MAR Art.16(3): Missing trading venue MIC code")
+
+        # 4. Description and type of suspicious activity (mandatory)
         if not stor.description_of_suspicion:
-            errors.append("Missing description of suspicion")
+            errors.append("MAR Art.16(4): Missing description of suspicion")
+        elif len(stor.description_of_suspicion) < 50:
+            errors.append("MAR Art.16(4): Description of suspicion too brief (minimum 50 characters)")
 
         if not stor.type_of_suspicious_activity:
-            errors.append("Missing type of suspicious activity")
+            errors.append("MAR Art.16(4): Missing type of suspicious activity")
+
+        # 5. Dates of suspicious activity (mandatory)
+        if not stor.start_date:
+            errors.append("MAR Art.16(5): Missing start date of suspicious activity")
+
+        if stor.start_date and stor.end_date and stor.end_date < stor.start_date:
+            errors.append("MAR Art.16(5): End date cannot be before start date")
+
+        # 6. Evidence (mandatory)
+        if not stor.orders_involved and not stor.transactions_involved:
+            errors.append("MAR Art.16(6): No orders or transactions referenced")
+
+        if not stor.evidence_summary:
+            errors.append("MAR Art.16(6): Missing evidence summary")
 
         return errors
 
@@ -952,6 +1898,9 @@ class SurveillanceAgent(BaseAgent):
         # STOR summary (#C2)
         stor_summary = self.get_stor_summary()
 
+        # P2: Get top priority alerts
+        top_priority = self.get_prioritized_alerts(hours=24, limit=5)
+
         base_status.update({
             "orders_tracked": len(self._orders),
             "fills_tracked": len(self._fills),
@@ -966,6 +1915,10 @@ class SurveillanceAgent(BaseAgent):
                 "spoofing": self._spoofing_detection,
                 "quote_stuffing": self._quote_stuffing_detection,
                 "layering": self._layering_detection,
+                # P2: New detections
+                "momentum_ignition": self._momentum_ignition_detection,
+                "painting_tape": self._painting_tape_detection,
+                "cross_market": self._cross_market_surveillance,
             },
             # STOR metrics (#C2 - MAR Article 16)
             "stor": {
@@ -973,6 +1926,26 @@ class SurveillanceAgent(BaseAgent):
                 "pending_submission": stor_summary["pending_submission"],
                 "submitted_today": stor_summary["submitted_today"],
                 "by_status": stor_summary["by_status"],
+            },
+            # P2: Alert prioritization
+            "alert_prioritization": {
+                "enabled": self._alert_priority_enabled,
+                "top_priority_alerts": [
+                    {
+                        "alert_id": a.alert_id,
+                        "type": a.alert_type.value,
+                        "severity": a.severity.value,
+                        "symbol": a.symbol,
+                        "priority_score": a.priority_score,
+                    }
+                    for a in top_priority
+                ],
+            },
+            # P2: Cross-market surveillance
+            "cross_market": {
+                "enabled": self._cross_market_surveillance,
+                "symbols_monitored": len(self._symbol_correlations),
+                "correlation_threshold": self._cross_market_correlation_threshold,
             },
         })
 

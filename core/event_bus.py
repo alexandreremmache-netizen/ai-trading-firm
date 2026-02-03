@@ -11,13 +11,16 @@ Features:
 - Metrics tracking for monitoring
 - Priority support for critical events
 - Event persistence for crash recovery (#S4)
+- Health check with automatic recovery (#SOLID refactoring)
 """
 
 from __future__ import annotations
 
 import asyncio
+import gzip
+import json
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from enum import Enum
@@ -30,6 +33,54 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Health Check Configuration and Status
+# ============================================================================
+
+class EventBusHealthStatus(Enum):
+    """Health status levels for EventBus."""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+    RECOVERING = "recovering"
+
+
+@dataclass
+class HealthCheckConfig:
+    """Configuration for EventBus health checks."""
+    enabled: bool = True
+    check_interval_seconds: float = 10.0
+    max_processing_latency_ms: float = 1000.0  # Max acceptable latency
+    max_queue_stall_seconds: float = 30.0  # Max time without processing
+    max_consecutive_errors: int = 5
+    recovery_attempts: int = 3
+    recovery_delay_seconds: float = 1.0
+
+
+@dataclass
+class HealthCheckResult:
+    """Result of a health check."""
+    status: EventBusHealthStatus
+    timestamp: datetime
+    latency_ms: float
+    queue_size: int
+    last_event_processed: datetime | None
+    consecutive_errors: int
+    message: str = ""
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "status": self.status.value,
+            "timestamp": self.timestamp.isoformat(),
+            "latency_ms": round(self.latency_ms, 2),
+            "queue_size": self.queue_size,
+            "last_event_processed": self.last_event_processed.isoformat() if self.last_event_processed else None,
+            "consecutive_errors": self.consecutive_errors,
+            "message": self.message,
+        }
 
 
 class BackpressureLevel(Enum):
@@ -80,6 +131,93 @@ class BackpressureMetrics:
             "processing_latency_ms": round(self.processing_latency_ms, 2),
             "rate_limited_count": self.rate_limited_count,
         }
+
+
+# ============================================================================
+# P2: Dead Letter Queue for Failed Events
+# ============================================================================
+
+@dataclass
+class DeadLetterEntry:
+    """Entry in the dead letter queue for failed events."""
+    event: Event
+    failure_time: datetime
+    failure_reason: str
+    retry_count: int = 0
+    max_retries: int = 3
+    last_retry_time: datetime | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "event_id": self.event.event_id,
+            "event_type": self.event.event_type.value,
+            "failure_time": self.failure_time.isoformat(),
+            "failure_reason": self.failure_reason,
+            "retry_count": self.retry_count,
+            "max_retries": self.max_retries,
+            "last_retry_time": self.last_retry_time.isoformat() if self.last_retry_time else None,
+        }
+
+
+@dataclass
+class DeadLetterQueueConfig:
+    """Configuration for dead letter queue."""
+    max_size: int = 1000  # Maximum entries to keep
+    max_retries: int = 3  # Max retry attempts before permanent failure
+    retry_delay_seconds: float = 60.0  # Delay between retries
+    cleanup_after_hours: int = 24  # Remove entries older than this
+
+
+# ============================================================================
+# P2: Event Compression for Large Payloads
+# ============================================================================
+
+@dataclass
+class CompressionConfig:
+    """Configuration for event payload compression."""
+    enabled: bool = True
+    min_size_bytes: int = 1024  # Only compress payloads larger than this
+    compression_level: int = 6  # gzip compression level (1-9)
+
+
+@dataclass
+class CompressionStats:
+    """Statistics for event compression."""
+    events_compressed: int = 0
+    events_uncompressed: int = 0
+    bytes_before_compression: int = 0
+    bytes_after_compression: int = 0
+
+    @property
+    def compression_ratio(self) -> float:
+        """Calculate compression ratio."""
+        if self.bytes_before_compression == 0:
+            return 0.0
+        return 1 - (self.bytes_after_compression / self.bytes_before_compression)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "events_compressed": self.events_compressed,
+            "events_uncompressed": self.events_uncompressed,
+            "bytes_before_compression": self.bytes_before_compression,
+            "bytes_after_compression": self.bytes_after_compression,
+            "compression_ratio": round(self.compression_ratio, 3),
+            "bytes_saved": self.bytes_before_compression - self.bytes_after_compression,
+        }
+
+
+# ============================================================================
+# P2: Event Replay Configuration
+# ============================================================================
+
+@dataclass
+class ReplayConfig:
+    """Configuration for event replay capability."""
+    enabled: bool = True
+    max_replay_events: int = 10000  # Maximum events to keep for replay
+    replay_speed_multiplier: float = 1.0  # 1.0 = real-time, 2.0 = double speed
 
 
 # High-priority event types that should never be dropped
@@ -209,6 +347,10 @@ class EventBus:
         backpressure_config: BackpressureConfig | None = None,
         enable_persistence: bool = False,
         persistence_config: "PersistenceConfig | None" = None,
+        health_check_config: HealthCheckConfig | None = None,
+        dead_letter_config: DeadLetterQueueConfig | None = None,
+        compression_config: CompressionConfig | None = None,
+        replay_config: ReplayConfig | None = None,
     ):
         self._backpressure = backpressure_config or BackpressureConfig(max_queue_size=max_queue_size)
         self._subscribers: dict[EventType, list[Callable[[Event], Coroutine[Any, Any, None]]]] = defaultdict(list)
@@ -218,12 +360,12 @@ class EventBus:
         self._running = False
         self._current_barrier: SignalBarrier | None = None
         self._signal_agents: set[str] = set()
-        # Event history for audit trail - grows until _max_history limit is reached,
-        # then oldest events are discarded to maintain bounded memory usage.
+        # Event history for audit trail - uses deque with maxlen for O(1) append
+        # and automatic eviction of oldest events when limit is reached.
         # Memory usage is approximately: max_history * avg_event_size (typically ~1KB each)
         # At 10000 events, this is roughly 10MB of memory for the history buffer.
-        self._event_history: list[Event] = []
         self._max_history = 10000
+        self._event_history: deque[Event] = deque(maxlen=self._max_history)
         self._lock = asyncio.Lock()
 
         # Backpressure state
@@ -265,6 +407,32 @@ class EventBus:
         self._handler_last_call: dict[int, datetime] = {}  # handler_id -> last call time
         self._handler_cleanup_interval = 300.0  # 5 minutes
         self._last_handler_cleanup = datetime.now(timezone.utc)
+
+        # Health check state (#SOLID refactoring - addresses SPOF)
+        self._health_config = health_check_config or HealthCheckConfig()
+        self._health_status = EventBusHealthStatus.HEALTHY
+        self._last_event_processed: datetime | None = None
+        self._consecutive_errors = 0
+        self._health_check_task: asyncio.Task | None = None
+        self._recovery_in_progress = False
+        self._health_callbacks: list[Callable[[HealthCheckResult], None]] = []
+
+        # P2: Dead letter queue for failed events
+        self._dlq_config = dead_letter_config or DeadLetterQueueConfig()
+        self._dead_letter_queue: deque[DeadLetterEntry] = deque(maxlen=self._dlq_config.max_size)
+        self._dlq_callbacks: list[Callable[[DeadLetterEntry], None]] = []
+
+        # P2: Event compression for large payloads
+        self._compression_config = compression_config or CompressionConfig()
+        self._compression_stats = CompressionStats()
+
+        # P2: Event replay capability for debugging
+        self._replay_config = replay_config or ReplayConfig()
+        self._replay_buffer: deque[tuple[datetime, Event]] = deque(
+            maxlen=self._replay_config.max_replay_events
+        )
+        self._replay_in_progress = False
+        self._replay_task: asyncio.Task | None = None
 
     def register_signal_agent(self, agent_name: str) -> None:
         """Register an agent as a signal producer."""
@@ -429,13 +597,15 @@ class EventBus:
         """
         # Check for duplicates (#S7)
         if self._is_duplicate(event.event_id):
-            self._dedup_stats["duplicates_blocked"] += 1
+            async with self._lock:
+                self._dedup_stats["duplicates_blocked"] += 1
             logger.debug(f"Duplicate event blocked: {event.event_id} ({event.event_type.value})")
             return False
 
-        # Update metrics
-        self._metrics.total_events_published += 1
-        self._metrics.current_queue_size = self._queue.qsize()
+        # Update metrics (protected by lock to prevent race conditions - CONC-002)
+        async with self._lock:
+            self._metrics.total_events_published += 1
+            self._metrics.current_queue_size = self._queue.qsize()
 
         # Check if this is a high-priority event
         is_high_priority = priority or event.event_type in HIGH_PRIORITY_EVENT_TYPES
@@ -505,26 +675,28 @@ class EventBus:
         else:  # NORMAL
             self._queue.put_nowait(event)
 
-        # Track max queue size
-        if self._queue.qsize() > self._metrics.max_queue_size_reached:
-            self._metrics.max_queue_size_reached = self._queue.qsize()
-
-        # Track event history for audit
-        # Note: History grows unbounded until _max_history limit, then truncates.
-        # This is intentional to maintain audit trail while bounding memory usage.
-        # The truncation creates a new list reference to allow GC of old events.
+        # Track event history for audit and update max queue size (protected by lock)
+        # deque with maxlen handles automatic eviction - O(1) append
         async with self._lock:
+            # Track max queue size (atomic check-and-set to prevent race condition - CONC-002)
+            current_size = self._queue.qsize()
+            if current_size > self._metrics.max_queue_size_reached:
+                self._metrics.max_queue_size_reached = current_size
             self._event_history.append(event)
-            if len(self._event_history) > self._max_history:
-                self._event_history = self._event_history[-self._max_history:]
+
+        # P2: Record for replay capability
+        self._record_for_replay(event)
 
         # Persist event for crash recovery (#S4)
         if self._persistence:
             try:
                 await self._persistence.persist_event_async(event, priority=is_high_priority)
+            except (IOError, OSError) as e:
+                # Storage I/O errors - log with context but don't block
+                logger.warning(f"Event persistence I/O error for {event.event_type}: {e}")
             except Exception as e:
-                # Log error but don't block event publishing
-                logger.error(f"Event persistence failed for {event.event_type}: {e}")
+                # Log error with full traceback but don't block event publishing
+                logger.exception(f"Event persistence failed unexpectedly for {event.event_type}")
 
         return True
 
@@ -568,8 +740,10 @@ class EventBus:
         for callback in self._backpressure_callbacks:
             try:
                 callback(new_level, self._metrics)
+            except TypeError as e:
+                logger.error(f"Backpressure callback signature error: {e}")
             except Exception as e:
-                logger.error(f"Backpressure callback error: {e}")
+                logger.exception("Backpressure callback failed unexpectedly")
 
         # Log level change
         if new_level == BackpressureLevel.CRITICAL:
@@ -727,10 +901,17 @@ class EventBus:
     async def start(self) -> None:
         """Start the event bus processing loop."""
         self._running = True
+        self._health_status = EventBusHealthStatus.HEALTHY
+        self._consecutive_errors = 0
 
         # Recover persisted events before starting (#S4)
         if self._persistence:
             await self.recover_persisted_events()
+
+        # Start health check task if enabled
+        if self._health_config.enabled:
+            self._health_check_task = asyncio.create_task(self._run_health_check_loop())
+            logger.info("Event bus health check enabled")
 
         logger.info("Event bus started")
 
@@ -743,6 +924,10 @@ class EventBus:
                 await self._dispatch(event)
                 self._queue.task_done()
 
+                # Reset error count on successful processing
+                self._consecutive_errors = 0
+                self._last_event_processed = datetime.now(timezone.utc)
+
                 # P0-5: Periodic cleanup of idle handlers (memory leak prevention)
                 now = datetime.now(timezone.utc)
                 if (now - self._last_handler_cleanup).total_seconds() > self._handler_cleanup_interval:
@@ -752,11 +937,20 @@ class EventBus:
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
+                self._consecutive_errors += 1
                 logger.error(f"Error processing event: {e}")
 
     async def stop(self) -> None:
         """Stop the event bus gracefully."""
         self._running = False
+
+        # Stop health check task
+        if self._health_check_task and not self._health_check_task.done():
+            self._health_check_task.cancel()
+            try:
+                await self._health_check_task
+            except asyncio.CancelledError:
+                pass
 
         # Process remaining events
         while not self._queue.empty():
@@ -805,6 +999,8 @@ class EventBus:
             if isinstance(result, Exception):
                 logger.error(f"Handler error for {event.event_type.value}: {result}")
                 dispatch_success = False
+                # P2: Add to dead letter queue for retry
+                self._add_to_dead_letter_queue(event, f"Handler error: {result}")
 
         # Update metrics
         self._metrics.total_events_processed += 1
@@ -841,7 +1037,8 @@ class EventBus:
         limit: int = 100,
     ) -> list[Event]:
         """Get recent event history for audit."""
-        history = self._event_history
+        # Convert deque to list for filtering and slicing
+        history = list(self._event_history)
 
         if event_type:
             history = [e for e in history if e.event_type == event_type]
@@ -904,6 +1101,19 @@ class EventBus:
                 "duplicates_blocked": self._dedup_stats["duplicates_blocked"],
                 "window_seconds": self._dedup_window_seconds,
             },
+            "health": {
+                "status": self._health_status.value,
+                "enabled": self._health_config.enabled,
+                "consecutive_errors": self._consecutive_errors,
+                "last_event_processed": self._last_event_processed.isoformat() if self._last_event_processed else None,
+                "recovery_in_progress": self._recovery_in_progress,
+            },
+            # P2: Dead letter queue stats
+            "dead_letter_queue": self.get_dead_letter_queue_stats(),
+            # P2: Compression stats
+            "compression": self.get_compression_stats(),
+            # P2: Replay buffer stats
+            "replay": self.get_replay_buffer_stats(),
         }
 
     @property
@@ -916,3 +1126,601 @@ class EventBus:
         self._metrics = BackpressureMetrics()
         self._events_in_window = []
         logger.info("Event bus metrics reset")
+
+    # ========================================================================
+    # P2: Dead Letter Queue Methods
+    # ========================================================================
+
+    def _add_to_dead_letter_queue(self, event: Event, reason: str) -> None:
+        """
+        Add a failed event to the dead letter queue.
+
+        Args:
+            event: The event that failed processing
+            reason: Description of why the event failed
+        """
+        entry = DeadLetterEntry(
+            event=event,
+            failure_time=datetime.now(timezone.utc),
+            failure_reason=reason,
+            max_retries=self._dlq_config.max_retries,
+        )
+        self._dead_letter_queue.append(entry)
+
+        logger.warning(
+            f"Event {event.event_id} ({event.event_type.value}) added to dead letter queue: {reason}"
+        )
+
+        # Notify callbacks
+        for callback in self._dlq_callbacks:
+            try:
+                callback(entry)
+            except Exception as e:
+                logger.error(f"DLQ callback error: {e}")
+
+    async def retry_dead_letter_events(self, max_events: int = 100) -> dict[str, int]:
+        """
+        Retry events from the dead letter queue.
+
+        Args:
+            max_events: Maximum number of events to retry
+
+        Returns:
+            Dict with counts of successful, failed, and skipped retries
+        """
+        results = {"retried": 0, "succeeded": 0, "failed": 0, "skipped": 0}
+        now = datetime.now(timezone.utc)
+
+        entries_to_retry = []
+        for entry in list(self._dead_letter_queue):
+            if entry.retry_count >= entry.max_retries:
+                results["skipped"] += 1
+                continue
+
+            # Check retry delay
+            if entry.last_retry_time:
+                elapsed = (now - entry.last_retry_time).total_seconds()
+                if elapsed < self._dlq_config.retry_delay_seconds:
+                    continue
+
+            entries_to_retry.append(entry)
+            if len(entries_to_retry) >= max_events:
+                break
+
+        for entry in entries_to_retry:
+            entry.retry_count += 1
+            entry.last_retry_time = now
+            results["retried"] += 1
+
+            try:
+                # Re-queue the event
+                self._queue.put_nowait(entry.event)
+                # Remove from DLQ on successful queue
+                self._dead_letter_queue.remove(entry)
+                results["succeeded"] += 1
+                logger.info(f"Retried event {entry.event.event_id} from DLQ (attempt {entry.retry_count})")
+            except asyncio.QueueFull:
+                results["failed"] += 1
+                logger.warning(f"Failed to retry event {entry.event.event_id}: queue full")
+            except Exception as e:
+                results["failed"] += 1
+                logger.error(f"Failed to retry event {entry.event.event_id}: {e}")
+
+        return results
+
+    def get_dead_letter_queue_stats(self) -> dict:
+        """Get statistics about the dead letter queue."""
+        now = datetime.now(timezone.utc)
+        return {
+            "total_entries": len(self._dead_letter_queue),
+            "max_size": self._dlq_config.max_size,
+            "retryable": sum(
+                1 for e in self._dead_letter_queue
+                if e.retry_count < e.max_retries
+            ),
+            "permanently_failed": sum(
+                1 for e in self._dead_letter_queue
+                if e.retry_count >= e.max_retries
+            ),
+            "event_types": dict(
+                sorted(
+                    ((t, sum(1 for e in self._dead_letter_queue if e.event.event_type == t))
+                     for t in set(e.event.event_type for e in self._dead_letter_queue)),
+                    key=lambda x: -x[1]
+                )
+            ) if self._dead_letter_queue else {},
+        }
+
+    def on_dead_letter(self, callback: Callable[[DeadLetterEntry], None]) -> None:
+        """Register callback for dead letter events."""
+        self._dlq_callbacks.append(callback)
+
+    def cleanup_dead_letter_queue(self) -> int:
+        """
+        Clean up old entries from dead letter queue.
+
+        Returns:
+            Number of entries removed
+        """
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=self._dlq_config.cleanup_after_hours)
+        initial_size = len(self._dead_letter_queue)
+
+        # Remove entries older than cutoff
+        self._dead_letter_queue = deque(
+            (e for e in self._dead_letter_queue if e.failure_time >= cutoff),
+            maxlen=self._dlq_config.max_size
+        )
+
+        removed = initial_size - len(self._dead_letter_queue)
+        if removed > 0:
+            logger.info(f"Cleaned up {removed} old entries from dead letter queue")
+        return removed
+
+    # ========================================================================
+    # P2: Event Compression Methods
+    # ========================================================================
+
+    def _compress_event_payload(self, event: Event) -> tuple[bytes, bool]:
+        """
+        Compress event payload if it exceeds the threshold.
+
+        Args:
+            event: Event to potentially compress
+
+        Returns:
+            Tuple of (compressed/original bytes, was_compressed)
+        """
+        if not self._compression_config.enabled:
+            return b"", False
+
+        try:
+            # Serialize event to JSON
+            event_data = {
+                "event_id": event.event_id,
+                "event_type": event.event_type.value,
+                "timestamp": event.timestamp.isoformat(),
+                "source_agent": event.source_agent,
+            }
+
+            # Add event-specific fields
+            for attr in dir(event):
+                if not attr.startswith("_") and attr not in event_data:
+                    try:
+                        value = getattr(event, attr)
+                        if not callable(value):
+                            # Handle datetime
+                            if isinstance(value, datetime):
+                                event_data[attr] = value.isoformat()
+                            elif isinstance(value, Enum):
+                                event_data[attr] = value.value
+                            else:
+                                event_data[attr] = value
+                    except Exception:
+                        pass
+
+            json_bytes = json.dumps(event_data).encode("utf-8")
+            original_size = len(json_bytes)
+
+            # Only compress if above threshold
+            if original_size < self._compression_config.min_size_bytes:
+                self._compression_stats.events_uncompressed += 1
+                return json_bytes, False
+
+            # Compress
+            compressed = gzip.compress(
+                json_bytes,
+                compresslevel=self._compression_config.compression_level
+            )
+            compressed_size = len(compressed)
+
+            # Update stats
+            self._compression_stats.events_compressed += 1
+            self._compression_stats.bytes_before_compression += original_size
+            self._compression_stats.bytes_after_compression += compressed_size
+
+            logger.debug(
+                f"Compressed event {event.event_id}: {original_size} -> {compressed_size} bytes "
+                f"({(1 - compressed_size/original_size)*100:.1f}% reduction)"
+            )
+
+            return compressed, True
+
+        except Exception as e:
+            logger.error(f"Failed to compress event {event.event_id}: {e}")
+            return b"", False
+
+    def _decompress_event_payload(self, data: bytes, compressed: bool) -> dict | None:
+        """
+        Decompress event payload if it was compressed.
+
+        Args:
+            data: Compressed or uncompressed bytes
+            compressed: Whether the data is compressed
+
+        Returns:
+            Event data dict or None on failure
+        """
+        try:
+            if compressed:
+                decompressed = gzip.decompress(data)
+                return json.loads(decompressed.decode("utf-8"))
+            else:
+                return json.loads(data.decode("utf-8"))
+        except Exception as e:
+            logger.error(f"Failed to decompress event payload: {e}")
+            return None
+
+    def get_compression_stats(self) -> dict:
+        """Get compression statistics."""
+        return self._compression_stats.to_dict()
+
+    # ========================================================================
+    # P2: Event Replay Methods for Debugging
+    # ========================================================================
+
+    def _record_for_replay(self, event: Event) -> None:
+        """
+        Record an event for potential replay.
+
+        Args:
+            event: Event to record
+        """
+        if not self._replay_config.enabled:
+            return
+
+        self._replay_buffer.append((datetime.now(timezone.utc), event))
+
+    async def replay_events(
+        self,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        event_types: list[EventType] | None = None,
+        speed_multiplier: float | None = None,
+        handler: Callable[[Event], Coroutine[Any, Any, None]] | None = None,
+    ) -> dict[str, int]:
+        """
+        Replay events from the replay buffer for debugging.
+
+        Args:
+            start_time: Start of replay window (default: beginning of buffer)
+            end_time: End of replay window (default: end of buffer)
+            event_types: Filter to specific event types (default: all)
+            speed_multiplier: Replay speed (default: from config)
+            handler: Custom handler for replayed events (default: dispatch normally)
+
+        Returns:
+            Dict with replay statistics
+        """
+        if self._replay_in_progress:
+            logger.warning("Replay already in progress")
+            return {"error": "replay_in_progress", "replayed": 0}
+
+        self._replay_in_progress = True
+        speed = speed_multiplier or self._replay_config.replay_speed_multiplier
+
+        results = {"replayed": 0, "skipped": 0, "errors": 0}
+        prev_time: datetime | None = None
+
+        try:
+            # Filter events
+            events_to_replay = []
+            for recorded_time, event in self._replay_buffer:
+                if start_time and recorded_time < start_time:
+                    continue
+                if end_time and recorded_time > end_time:
+                    continue
+                if event_types and event.event_type not in event_types:
+                    results["skipped"] += 1
+                    continue
+                events_to_replay.append((recorded_time, event))
+
+            logger.info(
+                f"Starting event replay: {len(events_to_replay)} events at {speed}x speed"
+            )
+
+            for recorded_time, event in events_to_replay:
+                # Simulate timing if speed > 0
+                if prev_time and speed > 0:
+                    delay = (recorded_time - prev_time).total_seconds() / speed
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+
+                prev_time = recorded_time
+
+                try:
+                    if handler:
+                        await handler(event)
+                    else:
+                        await self._dispatch(event)
+                    results["replayed"] += 1
+                except Exception as e:
+                    logger.error(f"Replay error for event {event.event_id}: {e}")
+                    results["errors"] += 1
+
+            logger.info(
+                f"Event replay complete: {results['replayed']} replayed, "
+                f"{results['skipped']} skipped, {results['errors']} errors"
+            )
+
+        finally:
+            self._replay_in_progress = False
+
+        return results
+
+    def get_replay_buffer_stats(self) -> dict:
+        """Get statistics about the replay buffer."""
+        if not self._replay_buffer:
+            return {
+                "enabled": self._replay_config.enabled,
+                "total_events": 0,
+                "max_events": self._replay_config.max_replay_events,
+                "time_range_seconds": 0,
+            }
+
+        first_time = self._replay_buffer[0][0]
+        last_time = self._replay_buffer[-1][0]
+
+        return {
+            "enabled": self._replay_config.enabled,
+            "total_events": len(self._replay_buffer),
+            "max_events": self._replay_config.max_replay_events,
+            "time_range_seconds": (last_time - first_time).total_seconds(),
+            "first_event_time": first_time.isoformat(),
+            "last_event_time": last_time.isoformat(),
+            "event_types": dict(
+                sorted(
+                    ((t.value, sum(1 for _, e in self._replay_buffer if e.event_type == t))
+                     for t in set(e.event_type for _, e in self._replay_buffer)),
+                    key=lambda x: -x[1]
+                )
+            ),
+            "replay_in_progress": self._replay_in_progress,
+        }
+
+    def get_events_for_replay(
+        self,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        event_types: list[EventType] | None = None,
+        limit: int = 100,
+    ) -> list[Event]:
+        """
+        Get events from replay buffer without replaying them.
+
+        Useful for inspection and debugging.
+
+        Args:
+            start_time: Start of time window
+            end_time: End of time window
+            event_types: Filter to specific event types
+            limit: Maximum events to return
+
+        Returns:
+            List of events matching criteria
+        """
+        events = []
+        for recorded_time, event in self._replay_buffer:
+            if start_time and recorded_time < start_time:
+                continue
+            if end_time and recorded_time > end_time:
+                continue
+            if event_types and event.event_type not in event_types:
+                continue
+            events.append(event)
+            if len(events) >= limit:
+                break
+        return events
+
+    def clear_replay_buffer(self) -> int:
+        """
+        Clear the replay buffer.
+
+        Returns:
+            Number of events cleared
+        """
+        count = len(self._replay_buffer)
+        self._replay_buffer.clear()
+        logger.info(f"Cleared {count} events from replay buffer")
+        return count
+
+    # ========================================================================
+    # Health Check Methods (#SOLID refactoring - addresses SPOF)
+    # ========================================================================
+
+    async def _run_health_check_loop(self) -> None:
+        """
+        Run periodic health checks in background.
+
+        This loop monitors the EventBus health and triggers recovery
+        if the bus becomes unresponsive or unhealthy.
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(self._health_config.check_interval_seconds)
+
+                if not self._running:
+                    break
+
+                result = await self.check_health()
+
+                # Notify callbacks
+                for callback in self._health_callbacks:
+                    try:
+                        callback(result)
+                    except Exception as e:
+                        logger.error(f"Health callback error: {e}")
+
+                # Handle unhealthy state
+                if result.status == EventBusHealthStatus.UNHEALTHY:
+                    logger.warning(
+                        f"EventBus health check UNHEALTHY: {result.message}"
+                    )
+                    if not self._recovery_in_progress:
+                        await self._attempt_recovery()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Health check loop error: {e}")
+
+    async def check_health(self) -> HealthCheckResult:
+        """
+        Perform a health check on the EventBus.
+
+        Checks:
+        1. Processing latency is within acceptable bounds
+        2. Queue is not stalled (events are being processed)
+        3. Consecutive error count is below threshold
+
+        Returns:
+            HealthCheckResult with status and diagnostics
+        """
+        now = datetime.now(timezone.utc)
+        latency_ms = self._metrics.processing_latency_ms
+        queue_size = self._queue.qsize()
+
+        # Check for stalled queue
+        stalled = False
+        if self._last_event_processed and queue_size > 0:
+            seconds_since_last = (now - self._last_event_processed).total_seconds()
+            if seconds_since_last > self._health_config.max_queue_stall_seconds:
+                stalled = True
+
+        # Determine status
+        status = EventBusHealthStatus.HEALTHY
+        message = "OK"
+
+        if self._recovery_in_progress:
+            status = EventBusHealthStatus.RECOVERING
+            message = "Recovery in progress"
+
+        elif self._consecutive_errors >= self._health_config.max_consecutive_errors:
+            status = EventBusHealthStatus.UNHEALTHY
+            message = f"Too many consecutive errors: {self._consecutive_errors}"
+
+        elif stalled:
+            status = EventBusHealthStatus.UNHEALTHY
+            message = f"Queue stalled with {queue_size} events pending"
+
+        elif latency_ms > self._health_config.max_processing_latency_ms:
+            status = EventBusHealthStatus.DEGRADED
+            message = f"High latency: {latency_ms:.1f}ms"
+
+        elif self._metrics.backpressure_level in (BackpressureLevel.HIGH, BackpressureLevel.CRITICAL):
+            status = EventBusHealthStatus.DEGRADED
+            message = f"Backpressure: {self._metrics.backpressure_level.value}"
+
+        self._health_status = status
+
+        return HealthCheckResult(
+            status=status,
+            timestamp=now,
+            latency_ms=latency_ms,
+            queue_size=queue_size,
+            last_event_processed=self._last_event_processed,
+            consecutive_errors=self._consecutive_errors,
+            message=message,
+        )
+
+    async def _attempt_recovery(self) -> bool:
+        """
+        Attempt to recover an unhealthy EventBus.
+
+        Recovery steps:
+        1. Clear any stuck events from the queue (preserving high-priority)
+        2. Reset error counters
+        3. Optionally restart processing
+
+        Returns:
+            True if recovery succeeded, False otherwise
+        """
+        if self._recovery_in_progress:
+            return False
+
+        self._recovery_in_progress = True
+        self._health_status = EventBusHealthStatus.RECOVERING
+        logger.warning("EventBus recovery initiated")
+
+        try:
+            for attempt in range(self._health_config.recovery_attempts):
+                logger.info(f"Recovery attempt {attempt + 1}/{self._health_config.recovery_attempts}")
+
+                # Step 1: Process high-priority events first
+                high_priority_events = []
+                low_priority_events = []
+
+                # Drain queue and categorize
+                while not self._queue.empty():
+                    try:
+                        event = self._queue.get_nowait()
+                        if event.event_type in HIGH_PRIORITY_EVENT_TYPES:
+                            high_priority_events.append(event)
+                        else:
+                            low_priority_events.append(event)
+                        self._queue.task_done()
+                    except asyncio.QueueEmpty:
+                        break
+
+                # Re-queue high-priority events
+                for event in high_priority_events:
+                    try:
+                        self._queue.put_nowait(event)
+                    except asyncio.QueueFull:
+                        logger.error(f"Cannot re-queue high-priority event {event.event_id}")
+
+                # Re-queue some low-priority events (drop oldest if too many)
+                max_requeue = self._backpressure.max_queue_size // 2
+                for event in low_priority_events[-max_requeue:]:
+                    try:
+                        self._queue.put_nowait(event)
+                    except asyncio.QueueFull:
+                        break
+
+                dropped_count = max(0, len(low_priority_events) - max_requeue)
+                if dropped_count > 0:
+                    logger.warning(f"Dropped {dropped_count} low-priority events during recovery")
+
+                # Step 2: Reset error counters
+                self._consecutive_errors = 0
+
+                # Step 3: Wait and check if healthy
+                await asyncio.sleep(self._health_config.recovery_delay_seconds)
+
+                result = await self.check_health()
+                if result.status in (EventBusHealthStatus.HEALTHY, EventBusHealthStatus.DEGRADED):
+                    logger.info("EventBus recovery successful")
+                    self._recovery_in_progress = False
+                    self._health_status = result.status
+                    return True
+
+            logger.error("EventBus recovery failed after all attempts")
+            self._recovery_in_progress = False
+            return False
+
+        except Exception as e:
+            logger.error(f"Recovery error: {e}")
+            self._recovery_in_progress = False
+            return False
+
+    def on_health_change(self, callback: Callable[[HealthCheckResult], None]) -> None:
+        """
+        Register callback for health status changes.
+
+        Args:
+            callback: Function to call with HealthCheckResult on each check
+        """
+        self._health_callbacks.append(callback)
+
+    @property
+    def health_status(self) -> EventBusHealthStatus:
+        """Get current health status."""
+        return self._health_status
+
+    @property
+    def is_healthy(self) -> bool:
+        """Check if EventBus is in healthy state."""
+        return self._health_status in (
+            EventBusHealthStatus.HEALTHY,
+            EventBusHealthStatus.DEGRADED
+        )

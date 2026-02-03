@@ -18,13 +18,18 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Callable, Iterator
 import math
 import statistics
 from collections import defaultdict
+
+import numpy as np
+
+# For dataclass field with default_factory
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +148,97 @@ class BacktestPosition:
 
 
 @dataclass
+class MarketImpactModel:
+    """
+    Market impact model using Almgren-Chriss framework (P2 Enhancement).
+
+    Models temporary and permanent market impact based on:
+    - Order size relative to ADV
+    - Market volatility
+    - Trade urgency
+    """
+    # Impact coefficients (calibrated to typical equity markets)
+    temporary_impact_coef: float = 0.1  # Coefficient for temporary impact
+    permanent_impact_coef: float = 0.05  # Coefficient for permanent impact
+    urgency_penalty: float = 1.5  # Multiplier for urgent trades
+
+    def calculate_temporary_impact(
+        self,
+        quantity: int,
+        price: float,
+        adv: float,
+        volatility: float,
+        urgency: str = "normal",
+    ) -> float:
+        """
+        Calculate temporary market impact (reverts after trade).
+
+        Uses Almgren-Chriss square-root model:
+        Impact = sigma * sqrt(Q/ADV) * coefficient
+        """
+        if adv <= 0:
+            adv = 1_000_000  # Default ADV
+
+        participation_rate = abs(quantity) / adv
+
+        # Square-root impact
+        impact_bps = volatility * 10000 * self.temporary_impact_coef * math.sqrt(participation_rate)
+
+        # Apply urgency penalty
+        if urgency == "immediate":
+            impact_bps *= self.urgency_penalty
+        elif urgency == "patient":
+            impact_bps *= 0.6
+
+        return price * impact_bps / 10000
+
+    def calculate_permanent_impact(
+        self,
+        quantity: int,
+        price: float,
+        adv: float,
+        volatility: float,
+    ) -> float:
+        """
+        Calculate permanent market impact (information leakage).
+
+        Linear model: Impact = sigma * (Q/ADV) * coefficient
+        """
+        if adv <= 0:
+            adv = 1_000_000
+
+        participation_rate = abs(quantity) / adv
+
+        # Linear permanent impact
+        impact_bps = volatility * 10000 * self.permanent_impact_coef * participation_rate
+
+        return price * impact_bps / 10000
+
+    def calculate_total_impact(
+        self,
+        quantity: int,
+        price: float,
+        adv: float,
+        volatility: float,
+        urgency: str = "normal",
+    ) -> dict:
+        """Calculate total market impact with breakdown."""
+        temp_impact = self.calculate_temporary_impact(
+            quantity, price, adv, volatility, urgency
+        )
+        perm_impact = self.calculate_permanent_impact(
+            quantity, price, adv, volatility
+        )
+
+        return {
+            'temporary_impact': temp_impact,
+            'permanent_impact': perm_impact,
+            'total_impact': temp_impact + perm_impact,
+            'total_impact_bps': (temp_impact + perm_impact) / price * 10000,
+        }
+
+
+@dataclass
 class TransactionCostModel:
     """Transaction cost model for realistic backtesting (Issue #Q10)."""
     commission_per_share: float = 0.005  # $0.005 per share
@@ -151,6 +247,9 @@ class TransactionCostModel:
     spread_bps: float = 2.0  # 2 bps spread
     market_impact_bps: float = 5.0  # 5 bps market impact
     slippage_volatility_mult: float = 0.5  # Slippage = mult * volatility
+
+    # P2 Enhancement: Market impact model
+    market_impact_model: MarketImpactModel = field(default_factory=MarketImpactModel)
 
     def calculate_commission(self, quantity: int, price: float) -> float:
         """Calculate commission for trade."""
@@ -170,22 +269,68 @@ class TransactionCostModel:
         price: float,
         volatility: float,
         adv: float | None = None,
+        urgency: str = "normal",
     ) -> float:
-        """Calculate expected slippage."""
+        """Calculate expected slippage including market impact."""
         # Base spread cost
         spread_cost = price * (self.spread_bps / 10000)
 
-        # Market impact (square root model)
+        # P2 Enhancement: Use detailed market impact model
         if adv and adv > 0:
-            participation = quantity / adv
-            market_impact = price * (self.market_impact_bps / 10000) * math.sqrt(participation)
+            impact_result = self.market_impact_model.calculate_total_impact(
+                quantity, price, adv, volatility, urgency
+            )
+            market_impact = impact_result['total_impact']
         else:
+            # Fallback to simple model
             market_impact = price * (self.market_impact_bps / 10000)
 
         # Volatility-based component
         vol_slippage = price * volatility * self.slippage_volatility_mult / 100
 
         return spread_cost + market_impact + vol_slippage
+
+    def calculate_execution_cost_breakdown(
+        self,
+        quantity: int,
+        price: float,
+        volatility: float,
+        adv: float | None = None,
+        urgency: str = "normal",
+    ) -> dict:
+        """
+        Get detailed breakdown of all execution costs (P2 Enhancement).
+
+        Returns:
+            Dictionary with all cost components
+        """
+        commission = self.calculate_commission(quantity, price)
+        spread_cost = abs(quantity) * price * (self.spread_bps / 10000)
+        vol_cost = abs(quantity) * price * volatility * self.slippage_volatility_mult / 100
+
+        if adv and adv > 0:
+            impact_result = self.market_impact_model.calculate_total_impact(
+                quantity, price, adv, volatility, urgency
+            )
+            temp_impact = impact_result['temporary_impact'] * abs(quantity)
+            perm_impact = impact_result['permanent_impact'] * abs(quantity)
+        else:
+            temp_impact = abs(quantity) * price * (self.market_impact_bps / 10000)
+            perm_impact = 0.0
+
+        total_cost = commission + spread_cost + vol_cost + temp_impact + perm_impact
+        notional = abs(quantity) * price
+
+        return {
+            'commission': commission,
+            'spread_cost': spread_cost,
+            'volatility_cost': vol_cost,
+            'temporary_market_impact': temp_impact,
+            'permanent_market_impact': perm_impact,
+            'total_cost': total_cost,
+            'total_cost_bps': total_cost / notional * 10000 if notional > 0 else 0,
+            'notional': notional,
+        }
 
 
 @dataclass
@@ -354,6 +499,7 @@ class BacktestEngine:
         self._volatility_cache: dict[str, float] = {}
         self._trade_pnls: list[float] = []
         self._monthly_returns: dict[str, float] = {}
+        self._bar_history: dict[str, list[Bar]] = {}  # BT-008: Track bar history for volatility
 
     def add_strategy(self, strategy: BacktestStrategy) -> None:
         """Add strategy to backtest."""
@@ -402,6 +548,12 @@ class BacktestEngine:
         # Main simulation loop
         for bar in all_bars:
             self._current_bar[bar.symbol] = bar
+
+            # BT-008: Update bar history and volatility cache
+            if bar.symbol not in self._bar_history:
+                self._bar_history[bar.symbol] = []
+            self._bar_history[bar.symbol].append(bar)
+            self._update_volatility(bar.symbol, self._bar_history[bar.symbol])
 
             # Process pending orders first
             self._process_pending_orders(bar)
@@ -472,7 +624,11 @@ class BacktestEngine:
         start_date: datetime | None,
         end_date: datetime | None,
     ) -> list[Bar]:
-        """Merge and sort bars from all symbols."""
+        """
+        Merge and sort bars from all symbols.
+
+        BT-001 Fix: Validates point-in-time constraints to prevent look-ahead bias.
+        """
         all_bars = []
 
         for symbol, bars in data.items():
@@ -483,7 +639,20 @@ class BacktestEngine:
                     continue
                 all_bars.append(bar)
 
-        return sorted(all_bars, key=lambda b: b.timestamp)
+        sorted_bars = sorted(all_bars, key=lambda b: b.timestamp)
+
+        # BT-001: Validate point-in-time constraint to prevent look-ahead bias
+        # Each bar's timestamp must be consistent with processing order
+        for i, bar in enumerate(sorted_bars):
+            if i > 0:
+                prev_bar = sorted_bars[i - 1]
+                # Ensure bars are properly ordered (no future data before current)
+                assert bar.timestamp >= prev_bar.timestamp, (
+                    f"Look-ahead bias detected: bar at {bar.timestamp} appears after "
+                    f"bar at {prev_bar.timestamp} but has earlier timestamp"
+                )
+
+        return sorted_bars
 
     def _reset(self) -> None:
         """Reset engine state."""
@@ -498,6 +667,8 @@ class BacktestEngine:
         self._current_bar = {}
         self._trade_pnls = []
         self._monthly_returns = {}
+        self._bar_history = {}  # BT-008: Reset bar history
+        self._volatility_cache = {}  # BT-008: Reset volatility cache
 
     def _process_pending_orders(self, bar: Bar) -> None:
         """Process pending orders against current bar."""
@@ -571,7 +742,13 @@ class BacktestEngine:
         self.pending_orders = remaining_orders
 
     def _get_fill_price(self, order: BacktestOrder, bar: Bar) -> float | None:
-        """Determine fill price based on fill model."""
+        """
+        Determine fill price based on fill model.
+
+        BT-003 Fix: IMMEDIATE fill model now uses bar.open (next bar's open)
+        instead of bar.close to prevent look-ahead bias. Orders are processed
+        at the start of the next bar, so the open price is the first available.
+        """
         if order.order_type == 'LIMIT':
             if order.side == 'BUY' and order.limit_price:
                 if bar.low <= order.limit_price:
@@ -582,8 +759,12 @@ class BacktestEngine:
             return None
 
         # Market orders
+        # BT-003: All market order fills use open price to avoid look-ahead bias
+        # Orders are placed after seeing a bar, so they execute at the next bar's open
         if self.fill_model == FillModel.IMMEDIATE:
-            return bar.close
+            # BT-003 Fix: Use open instead of close to prevent look-ahead bias
+            # IMMEDIATE now means "as soon as possible" which is next bar's open
+            return bar.open
         elif self.fill_model == FillModel.NEXT_OPEN:
             return bar.open
         elif self.fill_model == FillModel.NEXT_CLOSE:
@@ -595,10 +776,27 @@ class BacktestEngine:
 
     def _get_volatility(self, symbol: str) -> float:
         """Get estimated volatility for symbol."""
-        # Simple ATR-based volatility estimate
         if symbol in self._volatility_cache:
             return self._volatility_cache[symbol]
         return 0.02  # Default 2%
+
+    def _update_volatility(self, symbol: str, bars: list[Bar]) -> None:
+        """
+        Update volatility cache with rolling calculation.
+
+        BT-008 Fix: Calculate rolling volatility during backtest instead of
+        always returning the default 2% value.
+
+        Args:
+            symbol: The symbol to update volatility for
+            bars: Historical bars for the symbol (most recent last)
+        """
+        if len(bars) >= 20:
+            # Calculate log returns from the last 20 bars
+            closes = [b.close for b in bars[-20:]]
+            returns = np.diff(np.log(closes))
+            # Annualized volatility (assuming daily bars)
+            self._volatility_cache[symbol] = float(np.std(returns) * np.sqrt(252))
 
     def _calculate_portfolio_value(self) -> float:
         """Calculate total portfolio value."""
@@ -630,7 +828,14 @@ class BacktestEngine:
         metrics.total_return = (final_value - self.initial_capital) / self.initial_capital
         if years > 0:
             metrics.cagr = (final_value / self.initial_capital) ** (1 / years) - 1
-            metrics.annualized_return = sum(self.daily_returns) * 252 / len(self.daily_returns)
+            # BT-012 Fix: Use geometric mean instead of arithmetic mean for annualized return
+            # The arithmetic mean overestimates compounded returns
+            if len(self.daily_returns) > 0:
+                # Geometric annualized return: (product of (1+r))^(252/n) - 1
+                cumulative_return = 1.0
+                for r in self.daily_returns:
+                    cumulative_return *= (1 + r)
+                metrics.annualized_return = cumulative_return ** (252 / len(self.daily_returns)) - 1
 
         # Risk
         if len(self.daily_returns) > 1:

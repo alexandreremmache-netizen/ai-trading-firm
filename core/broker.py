@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import random
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from collections import deque
-from typing import Callable, Any
+from functools import partial, wraps
+from typing import Callable, Any, TypeVar
 from enum import Enum
 
 import nest_asyncio
@@ -93,6 +96,14 @@ class BrokerConfig:
     staleness_check_enabled: bool = True
     # P0-1/P0-2: Environment safety settings
     environment: str = "paper"  # "paper" or "live" - MUST match port configuration
+    # P2: Order status polling fallback
+    order_polling_enabled: bool = True
+    order_polling_interval_seconds: float = 5.0
+    order_polling_timeout_seconds: float = 60.0  # Stop polling after this time
+    # P2: Connection quality metrics
+    connection_quality_window_seconds: float = 60.0
+    # P2: Session recovery
+    session_recovery_enabled: bool = True
 
 
 @dataclass
@@ -145,6 +156,125 @@ class OrderStatus:
     last_update: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+# ============================================================================
+# P2: Connection Quality Metrics
+# ============================================================================
+
+@dataclass
+class ConnectionQualityMetrics:
+    """Metrics for tracking connection quality to broker."""
+    latency_samples: list[float] = field(default_factory=list)
+    reconnect_count: int = 0
+    total_disconnects: int = 0
+    last_disconnect_time: datetime | None = None
+    last_reconnect_time: datetime | None = None
+    connection_uptime_seconds: float = 0.0
+    connection_start_time: datetime | None = None
+    message_count: int = 0
+    error_count: int = 0
+    pacing_violations: int = 0
+
+    def record_latency(self, latency_ms: float, max_samples: int = 100) -> None:
+        """Record a latency sample."""
+        self.latency_samples.append(latency_ms)
+        if len(self.latency_samples) > max_samples:
+            self.latency_samples.pop(0)
+
+    @property
+    def avg_latency_ms(self) -> float:
+        """Calculate average latency."""
+        if not self.latency_samples:
+            return 0.0
+        return sum(self.latency_samples) / len(self.latency_samples)
+
+    @property
+    def max_latency_ms(self) -> float:
+        """Get maximum latency."""
+        return max(self.latency_samples) if self.latency_samples else 0.0
+
+    @property
+    def min_latency_ms(self) -> float:
+        """Get minimum latency."""
+        return min(self.latency_samples) if self.latency_samples else 0.0
+
+    @property
+    def uptime_percentage(self) -> float:
+        """Calculate connection uptime percentage."""
+        if self.connection_start_time is None:
+            return 0.0
+        total_time = (datetime.now(timezone.utc) - self.connection_start_time).total_seconds()
+        if total_time == 0:
+            return 100.0
+        return (self.connection_uptime_seconds / total_time) * 100
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "avg_latency_ms": round(self.avg_latency_ms, 2),
+            "max_latency_ms": round(self.max_latency_ms, 2),
+            "min_latency_ms": round(self.min_latency_ms, 2),
+            "reconnect_count": self.reconnect_count,
+            "total_disconnects": self.total_disconnects,
+            "uptime_percentage": round(self.uptime_percentage, 2),
+            "connection_uptime_seconds": round(self.connection_uptime_seconds, 1),
+            "message_count": self.message_count,
+            "error_count": self.error_count,
+            "pacing_violations": self.pacing_violations,
+            "last_disconnect": (
+                self.last_disconnect_time.isoformat()
+                if self.last_disconnect_time else None
+            ),
+            "last_reconnect": (
+                self.last_reconnect_time.isoformat()
+                if self.last_reconnect_time else None
+            ),
+        }
+
+
+# ============================================================================
+# P2: Session Recovery State
+# ============================================================================
+
+@dataclass
+class SessionState:
+    """State for session recovery after reconnection."""
+    subscribed_symbols: list[str] = field(default_factory=list)
+    pending_orders: dict[int, dict] = field(default_factory=dict)
+    last_known_positions: dict[str, dict] = field(default_factory=dict)
+    last_portfolio_state: dict | None = None
+    session_start_time: datetime | None = None
+    last_save_time: datetime | None = None
+
+    def save_subscription(self, symbol: str, exchange: str, currency: str) -> None:
+        """Save a subscription for recovery."""
+        key = f"{symbol}:{exchange}:{currency}"
+        if key not in self.subscribed_symbols:
+            self.subscribed_symbols.append(key)
+
+    def remove_subscription(self, symbol: str) -> None:
+        """Remove a subscription."""
+        self.subscribed_symbols = [
+            s for s in self.subscribed_symbols
+            if not s.startswith(f"{symbol}:")
+        ]
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for persistence."""
+        return {
+            "subscribed_symbols": self.subscribed_symbols,
+            "pending_orders": self.pending_orders,
+            "last_known_positions": self.last_known_positions,
+            "session_start_time": (
+                self.session_start_time.isoformat()
+                if self.session_start_time else None
+            ),
+            "last_save_time": (
+                self.last_save_time.isoformat()
+                if self.last_save_time else None
+            ),
+        }
+
+
 class IBRateLimiter:
     """
     IB API Rate Limiter (P0-1 fix).
@@ -156,6 +286,8 @@ class IBRateLimiter:
 
     This class implements a sliding window rate limiter to prevent
     hitting IB's rate limits and causing connection issues.
+
+    P0-10: Added exponential backoff support for pacing violations.
     """
 
     # IB rate limit constants
@@ -163,17 +295,78 @@ class IBRateLimiter:
     WINDOW_SECONDS = 600  # 10 minutes
     MIN_REQUEST_INTERVAL = 15.0  # Minimum seconds between identical requests
 
+    # Exponential backoff settings (P0-10)
+    INITIAL_BACKOFF_SECONDS = 60.0    # 1 minute initial backoff
+    MAX_BACKOFF_SECONDS = 300.0       # 5 minute max backoff
+    BACKOFF_MULTIPLIER = 2.0          # Double each time
+    BACKOFF_RESET_SECONDS = 600.0     # Reset backoff after 10 minutes of success
+
     def __init__(self):
         # Sliding window of request timestamps
         self._request_times: deque[datetime] = deque()
         # Track last request time per request key (for duplicate detection)
         self._last_request: dict[str, datetime] = {}
+        # P0-10: Exponential backoff state
+        self._violation_count: int = 0
+        self._last_violation_time: datetime | None = None
+        self._backoff_until: datetime | None = None
 
     def _clean_old_requests(self) -> None:
         """Remove requests older than the window."""
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.WINDOW_SECONDS)
         while self._request_times and self._request_times[0] < cutoff:
             self._request_times.popleft()
+
+    def record_pacing_violation(self) -> float:
+        """
+        Record a pacing violation and calculate backoff time (P0-10).
+
+        Call this when IB returns error code 162 (pacing violation).
+
+        Returns:
+            Backoff time in seconds
+        """
+        now = datetime.now(timezone.utc)
+
+        # Reset violation count if enough time has passed
+        if self._last_violation_time:
+            elapsed = (now - self._last_violation_time).total_seconds()
+            if elapsed > self.BACKOFF_RESET_SECONDS:
+                self._violation_count = 0
+
+        self._violation_count += 1
+        self._last_violation_time = now
+
+        # Calculate exponential backoff
+        backoff = min(
+            self.INITIAL_BACKOFF_SECONDS * (self.BACKOFF_MULTIPLIER ** (self._violation_count - 1)),
+            self.MAX_BACKOFF_SECONDS
+        )
+
+        self._backoff_until = now + timedelta(seconds=backoff)
+        logger.warning(
+            f"Pacing violation #{self._violation_count}: backing off for {backoff:.0f}s "
+            f"(until {self._backoff_until.isoformat()})"
+        )
+
+        return backoff
+
+    def is_in_backoff(self) -> tuple[bool, float]:
+        """
+        Check if currently in backoff period (P0-10).
+
+        Returns:
+            Tuple of (is_in_backoff, remaining_seconds)
+        """
+        if self._backoff_until is None:
+            return False, 0.0
+
+        now = datetime.now(timezone.utc)
+        if now >= self._backoff_until:
+            return False, 0.0
+
+        remaining = (self._backoff_until - now).total_seconds()
+        return True, remaining
 
     def can_make_request(self, request_key: str | None = None) -> tuple[bool, str]:
         """
@@ -185,6 +378,11 @@ class IBRateLimiter:
         Returns:
             Tuple of (can_request, reason_if_not)
         """
+        # P0-10: Check backoff first
+        in_backoff, backoff_remaining = self.is_in_backoff()
+        if in_backoff:
+            return False, f"In backoff period due to pacing violation. Wait {backoff_remaining:.1f}s"
+
         self._clean_old_requests()
         now = datetime.now(timezone.utc)
 
@@ -217,6 +415,11 @@ class IBRateLimiter:
 
     def get_wait_time(self, request_key: str | None = None) -> float:
         """Get seconds to wait before next request is allowed."""
+        # P0-10: Check backoff first
+        in_backoff, backoff_remaining = self.is_in_backoff()
+        if in_backoff:
+            return backoff_remaining
+
         can_request, _ = self.can_make_request(request_key)
         if can_request:
             return 0.0
@@ -237,10 +440,365 @@ class IBRateLimiter:
 
         return 0.0
 
+    def get_stats(self) -> dict:
+        """Get rate limiter statistics (P0-10)."""
+        self._clean_old_requests()
+        in_backoff, backoff_remaining = self.is_in_backoff()
+        return {
+            "requests_in_window": len(self._request_times),
+            "remaining_requests": self.get_remaining_requests(),
+            "violation_count": self._violation_count,
+            "in_backoff": in_backoff,
+            "backoff_remaining_seconds": backoff_remaining,
+            "last_violation": (
+                self._last_violation_time.isoformat()
+                if self._last_violation_time else None
+            ),
+        }
+
 
 # Paper vs Live port mapping for validation
 PAPER_PORTS = {7497, 4002}  # TWS Paper, Gateway Paper
 LIVE_PORTS = {7496, 4001}   # TWS Live, Gateway Live
+
+
+# =============================================================================
+# P3: Retry Handler with Jitter and Budget Tracking
+# =============================================================================
+
+T = TypeVar("T")
+
+
+@dataclass
+class RetryConfig:
+    """Configuration for retry behavior with jitter support (P3 fix)."""
+    # Basic retry settings
+    max_retries: int = 3
+    initial_delay_seconds: float = 1.0
+    max_delay_seconds: float = 60.0
+    backoff_multiplier: float = 2.0
+
+    # P3: Jitter settings to prevent thundering herd
+    jitter_mode: str = "full"  # "none", "full", "equal", "decorrelated"
+    jitter_factor: float = 0.5  # Max jitter as fraction of delay (for "equal" mode)
+
+    # P3: Retry budget tracking
+    budget_window_seconds: float = 60.0  # Time window for budget tracking
+    budget_max_retries: int = 10  # Max retries allowed in budget window
+    budget_enabled: bool = True
+
+    # Exceptions that should be retried
+    retryable_exceptions: tuple[type, ...] = (
+        asyncio.TimeoutError,
+        ConnectionError,
+        ConnectionRefusedError,
+        OSError,
+    )
+
+    # Exceptions that should NOT be retried (even if they match retryable)
+    non_retryable_exceptions: tuple[type, ...] = (
+        ValueError,
+        TypeError,
+        KeyError,
+    )
+
+
+@dataclass
+class RetryBudgetStats:
+    """Statistics for retry budget tracking (P3 fix)."""
+    total_retries: int = 0
+    retries_in_window: int = 0
+    budget_exhausted_count: int = 0
+    last_retry_time: datetime | None = None
+    window_start: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class RetryHandler:
+    """
+    Retry handler with jitter and budget tracking (P3 fix).
+
+    Features:
+    - Exponential backoff with configurable multiplier
+    - Jitter to prevent thundering herd problem
+    - Retry budget to prevent retry storms
+    - Circuit breaker integration
+
+    Jitter Modes:
+    - "none": No jitter, use exact delay
+    - "full": Random delay between 0 and calculated delay
+    - "equal": Half calculated delay + random half
+    - "decorrelated": Decorrelated jitter (best for distributed systems)
+
+    Usage:
+        handler = RetryHandler(config)
+
+        # As decorator
+        @handler.with_retry
+        async def call_broker():
+            ...
+
+        # Or manually
+        result = await handler.execute_with_retry(call_broker)
+    """
+
+    def __init__(
+        self,
+        config: RetryConfig | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
+    ):
+        self._config = config or RetryConfig()
+        self._circuit_breaker = circuit_breaker
+
+        # P3: Budget tracking
+        self._budget_stats = RetryBudgetStats()
+        self._retry_timestamps: deque[datetime] = deque()
+
+        # Decorrelated jitter state
+        self._last_delay = self._config.initial_delay_seconds
+
+    def _calculate_delay_with_jitter(self, attempt: int) -> float:
+        """
+        Calculate delay with jitter applied (P3 fix).
+
+        Args:
+            attempt: Current retry attempt (0-indexed)
+
+        Returns:
+            Delay in seconds with jitter applied
+        """
+        # Base exponential backoff
+        base_delay = self._config.initial_delay_seconds * (
+            self._config.backoff_multiplier ** attempt
+        )
+        base_delay = min(base_delay, self._config.max_delay_seconds)
+
+        jitter_mode = self._config.jitter_mode.lower()
+
+        if jitter_mode == "none":
+            return base_delay
+
+        elif jitter_mode == "full":
+            # Full jitter: random value between 0 and base_delay
+            return random.uniform(0, base_delay)
+
+        elif jitter_mode == "equal":
+            # Equal jitter: base/2 + random(0, base/2)
+            half = base_delay / 2
+            jitter = random.uniform(0, half * self._config.jitter_factor * 2)
+            return half + jitter
+
+        elif jitter_mode == "decorrelated":
+            # Decorrelated jitter: better for distributed systems
+            # sleep = min(cap, random(base, sleep * 3))
+            self._last_delay = min(
+                self._config.max_delay_seconds,
+                random.uniform(
+                    self._config.initial_delay_seconds,
+                    self._last_delay * 3
+                )
+            )
+            return self._last_delay
+
+        else:
+            logger.warning(f"Unknown jitter mode '{jitter_mode}', using full jitter")
+            return random.uniform(0, base_delay)
+
+    def _check_retry_budget(self) -> tuple[bool, str]:
+        """
+        Check if retry budget allows another retry (P3 fix).
+
+        Returns:
+            Tuple of (allowed, reason_if_not)
+        """
+        if not self._config.budget_enabled:
+            return True, ""
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=self._config.budget_window_seconds)
+
+        # Clean old timestamps
+        while self._retry_timestamps and self._retry_timestamps[0] < cutoff:
+            self._retry_timestamps.popleft()
+
+        self._budget_stats.retries_in_window = len(self._retry_timestamps)
+
+        if self._budget_stats.retries_in_window >= self._config.budget_max_retries:
+            self._budget_stats.budget_exhausted_count += 1
+            return False, (
+                f"Retry budget exhausted: {self._budget_stats.retries_in_window}/"
+                f"{self._config.budget_max_retries} retries in "
+                f"{self._config.budget_window_seconds}s window"
+            )
+
+        return True, ""
+
+    def _record_retry(self) -> None:
+        """Record a retry attempt for budget tracking."""
+        now = datetime.now(timezone.utc)
+        self._retry_timestamps.append(now)
+        self._budget_stats.total_retries += 1
+        self._budget_stats.last_retry_time = now
+
+    def _is_retryable(self, exc: Exception) -> bool:
+        """Check if an exception should be retried."""
+        # Check non-retryable first (they take precedence)
+        if isinstance(exc, self._config.non_retryable_exceptions):
+            return False
+
+        # Check if it's a retryable exception
+        return isinstance(exc, self._config.retryable_exceptions)
+
+    async def execute_with_retry(
+        self,
+        func: Callable[..., Any],
+        *args,
+        operation_name: str = "",
+        **kwargs,
+    ) -> Any:
+        """
+        Execute a function with retry logic (P3 fix).
+
+        Args:
+            func: Async function to execute
+            *args: Positional arguments for func
+            operation_name: Optional name for logging
+            **kwargs: Keyword arguments for func
+
+        Returns:
+            Result of the function
+
+        Raises:
+            Exception: The last exception if all retries exhausted
+        """
+        operation = operation_name or func.__name__
+        last_exception: Exception | None = None
+
+        for attempt in range(self._config.max_retries + 1):
+            # Check retry budget (except for first attempt)
+            if attempt > 0:
+                budget_ok, budget_reason = self._check_retry_budget()
+                if not budget_ok:
+                    logger.warning(
+                        f"Retry budget exhausted for {operation}: {budget_reason}"
+                    )
+                    if last_exception:
+                        raise last_exception
+                    raise RuntimeError(budget_reason)
+
+            # Check circuit breaker if configured
+            if self._circuit_breaker and self._circuit_breaker.is_open:
+                logger.warning(
+                    f"Circuit breaker open, skipping retry for {operation}"
+                )
+                if last_exception:
+                    raise last_exception
+                raise CircuitOpenError(
+                    self._circuit_breaker.name,
+                    self._circuit_breaker._config.reset_timeout_seconds
+                )
+
+            try:
+                # Execute the function
+                if asyncio.iscoroutinefunction(func):
+                    result = await func(*args, **kwargs)
+                else:
+                    result = func(*args, **kwargs)
+
+                # Reset decorrelated jitter state on success
+                self._last_delay = self._config.initial_delay_seconds
+
+                return result
+
+            except Exception as e:
+                last_exception = e
+
+                # Check if this exception is retryable
+                if not self._is_retryable(e):
+                    logger.debug(
+                        f"Non-retryable exception for {operation}: {type(e).__name__}"
+                    )
+                    raise
+
+                # Check if we have more attempts
+                if attempt >= self._config.max_retries:
+                    logger.error(
+                        f"All {self._config.max_retries + 1} attempts exhausted "
+                        f"for {operation}: {e}"
+                    )
+                    raise
+
+                # Record retry for budget tracking
+                self._record_retry()
+
+                # Calculate delay with jitter
+                delay = self._calculate_delay_with_jitter(attempt)
+
+                logger.warning(
+                    f"Retry {attempt + 1}/{self._config.max_retries} for {operation} "
+                    f"after {delay:.2f}s (error: {type(e).__name__}: {e})"
+                )
+
+                await asyncio.sleep(delay)
+
+        # Should not reach here, but just in case
+        if last_exception:
+            raise last_exception
+        raise RuntimeError(f"Unexpected state in retry handler for {operation}")
+
+    def with_retry(
+        self,
+        func: Callable[..., Any] | None = None,
+        *,
+        operation_name: str = "",
+    ):
+        """
+        Decorator to add retry logic to a function (P3 fix).
+
+        Usage:
+            @handler.with_retry
+            async def my_func():
+                ...
+
+            @handler.with_retry(operation_name="custom_op")
+            async def my_func():
+                ...
+        """
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            @wraps(fn)
+            async def wrapper(*args, **kwargs):
+                return await self.execute_with_retry(
+                    fn, *args, operation_name=operation_name or fn.__name__, **kwargs
+                )
+            return wrapper
+
+        if func is not None:
+            return decorator(func)
+        return decorator
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get retry handler statistics."""
+        self._check_retry_budget()  # Update budget stats
+        return {
+            "total_retries": self._budget_stats.total_retries,
+            "retries_in_window": self._budget_stats.retries_in_window,
+            "budget_max": self._config.budget_max_retries,
+            "budget_window_seconds": self._config.budget_window_seconds,
+            "budget_exhausted_count": self._budget_stats.budget_exhausted_count,
+            "last_retry_time": (
+                self._budget_stats.last_retry_time.isoformat()
+                if self._budget_stats.last_retry_time else None
+            ),
+            "circuit_breaker_state": (
+                self._circuit_breaker.state.value
+                if self._circuit_breaker else None
+            ),
+        }
+
+    def reset_budget(self) -> None:
+        """Reset the retry budget (e.g., after a successful operation)."""
+        self._retry_timestamps.clear()
+        self._budget_stats.retries_in_window = 0
+        logger.debug("Retry budget reset")
 
 
 class IBBroker:
@@ -284,15 +842,28 @@ class IBBroker:
         self._disconnect_callbacks: list[Callable[[], None]] = []
         self._reconnect_callbacks: list[Callable[[], None]] = []
 
-        # Register IB event handlers (use lambda to ensure proper binding)
-        self._ib.connectedEvent += lambda: self._on_connected()
-        self._ib.disconnectedEvent += lambda: self._on_disconnected()
-        self._ib.errorEvent += lambda reqId, errorCode, errorString, contract: self._on_error(reqId, errorCode, errorString, contract)
-        self._ib.orderStatusEvent += lambda trade: self._on_order_status(trade)
-        self._ib.execDetailsEvent += lambda trade, fill: self._on_exec_details(trade, fill)
+        # P0-3: Store event handler references for proper cleanup (prevents memory leak)
+        # Lambda closures capture 'self' and are never garbage collected if not removed
+        self._ticker_callbacks: dict[str, Callable] = {}  # subscription_key -> callback
+
+        # P0-5: Lock for thread-safe access to _subscriptions during reconnection
+        # Prevents race condition when reconnect clears subscriptions while handlers access them
+        self._subscriptions_lock = asyncio.Lock()
+
+        # P0-3: Register IB event handlers using bound methods (not lambdas)
+        # Store references so we can unregister them on cleanup
+        self._ib.connectedEvent += self._on_connected
+        self._ib.disconnectedEvent += self._on_disconnected
+        self._ib.errorEvent += self._on_error
+        self._ib.orderStatusEvent += self._on_order_status
+        self._ib.execDetailsEvent += self._on_exec_details
 
         # P0-1: IB API rate limiter to prevent hitting IB's rate limits
         self._rate_limiter = IBRateLimiter()
+
+        # ERR-001: Idempotency tracking for order placement
+        # Prevents duplicate orders when retry happens after timeout but order was placed
+        self._processed_orders: dict[str, int] = {}  # idempotency_key -> broker_order_id
 
         # Circuit breaker for broker operations (#S6)
         self._circuit_breaker = CircuitBreaker(
@@ -314,6 +885,16 @@ class IBBroker:
             ),
         )
         self._circuit_breaker.on_state_change(self._on_circuit_state_change)
+
+        # P2: Connection quality metrics
+        self._connection_quality = ConnectionQualityMetrics()
+
+        # P2: Session recovery state
+        self._session_state = SessionState()
+
+        # P2: Order status polling task
+        self._order_polling_task: asyncio.Task | None = None
+        self._orders_being_polled: dict[int, datetime] = {}  # order_id -> start_time
 
     @property
     def is_connected(self) -> bool:
@@ -444,9 +1025,19 @@ class IBBroker:
                 "CIRCUIT BREAKER CLOSED: Broker operations resumed"
             )
 
-    async def connect(self) -> bool:
+    async def connect(
+        self,
+        max_retries: int = 3,
+        backoff_base: float = 2.0,
+    ) -> bool:
         """
         Connect to Interactive Brokers TWS or Gateway.
+
+        Args:
+            max_retries: Maximum number of connection attempts (default: 3).
+                         ERR-002 fix: Prevents startup failure on transient network issues.
+            backoff_base: Base for exponential backoff between retries (default: 2.0).
+                          Delay = backoff_base ** attempt_number seconds.
 
         Returns True if connected successfully.
 
@@ -464,64 +1055,144 @@ class IBBroker:
             logger.info("Already connected to IB")
             return True
 
-        self._connection_state = ConnectionState.CONNECTING
+        # ERR-002: Retry with exponential backoff for transient network issues
+        last_error: Exception | None = None
+        for attempt in range(max_retries):
+            if attempt > 0:
+                delay = backoff_base ** attempt
+                logger.info(
+                    f"Connection attempt {attempt + 1}/{max_retries} "
+                    f"after {delay:.1f}s backoff..."
+                )
+                await asyncio.sleep(delay)
 
-        try:
-            logger.info(
-                f"Connecting to IB at {self._config.host}:{self._config.port} "
-                f"(client_id={self._config.client_id}, readonly={self._config.readonly})"
-            )
+            self._connection_state = ConnectionState.CONNECTING
 
-            # Connect using ib_insync
-            await self._ib.connectAsync(
-                host=self._config.host,
-                port=self._config.port,
-                clientId=self._config.client_id,
-                timeout=self._config.timeout_seconds,
-                readonly=self._config.readonly,
-            )
+            try:
+                logger.info(
+                    f"Connecting to IB at {self._config.host}:{self._config.port} "
+                    f"(client_id={self._config.client_id}, readonly={self._config.readonly})"
+                )
 
-            # Get account ID
-            accounts = self._ib.managedAccounts()
-            if accounts:
+                # Connect using ib_insync
+                await self._ib.connectAsync(
+                    host=self._config.host,
+                    port=self._config.port,
+                    clientId=self._config.client_id,
+                    timeout=self._config.timeout_seconds,
+                    readonly=self._config.readonly,
+                )
+
+                # P0-8: Validate API is actually enabled and functional
+                # connectAsync can succeed but API may not be enabled in TWS settings
+                if not self._ib.isConnected():
+                    logger.error(
+                        "Connection appeared successful but API is not responsive. "
+                        "Ensure API is enabled in TWS: Edit > Global Configuration > API > Settings"
+                    )
+                    self._connection_state = ConnectionState.ERROR
+                    return False
+
+                # Verify we can actually communicate with the API
+                server_version = self._ib.client.serverVersion()
+                if server_version < 100:  # Minimum reasonable version
+                    logger.warning(
+                        f"IB Gateway/TWS version may be outdated (server version: {server_version}). "
+                        f"Some features may not work correctly."
+                    )
+
+                # Get account ID
+                accounts = self._ib.managedAccounts()
+                if not accounts:
+                    logger.error(
+                        "No managed accounts returned. API may not be fully enabled or "
+                        "account permissions may be restricted."
+                    )
+                    self._connection_state = ConnectionState.ERROR
+                    return False
+
                 self._account_id = self._config.account or accounts[0]
                 logger.info(f"Using account: {self._account_id}")
 
-            # P0-2: Validate account matches expected environment
-            self._validate_paper_account()
+                # P0-2: Validate account matches expected environment
+                self._validate_paper_account()
 
-            self._connection_state = ConnectionState.CONNECTED
-            logger.info(
-                f"Connected to Interactive Brokers "
-                f"(server version: {self._ib.client.serverVersion()})"
-            )
+                # P0-8: Test API functionality with a real request
+                try:
+                    # Give IB a moment to sync initial data
+                    await asyncio.sleep(0.5)
+                    # Request current time from server - this is a true API test
+                    server_time = await asyncio.wait_for(
+                        self._ib.reqCurrentTimeAsync(),
+                        timeout=5.0
+                    )
+                    if server_time:
+                        logger.debug(f"API functionality verified (server time: {server_time})")
+                    else:
+                        logger.warning("API returned empty time response")
+                except asyncio.TimeoutError:
+                    logger.error("API validation failed - server not responding to requests")
+                    self._connection_state = ConnectionState.ERROR
+                    return False
+                except Exception as e:
+                    logger.warning(f"API validation warning: {e}")
 
-            return True
+                self._connection_state = ConnectionState.CONNECTED
+                logger.info(
+                    f"Connected to Interactive Brokers "
+                    f"(server version: {server_version})"
+                )
 
-        except asyncio.TimeoutError:
-            logger.error(
-                f"Connection timeout - is TWS/Gateway running on "
-                f"{self._config.host}:{self._config.port}?"
-            )
-            self._connection_state = ConnectionState.ERROR
-            return False
+                return True
 
-        except ConnectionRefusedError:
-            logger.error(
-                f"Connection refused - ensure TWS/Gateway is running and "
-                f"API connections are enabled on port {self._config.port}"
-            )
-            self._connection_state = ConnectionState.ERROR
-            return False
+            except asyncio.TimeoutError as e:
+                last_error = e
+                logger.warning(
+                    f"Connection attempt {attempt + 1}/{max_retries} timed out - "
+                    f"is TWS/Gateway running on {self._config.host}:{self._config.port}?"
+                )
+                self._connection_state = ConnectionState.ERROR
+                # Continue to next retry attempt
 
-        except Exception as e:
-            # Broad exception catch is intentional here - IB can raise various
-            # undocumented exceptions during connection (socket errors, SSL errors,
-            # protocol errors). We want to gracefully handle any failure and
-            # set the connection state appropriately rather than crash.
-            logger.error(f"Failed to connect to IB: {e}")
-            self._connection_state = ConnectionState.ERROR
-            return False
+            except ConnectionRefusedError as e:
+                last_error = e
+                logger.warning(
+                    f"Connection attempt {attempt + 1}/{max_retries} refused - "
+                    f"ensure TWS/Gateway is running and API connections are enabled "
+                    f"on port {self._config.port}"
+                )
+                self._connection_state = ConnectionState.ERROR
+                # Continue to next retry attempt
+
+            except OSError as e:
+                # Socket-level errors (network issues, port in use, etc.)
+                last_error = e
+                logger.warning(
+                    f"Connection attempt {attempt + 1}/{max_retries} socket error: {e}"
+                )
+                self._connection_state = ConnectionState.ERROR
+
+            except Exception as e:
+                # Broad exception catch is intentional here - IB can raise various
+                # undocumented exceptions during connection (socket errors, SSL errors,
+                # protocol errors). We want to gracefully handle any failure and
+                # set the connection state appropriately rather than crash.
+                # P3: Use logger.exception to preserve traceback for debugging
+                last_error = e
+                logger.exception(
+                    f"Connection attempt {attempt + 1}/{max_retries} failed with "
+                    f"{type(e).__name__}"
+                )
+                self._connection_state = ConnectionState.ERROR
+                # Continue to next retry attempt
+
+        # ERR-002: All retries exhausted
+        logger.error(
+            f"Failed to connect to IB after {max_retries} attempts. "
+            f"Last error: {last_error}"
+        )
+        self._connection_state = ConnectionState.ERROR
+        return False
 
     async def disconnect(self) -> None:
         """Disconnect from Interactive Brokers."""
@@ -536,14 +1207,45 @@ class IBBroker:
                 pass
 
         if self._ib.isConnected():
+            # P0-3: Remove ticker callbacks before canceling subscriptions
+            for key, ticker in list(self._subscriptions.items()):
+                if key in self._ticker_callbacks:
+                    try:
+                        ticker.updateEvent -= self._ticker_callbacks[key]
+                    except ValueError:
+                        pass
+            self._ticker_callbacks.clear()
+
             # Cancel all market data subscriptions
             for ticker in self._subscriptions.values():
-                self._ib.cancelMktData(ticker.contract)
+                try:
+                    self._ib.cancelMktData(ticker.contract)
+                except Exception as e:
+                    logger.warning(f"Error canceling market data: {e}")
 
             self._subscriptions.clear()
             self._contracts.clear()
 
-            self._ib.disconnect()
+            # P0-9: Disconnect with timeout to prevent hanging
+            # Socket disconnect can hang if the connection is in a bad state
+            try:
+                # Use a timeout for the disconnect operation
+                disconnect_timeout = 5.0  # 5 seconds should be enough
+                # P0-9 FIX: Use get_running_loop() instead of deprecated get_event_loop()
+                await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        None, self._ib.disconnect
+                    ),
+                    timeout=disconnect_timeout
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Disconnect timed out after {disconnect_timeout}s, "
+                    f"forcing connection state to disconnected"
+                )
+            except Exception as e:
+                logger.warning(f"Error during disconnect: {e}")
+
             self._connection_state = ConnectionState.DISCONNECTED
             logger.info("Disconnected from Interactive Brokers")
 
@@ -602,10 +1304,24 @@ class IBBroker:
 
     async def _resubscribe_market_data(self) -> None:
         """Re-subscribe to market data after reconnection."""
-        # Store subscription keys before clearing
-        subscription_keys = list(self._subscriptions.keys())
-        self._subscriptions.clear()
-        self._contracts.clear()
+        # P0-5: Use lock to prevent race condition during reconnection
+        async with self._subscriptions_lock:
+            # Store subscription keys before clearing
+            subscription_keys = list(self._subscriptions.keys())
+
+            # Clear old callbacks first
+            for key in subscription_keys:
+                if key in self._ticker_callbacks:
+                    ticker = self._subscriptions.get(key)
+                    if ticker:
+                        try:
+                            ticker.updateEvent -= self._ticker_callbacks[key]
+                        except ValueError:
+                            pass
+                    del self._ticker_callbacks[key]
+
+            self._subscriptions.clear()
+            self._contracts.clear()
 
         logger.info(f"Re-subscribing to {len(subscription_keys)} market data feeds...")
 
@@ -881,9 +1597,11 @@ class IBBroker:
 
         subscription_key = f"{symbol}:{exchange}:{currency}"
 
-        if subscription_key in self._subscriptions:
-            logger.debug(f"Already subscribed to {subscription_key}")
-            return True
+        # P0-5: Check under lock to prevent race condition
+        async with self._subscriptions_lock:
+            if subscription_key in self._subscriptions:
+                logger.debug(f"Already subscribed to {subscription_key}")
+                return True
 
         try:
             # Handle futures specially - need to get front month
@@ -927,10 +1645,15 @@ class IBBroker:
             # P0-1: Record the request for rate limiting
             self._rate_limiter.record_request(rate_key)
 
-            # Register update handler
-            ticker.updateEvent += lambda t: self._on_ticker_update(t, subscription_key)
+            # P0-3: Register update handler with stored callback reference (prevents memory leak)
+            # Using functools.partial instead of lambda to avoid closure capture issues
+            callback = partial(self._on_ticker_update, subscription_key=subscription_key)
 
-            self._subscriptions[subscription_key] = ticker
+            # P0-5: Update subscriptions under lock
+            async with self._subscriptions_lock:
+                self._ticker_callbacks[subscription_key] = callback
+                ticker.updateEvent += callback
+                self._subscriptions[subscription_key] = ticker
 
             logger.info(f"Subscribed to market data: {subscription_key}")
             return True
@@ -941,17 +1664,27 @@ class IBBroker:
 
     async def unsubscribe_market_data(self, symbol: str) -> None:
         """Unsubscribe from market data for a symbol."""
-        keys_to_remove = [k for k in self._subscriptions if k.startswith(f"{symbol}:")]
+        # P0-5: Use lock to prevent race condition
+        async with self._subscriptions_lock:
+            keys_to_remove = [k for k in self._subscriptions if k.startswith(f"{symbol}:")]
 
-        for key in keys_to_remove:
-            ticker = self._subscriptions.get(key)
-            if ticker:
-                self._ib.cancelMktData(ticker.contract)
-                del self._subscriptions[key]
-                logger.info(f"Unsubscribed from market data: {key}")
+            for key in keys_to_remove:
+                ticker = self._subscriptions.get(key)
+                if ticker:
+                    # P0-3: Remove callback before canceling to prevent memory leak
+                    if key in self._ticker_callbacks:
+                        try:
+                            ticker.updateEvent -= self._ticker_callbacks[key]
+                        except ValueError:
+                            pass  # Callback already removed
+                        del self._ticker_callbacks[key]
 
-            if key in self._contracts:
-                del self._contracts[key]
+                    self._ib.cancelMktData(ticker.contract)
+                    del self._subscriptions[key]
+                    logger.info(f"Unsubscribed from market data: {key}")
+
+                if key in self._contracts:
+                    del self._contracts[key]
 
     async def get_portfolio_state(self) -> PortfolioState:
         """
@@ -1019,12 +1752,20 @@ class IBBroker:
                 return self._last_portfolio_state
             raise
 
-    async def place_order(self, order_event: OrderEvent) -> int | None:
+    async def place_order(
+        self,
+        order_event: OrderEvent,
+        idempotency_key: str | None = None,
+    ) -> int | None:
         """
         Place an order with Interactive Brokers.
 
         Args:
             order_event: The order to place
+            idempotency_key: Optional unique key for idempotency (ERR-001).
+                             If provided and the same key was used before, returns
+                             the existing broker_order_id instead of placing a new order.
+                             This prevents duplicate orders on retry after timeout.
 
         Returns:
             Broker order ID if successful, None otherwise
@@ -1032,6 +1773,16 @@ class IBBroker:
         if not self.is_connected:
             logger.error("Cannot place order: not connected to IB")
             return None
+
+        # ERR-001: Check if this order was already processed (idempotency)
+        if idempotency_key is not None:
+            if idempotency_key in self._processed_orders:
+                existing_order_id = self._processed_orders[idempotency_key]
+                logger.info(
+                    f"Idempotent order detected (key={idempotency_key}): "
+                    f"returning existing order_id={existing_order_id}"
+                )
+                return existing_order_id
 
         async def _execute_order() -> int | None:
             """Inner function for circuit breaker wrapping."""
@@ -1131,7 +1882,16 @@ class IBBroker:
 
         try:
             # Wrap order execution in circuit breaker (#S6)
-            return await self._circuit_breaker.call_async(_execute_order)
+            broker_order_id = await self._circuit_breaker.call_async(_execute_order)
+
+            # ERR-001: Store idempotency mapping after successful placement
+            if broker_order_id is not None and idempotency_key is not None:
+                self._processed_orders[idempotency_key] = broker_order_id
+                logger.debug(
+                    f"Stored idempotency mapping: {idempotency_key} -> {broker_order_id}"
+                )
+
+            return broker_order_id
         except CircuitOpenError:
             logger.error("Cannot place order: circuit breaker is open")
             return None
@@ -1164,6 +1924,154 @@ class IBBroker:
             logger.error(f"Failed to cancel order {broker_order_id}: {e}")
             return False
 
+    def get_order_by_idempotency_key(self, idempotency_key: str) -> int | None:
+        """
+        Get broker order ID by idempotency key (ERR-001).
+
+        Args:
+            idempotency_key: The idempotency key used when placing the order
+
+        Returns:
+            Broker order ID if found, None otherwise
+        """
+        return self._processed_orders.get(idempotency_key)
+
+    def clear_idempotency_cache(self, max_entries: int = 10000) -> int:
+        """
+        Clear old entries from idempotency cache to prevent memory leak (ERR-001).
+
+        This should be called periodically (e.g., daily) to clean up old entries.
+        Orders older than the retention period are removed.
+
+        Args:
+            max_entries: Maximum number of entries to keep (default: 10000).
+                         Oldest entries are removed first when limit exceeded.
+
+        Returns:
+            Number of entries removed
+        """
+        if len(self._processed_orders) <= max_entries:
+            return 0
+
+        # Remove oldest entries (simple FIFO based on insertion order in Python 3.7+)
+        entries_to_remove = len(self._processed_orders) - max_entries
+        keys_to_remove = list(self._processed_orders.keys())[:entries_to_remove]
+
+        for key in keys_to_remove:
+            del self._processed_orders[key]
+
+        logger.info(
+            f"Cleared {entries_to_remove} old entries from idempotency cache "
+            f"(remaining: {len(self._processed_orders)})"
+        )
+        return entries_to_remove
+
+    async def modify_order(
+        self,
+        broker_order_id: int,
+        new_quantity: int | None = None,
+        new_limit_price: float | None = None,
+        new_stop_price: float | None = None,
+    ) -> bool:
+        """
+        Modify an existing order (P0-7).
+
+        IB supports order modification without cancel/replace for most order types.
+        This is more efficient and avoids losing queue priority.
+
+        Args:
+            broker_order_id: The broker's order ID to modify
+            new_quantity: New order quantity (optional)
+            new_limit_price: New limit price (optional)
+            new_stop_price: New stop price (optional)
+
+        Returns:
+            True if modification was submitted successfully
+
+        Note:
+            Not all order fields can be modified. If modification fails,
+            consider using cancel_order + place_order instead.
+        """
+        if not self.is_connected:
+            logger.error("Cannot modify order: not connected to IB")
+            return False
+
+        try:
+            # Find the trade
+            target_trade = None
+            for trade in self._ib.trades():
+                if trade.order.orderId == broker_order_id:
+                    target_trade = trade
+                    break
+
+            if not target_trade:
+                logger.warning(f"Order not found for modification: {broker_order_id}")
+                return False
+
+            # Check if order is modifiable
+            status = target_trade.orderStatus.status
+            if status in ("Filled", "Cancelled", "Inactive"):
+                logger.warning(f"Cannot modify order {broker_order_id}: status is {status}")
+                return False
+
+            # Get the order and apply modifications
+            order = target_trade.order
+            modified = False
+
+            if new_quantity is not None and new_quantity != order.totalQuantity:
+                # Ensure new quantity is >= filled quantity
+                filled = target_trade.orderStatus.filled
+                if new_quantity < filled:
+                    logger.error(
+                        f"Cannot reduce quantity below filled amount "
+                        f"({new_quantity} < {filled})"
+                    )
+                    return False
+                order.totalQuantity = new_quantity
+                modified = True
+                logger.info(f"Order {broker_order_id}: quantity -> {new_quantity}")
+
+            if new_limit_price is not None and new_limit_price != order.lmtPrice:
+                if order.orderType not in ("LMT", "STP LMT"):
+                    logger.warning(
+                        f"Cannot set limit price on {order.orderType} order"
+                    )
+                else:
+                    order.lmtPrice = new_limit_price
+                    modified = True
+                    logger.info(f"Order {broker_order_id}: limit price -> {new_limit_price}")
+
+            if new_stop_price is not None and new_stop_price != order.auxPrice:
+                if order.orderType not in ("STP", "STP LMT"):
+                    logger.warning(
+                        f"Cannot set stop price on {order.orderType} order"
+                    )
+                else:
+                    order.auxPrice = new_stop_price
+                    modified = True
+                    logger.info(f"Order {broker_order_id}: stop price -> {new_stop_price}")
+
+            if not modified:
+                logger.info(f"No modifications made to order {broker_order_id}")
+                return True
+
+            # Submit the modification
+            self._ib.placeOrder(target_trade.contract, order)
+            logger.info(f"Order modification submitted: {broker_order_id}")
+
+            # Update tracking
+            if broker_order_id in self._order_tracking:
+                tracking = self._order_tracking[broker_order_id]
+                if new_quantity is not None:
+                    tracking.quantity = new_quantity
+                tracking.last_update = datetime.now(timezone.utc)
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to modify order {broker_order_id}: {e}")
+            return False
+
     async def get_historical_data(
         self,
         symbol: str,
@@ -1186,6 +2094,12 @@ class IBBroker:
 
         Returns:
             List of bar dictionaries with OHLCV data
+
+        Note:
+            P0-6: IB enforces strict rate limits on historical data requests:
+            - Max 6 concurrent requests
+            - Pacing violations can result in 24h bans
+            - Same contract/bar-size/duration requests require 15s spacing
         """
         if not self.is_connected:
             logger.error("Cannot get historical data: not connected to IB")
@@ -1200,6 +2114,20 @@ class IBBroker:
                 return []
 
             contract = qualified[0]
+
+            # P0-6: Check rate limits before requesting historical data
+            # IB is very strict about historical data pacing - violations cause 24h bans
+            rate_key = f"historical:{symbol}:{duration}:{bar_size}"
+            can_request, reason = self._rate_limiter.can_make_request(rate_key)
+            if not can_request:
+                logger.warning(f"Historical data rate limit for {symbol}: {reason}")
+                wait_time = self._rate_limiter.get_wait_time(rate_key)
+                if wait_time > 0:
+                    logger.info(f"Waiting {wait_time:.1f}s for historical data rate limit...")
+                    await asyncio.sleep(wait_time)
+
+            # Record the request before making it
+            self._rate_limiter.record_request(rate_key)
 
             # Request historical data
             bars = await self._ib.reqHistoricalDataAsync(
@@ -1307,17 +2235,145 @@ class IBBroker:
             if self._reconnect_task is None or self._reconnect_task.done():
                 self._reconnect_task = asyncio.create_task(self._reconnect_with_backoff())
 
-    def _on_error(self, reqId: int, errorCode: int, errorString: str, contract: Contract) -> None:
-        """Handle error event from IB."""
-        # Common non-critical errors
-        if errorCode in (2104, 2106, 2158):  # Market data farm connected/disconnected
+    def _on_error(self, reqId: int, errorCode: int, errorString: str, contract: Contract = None) -> None:
+        """
+        Handle error event from IB.
+
+        P0-4: Comprehensive error code handling for all critical IB states.
+        Reference: https://interactivebrokers.github.io/tws-api/message_codes.html
+        """
+        # Connection state errors (critical - affect trading)
+        if errorCode == 1100:
+            # Connectivity between IB and TWS has been lost
+            logger.critical(f"IB CONNECTIVITY LOST: {errorString}")
+            self._connection_state = ConnectionState.ERROR
+            # Trigger circuit breaker
+            self._circuit_breaker.record_failure(ConnectionError(errorString))
+
+        elif errorCode == 1101:
+            # Connectivity restored, data lost - need to resubscribe
+            logger.warning(f"IB connectivity restored (data lost): {errorString}")
+            self._connection_state = ConnectionState.CONNECTED
+            # Schedule resubscription
+            asyncio.create_task(self._resubscribe_market_data())
+
+        elif errorCode == 1102:
+            # Connectivity restored, data maintained
+            logger.info(f"IB connectivity restored (data maintained): {errorString}")
+            self._connection_state = ConnectionState.CONNECTED
+            self._circuit_breaker.record_success()
+
+        # Market data farm status
+        elif errorCode in (2104, 2106, 2158):  # Market data farm connected/disconnected
             logger.debug(f"IB info [{errorCode}]: {errorString}")
+
         elif errorCode == 2103:  # Market data farm connection broken
             logger.warning(f"IB market data connection issue: {errorString}")
+
+        elif errorCode == 2107:
+            # Historical data farm connected
+            logger.info(f"Historical data farm connected: {errorString}")
+
+        elif errorCode == 2110:
+            # Connectivity between TWS and server is broken
+            logger.critical(f"TWS-server connectivity broken: {errorString}")
+            self._connection_state = ConnectionState.ERROR
+
+        # Historical data errors
+        elif errorCode == 162:
+            # Historical data pacing violation (too many requests)
+            # P0-4/P0-10 FIX: Must call record_pacing_violation() to trigger backoff
+            backoff = self._rate_limiter.record_pacing_violation()
+            logger.error(
+                f"Historical data pacing violation: {errorString}. "
+                f"IB may impose a 24h ban. Backing off for {backoff:.0f}s"
+            )
+
+        elif errorCode == 366:
+            # No historical data query found for ticker
+            logger.warning(f"No historical data available: {errorString}")
+
+        # Order-related errors
+        elif errorCode == 201:
+            # Order rejected
+            logger.error(f"Order rejected [{reqId}]: {errorString}")
+
+        elif errorCode == 202:
+            # Order cancelled
+            logger.info(f"Order cancelled [{reqId}]: {errorString}")
+
+        elif errorCode == 203:
+            # Security not available for trading
+            logger.error(f"Security not tradeable [{reqId}]: {errorString}")
+
         elif errorCode == 10197:  # No market data during competing session
             logger.warning(f"Market data unavailable: {errorString}")
+
+        # Additional critical error codes (identified by IB Configuration Expert)
+        elif errorCode == 103:
+            # Duplicate order ID
+            logger.error(f"Duplicate order ID [{reqId}]: {errorString}")
+
+        elif errorCode == 104:
+            # Can't modify a filled order
+            logger.error(f"Cannot modify filled order [{reqId}]: {errorString}")
+
+        elif errorCode == 110:
+            # Price out of range
+            logger.error(f"Price out of range [{reqId}]: {errorString}")
+
+        elif errorCode == 135:
+            # Can't find order with this ID
+            logger.warning(f"Order not found [{reqId}]: {errorString}")
+
+        elif errorCode == 200:
+            # No security definition found - very common
+            logger.error(f"Security not found [{reqId}]: {errorString}")
+
+        elif errorCode == 354:
+            # Requested market data not subscribed
+            logger.warning(
+                f"Market data not subscribed [{reqId}]: {errorString}. "
+                f"Check your IB market data subscriptions."
+            )
+
+        elif errorCode == 2105:
+            # HMDS data farm connection broken
+            logger.error(f"HMDS data farm connection broken: {errorString}")
+
+        # Client ID conflicts
+        elif errorCode == 326:
+            # Unable to connect - client ID already in use
+            logger.critical(
+                f"Client ID {self._config.client_id} already in use: {errorString}. "
+                f"Another application may be connected with the same client ID."
+            )
+            self._connection_state = ConnectionState.ERROR
+
+        elif errorCode == 502:
+            # Couldn't connect to TWS
+            logger.error(f"Could not connect to TWS: {errorString}")
+            self._connection_state = ConnectionState.ERROR
+
+        elif errorCode == 504:
+            # Not connected
+            logger.warning(f"Not connected to IB: {errorString}")
+
+        elif errorCode == 1300:
+            # Socket dropped during operation
+            logger.error(f"Socket dropped: {errorString}")
+            self._connection_state = ConnectionState.DISCONNECTED
+
+        # Default handler for unrecognized errors
         else:
-            logger.error(f"IB error [{errorCode}] reqId={reqId}: {errorString}")
+            if errorCode >= 2000 and errorCode < 3000:
+                # 2000 series are warnings
+                logger.warning(f"IB warning [{errorCode}] reqId={reqId}: {errorString}")
+            elif errorCode >= 1000 and errorCode < 2000:
+                # 1000 series are system messages
+                logger.info(f"IB system [{errorCode}] reqId={reqId}: {errorString}")
+            else:
+                logger.error(f"IB error [{errorCode}] reqId={reqId}: {errorString}")
 
     def _on_order_status(self, trade: Trade) -> None:
         """Handle order status update."""
@@ -1369,7 +2425,6 @@ class IBBroker:
 
     def _safe_int(self, value: Any) -> int:
         """Safely convert value to int, handling NaN and None."""
-        import math
         if value is None:
             return 0
         try:
@@ -1381,7 +2436,6 @@ class IBBroker:
 
     def _safe_float(self, value: Any) -> float:
         """Safely convert value to float, handling NaN and None."""
-        import math
         if value is None:
             return 0.0
         try:
@@ -1400,14 +2454,40 @@ class IBBroker:
             # Track last update time for staleness detection
             self._last_data_update[symbol] = datetime.now(timezone.utc)
 
+            # P0-11: Data quality validation - check for obviously bad data
+            bid = self._safe_float(ticker.bid)
+            ask = self._safe_float(ticker.ask)
+            last = self._safe_float(ticker.last)
+
+            # Validate bid/ask relationship (bid should be <= ask)
+            if bid > 0 and ask > 0 and bid > ask:
+                logger.warning(
+                    f"Data quality issue for {symbol}: bid ({bid}) > ask ({ask}). "
+                    f"Possible crossed market or bad data."
+                )
+                # Track quality issues
+                self._record_data_quality_issue(symbol, "crossed_market")
+
+            # Validate prices are reasonable (not 0 or extreme)
+            if last > 0:
+                # Check for extreme spreads (> 10% of last price)
+                if bid > 0 and ask > 0:
+                    spread_pct = (ask - bid) / last * 100
+                    if spread_pct > 10:
+                        logger.warning(
+                            f"Data quality issue for {symbol}: spread ({spread_pct:.1f}%) "
+                            f"exceeds 10% threshold"
+                        )
+                        self._record_data_quality_issue(symbol, "wide_spread")
+
             # Create market data event (with safe conversions for NaN values)
             event = MarketDataEvent(
                 source_agent="broker",
                 symbol=symbol,
                 exchange=ticker.contract.exchange if ticker.contract else "SMART",
-                bid=self._safe_float(ticker.bid) if ticker.bid and self._safe_float(ticker.bid) > 0 else 0.0,
-                ask=self._safe_float(ticker.ask) if ticker.ask and self._safe_float(ticker.ask) > 0 else 0.0,
-                last=self._safe_float(ticker.last) if ticker.last and self._safe_float(ticker.last) > 0 else 0.0,
+                bid=bid if bid > 0 else 0.0,
+                ask=ask if ask > 0 else 0.0,
+                last=last if last > 0 else 0.0,
                 volume=self._safe_int(ticker.volume),
                 bid_size=self._safe_int(ticker.bidSize),
                 ask_size=self._safe_int(ticker.askSize),
@@ -1426,6 +2506,59 @@ class IBBroker:
 
         except Exception as e:
             logger.error(f"Error processing ticker update: {e}")
+
+    def _record_data_quality_issue(self, symbol: str, issue_type: str) -> None:
+        """
+        Track data quality issues for circuit breaker logic (P0-11).
+
+        Args:
+            symbol: The symbol with the issue
+            issue_type: Type of issue (crossed_market, wide_spread, etc.)
+        """
+        if not hasattr(self, '_data_quality_issues'):
+            self._data_quality_issues: dict[str, list[tuple[datetime, str]]] = {}
+
+        if symbol not in self._data_quality_issues:
+            self._data_quality_issues[symbol] = []
+
+        # Add issue with timestamp
+        self._data_quality_issues[symbol].append((datetime.now(timezone.utc), issue_type))
+
+        # Keep only last 100 issues per symbol
+        if len(self._data_quality_issues[symbol]) > 100:
+            self._data_quality_issues[symbol] = self._data_quality_issues[symbol][-100:]
+
+        # Check if we should trigger a circuit breaker
+        recent_issues = [
+            i for i in self._data_quality_issues[symbol]
+            if (datetime.now(timezone.utc) - i[0]).total_seconds() < 60
+        ]
+
+        if len(recent_issues) >= 10:
+            logger.error(
+                f"Data quality circuit breaker triggered for {symbol}: "
+                f"{len(recent_issues)} issues in last 60 seconds"
+            )
+            # Could trigger reconnection or alert here
+
+    def get_data_quality_stats(self) -> dict[str, Any]:
+        """Get data quality statistics (P0-11)."""
+        if not hasattr(self, '_data_quality_issues'):
+            return {"symbols": {}, "total_issues": 0}
+
+        stats = {"symbols": {}, "total_issues": 0}
+        now = datetime.now(timezone.utc)
+
+        for symbol, issues in self._data_quality_issues.items():
+            recent = [i for i in issues if (now - i[0]).total_seconds() < 300]  # Last 5 min
+            stats["symbols"][symbol] = {
+                "total_issues": len(issues),
+                "recent_issues": len(recent),
+                "issue_types": list(set(i[1] for i in recent)),
+            }
+            stats["total_issues"] += len(recent)
+
+        return stats
 
     # ========== Utility Methods ==========
 
@@ -1652,3 +2785,305 @@ class IBBroker:
             "stale_symbols": self.get_stale_symbols(),
             "critical_symbols": self.get_critical_stale_symbols(),
         }
+
+    # ========== P2: Order Status Polling Fallback ==========
+
+    async def _start_order_polling(self, order_id: int) -> None:
+        """
+        Start polling for order status as a fallback.
+
+        Used when IB events may be missed (e.g., after reconnection).
+
+        Args:
+            order_id: The broker order ID to poll
+        """
+        if not self._config.order_polling_enabled:
+            return
+
+        if order_id in self._orders_being_polled:
+            return  # Already polling this order
+
+        self._orders_being_polled[order_id] = datetime.now(timezone.utc)
+        logger.debug(f"Started polling for order {order_id}")
+
+    async def _poll_order_status(self, order_id: int) -> dict | None:
+        """
+        Poll IB for order status.
+
+        Args:
+            order_id: The broker order ID to query
+
+        Returns:
+            Order status dict or None if not found
+        """
+        if not self.is_connected:
+            return None
+
+        try:
+            # Find the trade in IB's open trades
+            for trade in self._ib.openTrades():
+                if trade.order.orderId == order_id:
+                    return {
+                        "order_id": order_id,
+                        "status": trade.orderStatus.status,
+                        "filled": int(trade.orderStatus.filled),
+                        "remaining": int(trade.orderStatus.remaining),
+                        "avg_fill_price": trade.orderStatus.avgFillPrice,
+                    }
+
+            # Check completed trades (recent fills)
+            for trade in self._ib.trades():
+                if trade.order.orderId == order_id:
+                    return {
+                        "order_id": order_id,
+                        "status": trade.orderStatus.status,
+                        "filled": int(trade.orderStatus.filled),
+                        "remaining": int(trade.orderStatus.remaining),
+                        "avg_fill_price": trade.orderStatus.avgFillPrice,
+                    }
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error polling order {order_id}: {e}")
+            return None
+
+    async def poll_pending_orders(self) -> dict[int, dict]:
+        """
+        Poll all pending orders and update tracking.
+
+        Returns:
+            Dict mapping order_id to current status
+        """
+        results = {}
+        now = datetime.now(timezone.utc)
+        orders_to_remove = []
+
+        for order_id, start_time in list(self._orders_being_polled.items()):
+            # Check timeout
+            elapsed = (now - start_time).total_seconds()
+            if elapsed > self._config.order_polling_timeout_seconds:
+                logger.warning(f"Order {order_id} polling timeout after {elapsed:.0f}s")
+                orders_to_remove.append(order_id)
+                continue
+
+            status = await self._poll_order_status(order_id)
+            if status:
+                results[order_id] = status
+
+                # Update local tracking
+                if order_id in self._order_tracking:
+                    tracking = self._order_tracking[order_id]
+                    tracking.status = status["status"]
+                    tracking.filled_quantity = status["filled"]
+                    tracking.avg_fill_price = status["avg_fill_price"]
+                    tracking.last_update = now
+
+                # Stop polling if order is complete
+                if status["status"] in ("Filled", "Cancelled", "Inactive"):
+                    logger.info(f"Order {order_id} completed: {status['status']}")
+                    orders_to_remove.append(order_id)
+
+        # Clean up completed orders
+        for order_id in orders_to_remove:
+            self._orders_being_polled.pop(order_id, None)
+
+        return results
+
+    async def _run_order_polling_loop(self) -> None:
+        """Background task to poll pending orders."""
+        while self.is_connected and self._orders_being_polled:
+            try:
+                await self.poll_pending_orders()
+                await asyncio.sleep(self._config.order_polling_interval_seconds)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Order polling loop error: {e}")
+                await asyncio.sleep(self._config.order_polling_interval_seconds)
+
+    def get_polling_status(self) -> dict:
+        """Get status of order polling."""
+        return {
+            "enabled": self._config.order_polling_enabled,
+            "orders_being_polled": len(self._orders_being_polled),
+            "order_ids": list(self._orders_being_polled.keys()),
+            "polling_interval_seconds": self._config.order_polling_interval_seconds,
+        }
+
+    # ========== P2: Connection Quality Metrics ==========
+
+    async def measure_latency(self) -> float:
+        """
+        Measure round-trip latency to IB server.
+
+        Returns:
+            Latency in milliseconds
+        """
+        if not self.is_connected:
+            return -1.0
+
+        try:
+            start = datetime.now(timezone.utc)
+            await asyncio.wait_for(
+                self._ib.reqCurrentTimeAsync(),
+                timeout=5.0
+            )
+            end = datetime.now(timezone.utc)
+
+            latency_ms = (end - start).total_seconds() * 1000
+            self._connection_quality.record_latency(latency_ms)
+            self._connection_quality.message_count += 1
+
+            return latency_ms
+
+        except Exception as e:
+            logger.error(f"Latency measurement failed: {e}")
+            self._connection_quality.error_count += 1
+            return -1.0
+
+    def get_connection_quality(self) -> dict:
+        """
+        Get connection quality metrics.
+
+        Returns:
+            Dict with connection quality statistics
+        """
+        return {
+            "is_connected": self.is_connected,
+            "metrics": self._connection_quality.to_dict(),
+            "rate_limiter": self._rate_limiter.get_stats(),
+            "circuit_breaker": self._circuit_breaker.get_stats().to_dict(),
+        }
+
+    def record_connection_event(self, event_type: str) -> None:
+        """
+        Record a connection-related event for quality tracking.
+
+        Args:
+            event_type: Type of event ("connect", "disconnect", "error", etc.)
+        """
+        now = datetime.now(timezone.utc)
+
+        if event_type == "connect":
+            if self._connection_quality.connection_start_time is None:
+                self._connection_quality.connection_start_time = now
+            self._connection_quality.last_reconnect_time = now
+            self._connection_quality.reconnect_count += 1
+
+        elif event_type == "disconnect":
+            self._connection_quality.last_disconnect_time = now
+            self._connection_quality.total_disconnects += 1
+            # Update uptime
+            if self._connection_quality.connection_start_time:
+                session_time = (now - self._connection_quality.connection_start_time).total_seconds()
+                self._connection_quality.connection_uptime_seconds += session_time
+
+        elif event_type == "error":
+            self._connection_quality.error_count += 1
+
+        elif event_type == "pacing_violation":
+            self._connection_quality.pacing_violations += 1
+
+    # ========== P2: Session Recovery ==========
+
+    def save_session_state(self) -> None:
+        """
+        Save current session state for recovery.
+
+        Called periodically to enable session recovery after disconnect.
+        """
+        if not self._config.session_recovery_enabled:
+            return
+
+        now = datetime.now(timezone.utc)
+
+        # Save subscriptions
+        self._session_state.subscribed_symbols = list(self._subscriptions.keys())
+
+        # Save pending orders
+        self._session_state.pending_orders = {
+            oid: {
+                "symbol": status.symbol,
+                "side": status.side.value,
+                "quantity": status.quantity,
+                "filled": status.filled_quantity,
+                "status": status.status,
+            }
+            for oid, status in self._order_tracking.items()
+            if status.status not in ("Filled", "Cancelled", "Inactive")
+        }
+
+        # Save positions from last portfolio state
+        if self._last_portfolio_state:
+            self._session_state.last_known_positions = {
+                symbol: {
+                    "quantity": pos.quantity,
+                    "avg_cost": pos.avg_cost,
+                    "market_value": pos.market_value,
+                }
+                for symbol, pos in self._last_portfolio_state.positions.items()
+            }
+
+        self._session_state.last_save_time = now
+        logger.debug(f"Session state saved: {len(self._session_state.subscribed_symbols)} subscriptions, "
+                     f"{len(self._session_state.pending_orders)} pending orders")
+
+    async def recover_session(self) -> dict:
+        """
+        Recover session state after reconnection.
+
+        Returns:
+            Dict with recovery results
+        """
+        if not self._config.session_recovery_enabled:
+            return {"enabled": False}
+
+        results = {
+            "enabled": True,
+            "subscriptions_recovered": 0,
+            "subscriptions_failed": 0,
+            "orders_reconciled": 0,
+            "orders_missing": 0,
+        }
+
+        if not self.is_connected:
+            logger.warning("Cannot recover session: not connected")
+            return results
+
+        logger.info("Starting session recovery...")
+
+        # Recover market data subscriptions
+        for sub_key in self._session_state.subscribed_symbols:
+            parts = sub_key.split(":")
+            if len(parts) >= 3:
+                symbol, exchange, currency = parts[0], parts[1], parts[2]
+                try:
+                    success = await self.subscribe_market_data(symbol, exchange, currency)
+                    if success:
+                        results["subscriptions_recovered"] += 1
+                    else:
+                        results["subscriptions_failed"] += 1
+                except Exception as e:
+                    logger.error(f"Failed to recover subscription {sub_key}: {e}")
+                    results["subscriptions_failed"] += 1
+
+        # Reconcile orders
+        await self._reconcile_orders_on_reconnect()
+        results["orders_reconciled"] = len(self._session_state.pending_orders)
+
+        # Start polling for any pending orders
+        for order_id in self._session_state.pending_orders.keys():
+            await self._start_order_polling(order_id)
+            results["orders_missing"] = len(self._orders_being_polled)
+
+        logger.info(
+            f"Session recovery complete: {results['subscriptions_recovered']} subscriptions, "
+            f"{results['orders_reconciled']} orders reconciled"
+        )
+
+        return results
+
+    def get_session_state(self) -> dict:
+        """Get current session state for debugging."""
+        return self._session_state.to_dict()

@@ -238,11 +238,122 @@ class VaRCalculator:
         self._symbols = list(returns_dict.keys())
         self._cov_matrix = None  # Invalidate cache
 
+    def _shrink_covariance(
+        self,
+        sample_cov: np.ndarray,
+        n_obs: int
+    ) -> np.ndarray:
+        """
+        Apply Ledoit-Wolf shrinkage to stabilize covariance estimation (PM-11).
+
+        Problem:
+            Sample covariance matrices are noisy when n_obs < n_assets^2.
+            This noise leads to poor portfolio optimization results:
+            - Extreme weights
+            - Poor out-of-sample performance
+            - Numerical instability (near-singular matrices)
+
+        Solution (Ledoit-Wolf 2004):
+            Shrink the sample covariance towards a structured target:
+            Cov_shrunk = alpha * Target + (1 - alpha) * Sample
+
+        The target is a "constant correlation" matrix where:
+            - All diagonal elements equal the average variance
+            - All off-diagonal elements equal avg_var * avg_correlation
+
+        This target has guaranteed good conditioning but loses information
+        about individual correlations. The shrinkage intensity alpha balances
+        the bias-variance tradeoff:
+            - alpha = 0: Use sample covariance (high variance, low bias)
+            - alpha = 1: Use target (low variance, high bias)
+
+        The optimal alpha increases with:
+            - Fewer observations (n_obs small)
+            - More assets (n large)
+            - Higher estimation noise in sample
+
+        Args:
+            sample_cov: Raw sample covariance matrix (n x n)
+            n_obs: Number of observations used to estimate sample_cov
+
+        Returns:
+            Shrunk covariance matrix (n x n)
+
+        Reference:
+            Ledoit & Wolf (2004) "Honey, I Shrunk the Sample Covariance Matrix"
+            Journal of Empirical Finance 11(1), 107-129
+        """
+        n = len(sample_cov)
+
+        if n <= 1:
+            return sample_cov
+
+        # Step 1: Extract variances (diagonal elements)
+        variances = np.diag(sample_cov)
+        std_devs = np.sqrt(np.maximum(variances, 1e-10))
+
+        # Step 2: Build correlation matrix from sample covariance
+        # Corr_ij = Cov_ij / (sigma_i * sigma_j)
+        std_outer = np.outer(std_devs, std_devs)
+        std_outer = np.where(std_outer > 0, std_outer, 1.0)  # Avoid division by zero
+        corr_matrix = sample_cov / std_outer
+        np.fill_diagonal(corr_matrix, 1.0)  # Ensure diagonal is exactly 1
+
+        # Step 3: Calculate target parameters
+        # Average variance (for target diagonal)
+        avg_var = np.mean(variances)
+
+        # Average correlation (for target off-diagonal)
+        # Only consider off-diagonal elements
+        mask = ~np.eye(n, dtype=bool)
+        if np.sum(mask) > 0:
+            avg_corr = np.mean(corr_matrix[mask])
+        else:
+            avg_corr = 0.0
+
+        # Step 4: Build shrinkage target (constant correlation matrix)
+        # Target_ij = avg_var * (1 if i==j else avg_corr)
+        # In matrix form: Target = avg_var * (I + avg_corr * (J - I))
+        target = avg_var * (
+            np.eye(n) + avg_corr * (np.ones((n, n)) - np.eye(n))
+        )
+
+        # Step 5: Calculate shrinkage intensity
+        # Simple heuristic: intensity proportional to 1/n_obs
+        # With k observations, estimation error ~ 1/sqrt(k)
+        # Use k=10 as the "critical" number where we need 100% shrinkage
+        SHRINKAGE_CONSTANT = 10.0
+        shrinkage_intensity = min(1.0, SHRINKAGE_CONSTANT / max(n_obs, 1))
+
+        # Step 6: Apply shrinkage formula
+        # Cov_shrunk = alpha * Target + (1 - alpha) * Sample
+        shrunk_cov = (
+            shrinkage_intensity * target +
+            (1 - shrinkage_intensity) * sample_cov
+        )
+
+        logger.debug(
+            f"Applied Ledoit-Wolf shrinkage: intensity={shrinkage_intensity:.3f}, "
+            f"n_obs={n_obs}, n_assets={n}"
+        )
+
+        return shrunk_cov
+
     def _build_covariance_matrix(
         self,
-        use_ewma: bool = True
+        use_ewma: bool = True,
+        apply_shrinkage: bool = True
     ) -> np.ndarray:
-        """Build covariance matrix from returns data."""
+        """
+        Build covariance matrix from returns data.
+
+        Args:
+            use_ewma: Use EWMA weighting for recent observations (default True)
+            apply_shrinkage: Apply Ledoit-Wolf shrinkage for stability (default True)
+
+        Returns:
+            Covariance matrix (n x n)
+        """
         if self._cov_matrix is not None:
             return self._cov_matrix
 
@@ -262,6 +373,27 @@ class VaRCalculator:
         else:
             # Standard covariance
             self._cov_matrix = np.cov(returns_matrix)
+
+        # Apply Ledoit-Wolf shrinkage for stability (PM-11)
+        # Especially important with < 250 observations
+        n_obs = min_len
+        if apply_shrinkage and n_obs < 250:
+            self._cov_matrix = self._shrink_covariance(self._cov_matrix, n_obs)
+            logger.debug(
+                f"Applied shrinkage due to limited observations: {n_obs} < 250"
+            )
+
+        # Ensure covariance matrix is positive semi-definite
+        # Fix numerical issues that could lead to negative eigenvalues
+        try:
+            eigenvalues, eigenvectors = np.linalg.eigh(self._cov_matrix)
+            if np.any(eigenvalues < 0):
+                # Fix negative eigenvalues (numerical precision issue)
+                eigenvalues = np.maximum(eigenvalues, 1e-10)
+                self._cov_matrix = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
+        except np.linalg.LinAlgError:
+            # If eigendecomposition fails, add small diagonal for stability
+            self._cov_matrix = self._cov_matrix + np.eye(n) * 1e-8
 
         return self._cov_matrix
 
@@ -294,6 +426,211 @@ class VaRCalculator:
 
         return cov
 
+    def _incremental_ewma_update(self, new_returns: np.ndarray) -> None:
+        """
+        Perform incremental EWMA update of covariance matrix (PERF-P0-005).
+
+        This avoids full O(n^2 * T) recalculation by applying a rank-1 update.
+        The EWMA update formula is:
+            Cov_t = lambda * Cov_{t-1} + (1 - lambda) * r_t * r_t'
+
+        Where r_t is the demeaned return vector at time t.
+
+        Args:
+            new_returns: New return vector of shape (n,) for each asset
+
+        Note:
+            Call this method when new returns arrive instead of rebuilding
+            the full covariance matrix from scratch.
+        """
+        if self._cov_matrix is None:
+            # No existing matrix - need full computation first
+            logger.warning(
+                "Cannot perform incremental update without existing covariance. "
+                "Call _build_covariance_matrix() first."
+            )
+            return
+
+        lambda_ = self._decay_factor
+        n = len(new_returns)
+
+        # Validate dimensions
+        if self._cov_matrix.shape[0] != n:
+            logger.warning(
+                f"Dimension mismatch: cov_matrix has {self._cov_matrix.shape[0]} assets, "
+                f"new_returns has {n}. Skipping incremental update."
+            )
+            return
+
+        # Demean the new returns using running mean (approximate)
+        # For a more accurate approach, maintain a running mean estimate
+        if hasattr(self, '_running_mean') and self._running_mean is not None:
+            # Update running mean with EWMA
+            self._running_mean = lambda_ * self._running_mean + (1 - lambda_) * new_returns
+            centered_returns = new_returns - self._running_mean
+        else:
+            # Initialize running mean
+            self._running_mean = new_returns.copy()
+            centered_returns = new_returns  # First observation, no demeaning
+
+        # Incremental EWMA update: Cov_new = lambda * Cov_old + (1-lambda) * outer(r, r)
+        self._cov_matrix = (
+            lambda_ * self._cov_matrix +
+            (1 - lambda_) * np.outer(centered_returns, centered_returns)
+        )
+
+        logger.debug(
+            f"Incremental EWMA update applied with decay factor {lambda_}"
+        )
+
+    def update_returns_incremental(
+        self,
+        new_returns: dict[str, float]
+    ) -> None:
+        """
+        Update returns data incrementally and apply EWMA covariance update.
+
+        This is more efficient than update_returns() when adding single
+        observations, as it avoids full matrix recalculation.
+
+        Args:
+            new_returns: Dictionary mapping symbols to new return values
+        """
+        # Ensure symbols match
+        if set(new_returns.keys()) != set(self._symbols):
+            # Symbol set changed - need full rebuild
+            logger.info(
+                "Symbol set changed, falling back to full covariance rebuild"
+            )
+            # Add new returns to history
+            for symbol, ret in new_returns.items():
+                if symbol in self._returns_data:
+                    self._returns_data[symbol] = np.append(
+                        self._returns_data[symbol], ret
+                    )
+                else:
+                    self._returns_data[symbol] = np.array([ret])
+            self._symbols = list(self._returns_data.keys())
+            self._cov_matrix = None  # Force full rebuild
+            return
+
+        # Build new returns vector in symbol order
+        new_ret_vector = np.array([new_returns[s] for s in self._symbols])
+
+        # Append to history
+        for symbol, ret in new_returns.items():
+            self._returns_data[symbol] = np.append(
+                self._returns_data[symbol], ret
+            )
+
+        # Apply incremental update if we have existing covariance
+        if self._cov_matrix is not None:
+            self._incremental_ewma_update(new_ret_vector)
+        # If no covariance matrix exists, it will be built on next calculation
+
+    def get_covariance_for_optimization(
+        self,
+        force_shrinkage: bool = True,
+        shrinkage_target_type: str = "constant_correlation"
+    ) -> tuple[np.ndarray, list[str], dict[str, Any]]:
+        """
+        Get covariance matrix optimized for mean-variance portfolio optimization (PM-11).
+
+        This method provides a stabilized covariance matrix suitable for
+        optimization, with explicit shrinkage control and metadata.
+
+        Args:
+            force_shrinkage: Always apply shrinkage regardless of sample size
+            shrinkage_target_type: Type of shrinkage target
+                - "constant_correlation": Ledoit-Wolf constant correlation target
+                - "identity": Shrink towards scaled identity (spherical)
+
+        Returns:
+            Tuple of:
+                - Shrunk covariance matrix (n x n)
+                - List of symbols in matrix order
+                - Metadata dict with shrinkage details
+
+        Example:
+            >>> cov, symbols, meta = var_calc.get_covariance_for_optimization()
+            >>> # Use cov for mean-variance optimization
+            >>> weights = optimize_portfolio(cov, expected_returns)
+        """
+        n = len(self._symbols)
+        if n == 0:
+            return np.array([[]]), [], {"error": "No symbols available"}
+
+        # Get number of observations
+        min_len = min(len(r) for r in self._returns_data.values())
+
+        # Build returns matrix
+        returns_matrix = np.array([
+            self._returns_data[s][-min_len:] for s in self._symbols
+        ])
+
+        # Calculate raw covariance (EWMA)
+        raw_cov = self._ewma_covariance(returns_matrix.T)
+
+        # Determine if shrinkage is needed
+        needs_shrinkage = force_shrinkage or min_len < 250
+
+        if needs_shrinkage:
+            if shrinkage_target_type == "identity":
+                # Shrink towards scaled identity matrix
+                avg_var = np.trace(raw_cov) / n
+                target = avg_var * np.eye(n)
+                SHRINKAGE_CONSTANT = 10.0
+                shrinkage_intensity = min(1.0, SHRINKAGE_CONSTANT / max(min_len, 1))
+                shrunk_cov = (
+                    shrinkage_intensity * target +
+                    (1 - shrinkage_intensity) * raw_cov
+                )
+            else:
+                # Default: constant correlation (Ledoit-Wolf)
+                shrunk_cov = self._shrink_covariance(raw_cov, min_len)
+                SHRINKAGE_CONSTANT = 10.0
+                shrinkage_intensity = min(1.0, SHRINKAGE_CONSTANT / max(min_len, 1))
+        else:
+            shrunk_cov = raw_cov
+            shrinkage_intensity = 0.0
+
+        # Ensure positive semi-definiteness
+        try:
+            eigenvalues, eigenvectors = np.linalg.eigh(shrunk_cov)
+            if np.any(eigenvalues < 0):
+                eigenvalues = np.maximum(eigenvalues, 1e-10)
+                shrunk_cov = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
+                psd_corrected = True
+            else:
+                psd_corrected = False
+        except np.linalg.LinAlgError:
+            shrunk_cov = shrunk_cov + np.eye(n) * 1e-8
+            psd_corrected = True
+
+        # Build metadata
+        metadata = {
+            "n_assets": n,
+            "n_observations": min_len,
+            "shrinkage_applied": needs_shrinkage,
+            "shrinkage_intensity": shrinkage_intensity,
+            "shrinkage_target": shrinkage_target_type if needs_shrinkage else None,
+            "psd_corrected": psd_corrected,
+            "condition_number": np.linalg.cond(shrunk_cov) if n > 0 else None,
+            "min_eigenvalue": float(np.min(eigenvalues)) if n > 0 else None,
+            "recommendation": (
+                "STABLE" if shrinkage_intensity > 0 and min_len >= 50
+                else "CAUTION - limited data" if min_len < 50
+                else "OK"
+            ),
+        }
+
+        logger.info(
+            f"Covariance for optimization: {n} assets, {min_len} obs, "
+            f"shrinkage={shrinkage_intensity:.3f}, cond={metadata['condition_number']:.1f}"
+        )
+
+        return shrunk_cov, list(self._symbols), metadata
+
     def calculate_parametric_var(
         self,
         positions: dict[str, float],
@@ -304,44 +641,78 @@ class VaRCalculator:
         """
         Calculate Parametric (Variance-Covariance) VaR.
 
-        Assumes returns are normally distributed.
+        The parametric method assumes returns follow a normal distribution
+        and uses the portfolio's standard deviation to estimate potential losses.
+
+        VaR Formula:
+            VaR = Z_alpha * sigma_p * sqrt(T) * Portfolio_Value
+
+        Where:
+            Z_alpha = inverse CDF of normal distribution at confidence level
+                      (e.g., 1.645 for 95%, 2.326 for 99%)
+            sigma_p = portfolio standard deviation (daily)
+            T = time horizon in days
+            sqrt(T) = square-root-of-time scaling (assumes IID returns)
+
+        Portfolio variance is calculated as:
+            sigma_p^2 = w' * Cov * w
+
+        Where w is the vector of position weights and Cov is the covariance matrix.
+
+        Expected Shortfall (CVaR) is also computed:
+            ES = sigma_p * phi(Z_alpha) / (1 - alpha) * Portfolio_Value
+
+        Where phi() is the standard normal PDF. ES represents the expected
+        loss given that the loss exceeds VaR (i.e., the average of the tail).
 
         Args:
             positions: Dictionary of symbol to position value
             portfolio_value: Total portfolio value
-            confidence_level: Confidence level (e.g., 0.95)
-            horizon_days: Time horizon in days
+            confidence_level: Confidence level (e.g., 0.95 for 95% VaR)
+            horizon_days: Time horizon in days (default: 1)
 
         Returns:
-            VaRResult with parametric VaR
+            VaRResult with parametric VaR and Expected Shortfall
+
+        Limitations:
+            - Assumes normally distributed returns (underestimates tail risk)
+            - Does not capture fat tails or skewness
+            - Square-root-of-time scaling assumes no autocorrelation
         """
         if confidence_level is None:
             confidence_level = self._confidence_level
         if horizon_days is None:
             horizon_days = self._horizon_days
 
-        # Build covariance matrix
+        # Step 1: Build covariance matrix from historical returns
         cov_matrix = self._build_covariance_matrix()
 
-        # Build position weights vector
+        # Step 2: Build position weights vector (w_i = position_value_i / total_value)
         symbols = self._symbols
         weights = np.array([positions.get(s, 0) / portfolio_value for s in symbols])
 
-        # Portfolio variance
+        # Step 3: Calculate portfolio variance using matrix form: Var(Rp) = w' * Cov * w
+        # This captures all pairwise correlations between positions
         portfolio_variance = np.dot(weights, np.dot(cov_matrix, weights))
+        # Guard against numerical precision issues (should never be negative)
+        portfolio_variance = max(0.0, float(portfolio_variance))
         portfolio_std = np.sqrt(portfolio_variance)
 
-        # Scale for horizon
+        # Step 4: Scale volatility for time horizon using square-root-of-time rule
+        # sigma_T = sigma_1 * sqrt(T), valid if returns are IID
         portfolio_std_scaled = portfolio_std * np.sqrt(horizon_days)
 
-        # Z-score for confidence level
+        # Step 5: Get Z-score for the confidence level
+        # Z_0.95 = 1.645, Z_0.99 = 2.326 (one-tailed)
         z_score = stats.norm.ppf(confidence_level)
 
-        # VaR
+        # Step 6: Calculate VaR = Z * sigma * Portfolio_Value
         var_pct = z_score * portfolio_std_scaled
         var_absolute = var_pct * portfolio_value
 
-        # Expected Shortfall (CVaR)
+        # Step 7: Calculate Expected Shortfall (CVaR)
+        # ES = E[Loss | Loss > VaR] = sigma * phi(z) / (1-alpha)
+        # This is the average loss in the tail beyond VaR
         es_multiplier = stats.norm.pdf(z_score) / (1 - confidence_level)
         es_pct = es_multiplier * portfolio_std_scaled
         es_absolute = es_pct * portfolio_value
@@ -369,49 +740,79 @@ class VaRCalculator:
         """
         Calculate Historical Simulation VaR.
 
-        Uses actual historical returns distribution.
+        Historical VaR uses the actual empirical distribution of past returns
+        rather than assuming a parametric distribution (like normal).
+
+        Method:
+            1. Calculate historical portfolio returns using current weights
+            2. Sort returns from worst to best
+            3. Find the return at the (1-alpha) percentile
+            4. VaR = -Percentile_return * Portfolio_Value
+
+        For example, with 250 observations and 95% confidence:
+            - Sort all 250 returns
+            - VaR is the 13th worst return (250 * 0.05 = 12.5, round up)
+
+        For multi-day horizons, we use overlapping windows to aggregate
+        returns (sum of daily returns over the window period).
+
+        Expected Shortfall (CVaR) is calculated as the average of all
+        returns worse than the VaR threshold.
+
+        Advantages over parametric VaR:
+            - Captures fat tails and non-normal distributions
+            - No distributional assumptions required
+            - Naturally includes extreme historical events
+
+        Limitations:
+            - Limited by available historical data
+            - Cannot extrapolate beyond historical worst case
+            - Assumes past distribution predicts future
 
         Args:
             positions: Dictionary of symbol to position value
             portfolio_value: Total portfolio value
-            confidence_level: Confidence level
-            horizon_days: Time horizon
+            confidence_level: Confidence level (e.g., 0.95)
+            horizon_days: Time horizon in days
 
         Returns:
-            VaRResult with historical VaR
+            VaRResult with historical VaR and Expected Shortfall
         """
         if confidence_level is None:
             confidence_level = self._confidence_level
         if horizon_days is None:
             horizon_days = self._horizon_days
 
-        # Build portfolio returns series
+        # Step 1: Build portfolio returns series using current position weights
         symbols = self._symbols
         weights = np.array([positions.get(s, 0) / portfolio_value for s in symbols])
 
-        # Get aligned returns
+        # Step 2: Get aligned returns (use shortest common history)
         min_len = min(len(r) for r in self._returns_data.values())
         returns_matrix = np.array([
             self._returns_data[s][-min_len:] for s in symbols
         ])
 
-        # Portfolio returns
+        # Step 3: Calculate portfolio returns: R_p,t = sum(w_i * R_i,t)
         portfolio_returns = np.dot(weights, returns_matrix)
 
-        # Scale for horizon (sum of returns for multi-day)
+        # Step 4: Scale for horizon using overlapping windows
+        # For T-day VaR, we need T-day returns: R_T = R_1 + R_2 + ... + R_T
         if horizon_days > 1:
-            # Use rolling windows
             scaled_returns = []
             for i in range(len(portfolio_returns) - horizon_days + 1):
+                # Sum returns over the window (assumes log returns or small returns)
                 window_return = np.sum(portfolio_returns[i:i + horizon_days])
                 scaled_returns.append(window_return)
             portfolio_returns = np.array(scaled_returns)
 
-        # Calculate percentile
+        # Step 5: Calculate VaR as the (1-alpha) percentile of losses
+        # Negative sign because we want the loss magnitude (positive number)
         var_pct = -np.percentile(portfolio_returns, (1 - confidence_level) * 100)
         var_absolute = var_pct * portfolio_value
 
-        # Expected Shortfall - average of losses beyond VaR
+        # Step 6: Calculate Expected Shortfall (CVaR)
+        # ES = E[Loss | Loss > VaR] = average of all returns worse than -VaR
         tail_returns = portfolio_returns[portfolio_returns <= -var_pct]
         if len(tail_returns) > 0:
             es_pct = -np.mean(tail_returns)
@@ -663,15 +1064,24 @@ class VaRCalculator:
         weights = np.array([positions.get(s, 0) / portfolio_value for s in symbols])
 
         # Portfolio standard deviation
+        # Guard against negative variance due to numerical precision issues
         port_var = np.dot(weights, np.dot(cov_matrix, weights))
+        port_var = max(0.0, float(port_var))
         port_std = np.sqrt(port_var)
+
+        if port_std < 1e-12:
+            return results  # Cannot compute component VaR with zero portfolio std
 
         for i, symbol in enumerate(symbols):
             if positions.get(symbol, 0) == 0:
                 continue
 
             # Marginal contribution to variance
-            marginal_contrib = np.dot(cov_matrix[i, :], weights) / port_std
+            # Guard against division by zero
+            if port_std < 1e-12:
+                marginal_contrib = 0.0
+            else:
+                marginal_contrib = np.dot(cov_matrix[i, :], weights) / port_std
 
             # Component VaR
             weight = positions.get(symbol, 0) / portfolio_value
@@ -940,6 +1350,464 @@ class VaRCalculator:
             "covariance_cached": self._cov_matrix is not None,
             "supports_liquidity_adjustment": True,  # #R6
             "supports_jump_risk": True,  # #R9
+            "supports_backtesting": True,  # P2: Kupiec test
+            "supports_component_var": True,  # P2: Component VaR breakdown
+            "supports_marginal_var": True,  # P2: Marginal VaR
+        }
+
+    # =========================================================================
+    # COMPONENT VAR BREAKDOWN (P2)
+    # =========================================================================
+
+    def calculate_component_var_breakdown(
+        self,
+        positions: dict[str, float],
+        portfolio_value: float,
+        confidence_level: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        Calculate detailed component VaR breakdown for all positions (P2).
+
+        Component VaR decomposes total portfolio VaR into contributions
+        from each position. The sum of component VaRs equals total VaR.
+
+        Formula: ComponentVaR_i = weight_i * MarginalVaR_i
+                                = weight_i * (Cov(R_i, R_p) / sigma_p) * z * sigma_p
+                                = weight_i * beta_i * VaR_p
+
+        Args:
+            positions: Dictionary of symbol to position value
+            portfolio_value: Total portfolio value
+            confidence_level: Confidence level
+
+        Returns:
+            Dictionary with component VaR breakdown and statistics
+        """
+        if confidence_level is None:
+            confidence_level = self._confidence_level
+
+        # Calculate total VaR first
+        total_result = self.calculate_parametric_var(
+            positions, portfolio_value, confidence_level
+        )
+        total_var = total_result.var_absolute
+
+        # Build covariance matrix
+        cov_matrix = self._build_covariance_matrix()
+        symbols = self._symbols
+
+        # Position weights
+        weights = np.array([positions.get(s, 0) / portfolio_value for s in symbols])
+
+        # Portfolio variance and std
+        port_var = np.dot(weights, np.dot(cov_matrix, weights))
+        port_var = max(0.0, float(port_var))
+        port_std = np.sqrt(port_var)
+
+        if port_std < 1e-12:
+            return {
+                "error": "Portfolio standard deviation too small",
+                "total_var": total_var,
+                "components": {},
+            }
+
+        z_score = stats.norm.ppf(confidence_level)
+
+        # Calculate component VaR for each position
+        components = {}
+        total_component_var = 0.0
+
+        for i, symbol in enumerate(symbols):
+            position_value = positions.get(symbol, 0)
+            if abs(position_value) < 1e-6:
+                continue
+
+            weight = position_value / portfolio_value
+
+            # Marginal contribution to variance: d(sigma_p^2)/d(w_i) = 2 * Cov(i, p)
+            # Cov(i, p) = sum_j(w_j * Cov(i,j)) = cov_matrix[i,:] @ weights
+            cov_i_portfolio = np.dot(cov_matrix[i, :], weights)
+
+            # Marginal VaR (per unit weight)
+            # MarginalVaR = d(VaR)/d(w) = z * Cov(i,p) / sigma_p
+            marginal_var_per_weight = z_score * cov_i_portfolio / port_std
+
+            # Component VaR = weight * MarginalVaR
+            component_var = weight * marginal_var_per_weight * portfolio_value
+
+            # Beta to portfolio
+            beta_to_portfolio = cov_i_portfolio / port_var if port_var > 0 else 0
+
+            # Percentage of total VaR
+            pct_of_total = (component_var / total_var * 100) if total_var > 0 else 0
+
+            components[symbol] = {
+                "position_value": position_value,
+                "weight": weight,
+                "component_var": component_var,
+                "marginal_var_per_unit": marginal_var_per_weight,
+                "beta_to_portfolio": beta_to_portfolio,
+                "pct_of_total_var": pct_of_total,
+                "standalone_volatility": np.sqrt(cov_matrix[i, i]),
+                "diversification_benefit": (
+                    weight * np.sqrt(cov_matrix[i, i]) * z_score * portfolio_value
+                    - component_var
+                ),
+            }
+            total_component_var += component_var
+
+        # Verification: sum of component VaRs should equal total VaR
+        decomposition_error = abs(total_component_var - total_var)
+
+        return {
+            "total_var": total_var,
+            "confidence_level": confidence_level,
+            "components": components,
+            "summary": {
+                "sum_component_var": total_component_var,
+                "decomposition_error": decomposition_error,
+                "decomposition_valid": decomposition_error < total_var * 0.01,
+                "largest_contributor": max(
+                    components.keys(),
+                    key=lambda s: abs(components[s]["component_var"]),
+                    default=None,
+                ),
+                "diversification_benefit_total": sum(
+                    c["diversification_benefit"] for c in components.values()
+                ),
+            },
+        }
+
+    # =========================================================================
+    # MARGINAL VAR CALCULATION (P2)
+    # =========================================================================
+
+    def calculate_marginal_var(
+        self,
+        positions: dict[str, float],
+        portfolio_value: float,
+        target_symbol: str,
+        position_change: float = 1.0,
+        confidence_level: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        Calculate marginal VaR for a position change (P2).
+
+        Marginal VaR measures the change in portfolio VaR per unit change
+        in position. It helps in:
+        - Position sizing decisions
+        - Risk budgeting
+        - Understanding VaR sensitivity
+
+        Args:
+            positions: Current positions
+            portfolio_value: Total portfolio value
+            target_symbol: Symbol to calculate marginal VaR for
+            position_change: Amount of position change to test
+            confidence_level: Confidence level
+
+        Returns:
+            Dictionary with marginal VaR metrics
+        """
+        if confidence_level is None:
+            confidence_level = self._confidence_level
+
+        if target_symbol not in self._symbols:
+            return {"error": f"Symbol {target_symbol} not in returns data"}
+
+        # Current VaR
+        current_var_result = self.calculate_parametric_var(
+            positions, portfolio_value, confidence_level
+        )
+        current_var = current_var_result.var_absolute
+
+        # Build covariance matrix
+        cov_matrix = self._build_covariance_matrix()
+        symbols = self._symbols
+        target_idx = symbols.index(target_symbol)
+
+        # Position weights
+        weights = np.array([positions.get(s, 0) / portfolio_value for s in symbols])
+
+        # Portfolio variance and std
+        port_var = np.dot(weights, np.dot(cov_matrix, weights))
+        port_var = max(0.0, float(port_var))
+        port_std = np.sqrt(port_var)
+
+        z_score = stats.norm.ppf(confidence_level)
+
+        # Analytical marginal VaR (derivative approach)
+        # d(VaR)/d(position_i) = z * Cov(i, portfolio) / (sigma_p * portfolio_value)
+        cov_i_portfolio = np.dot(cov_matrix[target_idx, :], weights)
+
+        if port_std > 1e-12:
+            analytical_marginal_var = z_score * cov_i_portfolio / port_std
+        else:
+            analytical_marginal_var = 0.0
+
+        # Numerical marginal VaR (finite difference)
+        # VaR with position increased
+        positions_up = dict(positions)
+        positions_up[target_symbol] = positions_up.get(target_symbol, 0) + position_change
+        portfolio_value_up = portfolio_value + position_change
+
+        var_up_result = self.calculate_parametric_var(
+            positions_up, portfolio_value_up, confidence_level
+        )
+        var_up = var_up_result.var_absolute
+
+        # VaR with position decreased
+        positions_down = dict(positions)
+        positions_down[target_symbol] = positions_down.get(target_symbol, 0) - position_change
+        portfolio_value_down = portfolio_value - position_change
+
+        var_down_result = self.calculate_parametric_var(
+            positions_down, portfolio_value_down, confidence_level
+        )
+        var_down = var_down_result.var_absolute
+
+        # Central difference numerical derivative
+        numerical_marginal_var = (var_up - var_down) / (2 * position_change)
+
+        # Incremental VaR (actual change from adding position_change)
+        incremental_var = var_up - current_var
+
+        return {
+            "target_symbol": target_symbol,
+            "current_position": positions.get(target_symbol, 0),
+            "position_change": position_change,
+            "current_var": current_var,
+            "var_after_increase": var_up,
+            "var_after_decrease": var_down,
+            "marginal_var": {
+                "analytical": analytical_marginal_var,
+                "numerical": numerical_marginal_var,
+                "per_unit": numerical_marginal_var,
+                "per_percent": numerical_marginal_var * portfolio_value / 100,
+            },
+            "incremental_var": incremental_var,
+            "var_elasticity": (
+                (incremental_var / current_var) / (position_change / portfolio_value)
+                if current_var > 0 and portfolio_value > 0
+                else 0
+            ),
+            "recommendation": (
+                "REDUCE" if numerical_marginal_var > current_var / portfolio_value * 1.5
+                else "INCREASE" if numerical_marginal_var < current_var / portfolio_value * 0.5
+                else "NEUTRAL"
+            ),
+        }
+
+    # =========================================================================
+    # VAR BACKTESTING WITH KUPIEC TEST (P2)
+    # =========================================================================
+
+    def backtest_var(
+        self,
+        positions: dict[str, float],
+        portfolio_value: float,
+        historical_returns: np.ndarray | None = None,
+        confidence_level: float | None = None,
+        method: VaRMethod = VaRMethod.PARAMETRIC,
+    ) -> dict[str, Any]:
+        """
+        Backtest VaR model using Kupiec's POF test (P2).
+
+        The Kupiec test (Proportion of Failures) tests whether the number
+        of VaR exceedances is consistent with the model's confidence level.
+
+        H0: The VaR model is correctly specified
+        H1: The VaR model is misspecified
+
+        Test statistic: LR = -2 * ln[(1-p)^(n-x) * p^x] + 2 * ln[(1-x/n)^(n-x) * (x/n)^x]
+        where:
+        - p = 1 - confidence_level (expected exceedance rate)
+        - n = number of observations
+        - x = number of actual exceedances
+
+        Under H0, LR ~ chi-squared(1)
+
+        Args:
+            positions: Dictionary of symbol to position value
+            portfolio_value: Total portfolio value
+            historical_returns: Array of historical portfolio returns (optional)
+            confidence_level: Confidence level for VaR
+            method: VaR calculation method
+
+        Returns:
+            Dictionary with backtesting results including Kupiec test
+        """
+        if confidence_level is None:
+            confidence_level = self._confidence_level
+
+        # Get historical portfolio returns
+        if historical_returns is None:
+            symbols = self._symbols
+            weights = np.array([
+                positions.get(s, 0) / portfolio_value for s in symbols
+            ])
+
+            min_len = min(len(r) for r in self._returns_data.values())
+            returns_matrix = np.array([
+                self._returns_data[s][-min_len:] for s in symbols
+            ])
+
+            historical_returns = np.dot(weights, returns_matrix)
+
+        n_obs = len(historical_returns)
+        if n_obs < 30:
+            return {
+                "error": "Insufficient observations for backtesting",
+                "n_observations": n_obs,
+                "minimum_required": 30,
+            }
+
+        # Calculate rolling VaR and count exceedances
+        # Use expanding window for VaR estimation
+        exceedances = []
+        var_estimates = []
+        actual_returns = []
+
+        # Start after having enough data for estimation
+        estimation_window = min(250, n_obs // 2)
+
+        for t in range(estimation_window, n_obs):
+            # Estimate VaR using data up to t
+            window_returns = historical_returns[:t]
+            window_std = np.std(window_returns)
+            z_score = stats.norm.ppf(confidence_level)
+
+            if method == VaRMethod.PARAMETRIC:
+                var_estimate = z_score * window_std
+            elif method == VaRMethod.HISTORICAL:
+                var_estimate = -np.percentile(
+                    window_returns, (1 - confidence_level) * 100
+                )
+            else:
+                var_estimate = z_score * window_std  # Default to parametric
+
+            var_estimates.append(var_estimate)
+            actual_return = historical_returns[t]
+            actual_returns.append(actual_return)
+
+            # Check for exceedance (loss exceeds VaR)
+            exceedance = actual_return < -var_estimate
+            exceedances.append(exceedance)
+
+        n_backtest = len(exceedances)
+        n_exceedances = sum(exceedances)
+
+        # Expected exceedances
+        expected_rate = 1 - confidence_level
+        expected_exceedances = expected_rate * n_backtest
+
+        # Kupiec's POF test
+        p = expected_rate  # Expected exceedance probability
+        x = n_exceedances  # Actual exceedances
+        n = n_backtest
+
+        # Observed exceedance rate
+        observed_rate = x / n if n > 0 else 0
+
+        # Log-likelihood ratio test statistic
+        # LR = -2 * [ln(L0) - ln(L1)]
+        # L0 = (1-p)^(n-x) * p^x  (null hypothesis: model is correct)
+        # L1 = (1-x/n)^(n-x) * (x/n)^x  (alternative: use observed rate)
+
+        # Handle edge cases
+        if x == 0:
+            # No exceedances
+            log_L0 = (n - x) * np.log(1 - p)
+            log_L1 = (n - x) * np.log(1) if n == x else (n - x) * np.log(1)
+            lr_statistic = -2 * (log_L0 - log_L1) if n > x else 0
+        elif x == n:
+            # All exceedances
+            log_L0 = x * np.log(p)
+            log_L1 = x * np.log(1)
+            lr_statistic = -2 * (log_L0 - log_L1)
+        else:
+            # Normal case
+            log_L0 = (n - x) * np.log(1 - p) + x * np.log(p)
+            log_L1 = (n - x) * np.log(1 - x / n) + x * np.log(x / n)
+            lr_statistic = -2 * (log_L0 - log_L1)
+
+        # P-value from chi-squared distribution with 1 degree of freedom
+        kupiec_p_value = 1 - stats.chi2.cdf(lr_statistic, df=1)
+
+        # Model assessment
+        if kupiec_p_value >= 0.05:
+            model_assessment = "PASS"
+            assessment_detail = "VaR model is not rejected at 5% significance level"
+        else:
+            if observed_rate > expected_rate:
+                model_assessment = "FAIL_CONSERVATIVE"
+                assessment_detail = "Model underestimates risk (too many exceedances)"
+            else:
+                model_assessment = "FAIL_AGGRESSIVE"
+                assessment_detail = "Model overestimates risk (too few exceedances)"
+
+        # Additional statistics
+        # Christoffersen independence test (simplified)
+        # Tests whether exceedances are independent (clustering test)
+        if n_exceedances >= 2:
+            # Count transitions
+            n_00 = sum(1 for i in range(len(exceedances) - 1)
+                      if not exceedances[i] and not exceedances[i + 1])
+            n_01 = sum(1 for i in range(len(exceedances) - 1)
+                      if not exceedances[i] and exceedances[i + 1])
+            n_10 = sum(1 for i in range(len(exceedances) - 1)
+                      if exceedances[i] and not exceedances[i + 1])
+            n_11 = sum(1 for i in range(len(exceedances) - 1)
+                      if exceedances[i] and exceedances[i + 1])
+
+            # Transition probabilities
+            pi_01 = n_01 / (n_00 + n_01) if (n_00 + n_01) > 0 else 0
+            pi_11 = n_11 / (n_10 + n_11) if (n_10 + n_11) > 0 else 0
+
+            clustering_detected = abs(pi_01 - pi_11) > 0.1
+        else:
+            clustering_detected = False
+            pi_01 = pi_11 = 0
+
+        return {
+            "method": method.value,
+            "confidence_level": confidence_level,
+            "backtest_period": {
+                "n_observations": n_obs,
+                "n_backtest_days": n_backtest,
+                "estimation_window": estimation_window,
+            },
+            "exceedances": {
+                "actual": n_exceedances,
+                "expected": expected_exceedances,
+                "actual_rate": observed_rate,
+                "expected_rate": expected_rate,
+            },
+            "kupiec_test": {
+                "test_statistic": lr_statistic,
+                "p_value": kupiec_p_value,
+                "critical_value_5pct": stats.chi2.ppf(0.95, df=1),
+                "reject_null": kupiec_p_value < 0.05,
+            },
+            "independence_test": {
+                "clustering_detected": clustering_detected,
+                "transition_prob_01": pi_01,
+                "transition_prob_11": pi_11,
+            },
+            "model_assessment": {
+                "result": model_assessment,
+                "detail": assessment_detail,
+                "exceedance_ratio": observed_rate / expected_rate if expected_rate > 0 else 0,
+            },
+            "var_statistics": {
+                "mean_var": np.mean(var_estimates),
+                "std_var": np.std(var_estimates),
+                "max_var": np.max(var_estimates),
+                "min_var": np.min(var_estimates),
+            },
+            "worst_exceedances": sorted(
+                [actual_returns[i] for i, exc in enumerate(exceedances) if exc]
+            )[:5] if n_exceedances > 0 else [],
         }
 
     # =========================================================================

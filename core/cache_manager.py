@@ -386,6 +386,127 @@ class CacheManager:
             },
         }
 
+    def warm_cache(
+        self,
+        cache_name: str,
+        warm_entries: list[tuple[str, Any, float | None]],
+    ) -> dict[str, int]:
+        """
+        P2: Warm a cache with precomputed entries on startup.
+
+        Args:
+            cache_name: Name of the cache to warm
+            warm_entries: List of (key, value, ttl_seconds) tuples.
+                         If ttl_seconds is None, uses the cache's default TTL.
+
+        Returns:
+            Dictionary with warming statistics:
+                - 'success': Number of entries successfully added
+                - 'failed': Number of entries that failed
+                - 'cache_name': Name of the cache
+        """
+        cache = self.get_cache(cache_name)
+        if cache is None:
+            logger.warning(f"Cache '{cache_name}' not found for warming")
+            return {'success': 0, 'failed': len(warm_entries), 'cache_name': cache_name}
+
+        success = 0
+        failed = 0
+
+        for entry in warm_entries:
+            try:
+                if len(entry) == 2:
+                    key, value = entry
+                    ttl = None
+                else:
+                    key, value, ttl = entry
+
+                cache.set(key, value, ttl_seconds=ttl)
+                success += 1
+            except Exception as e:
+                logger.warning(f"Failed to warm cache entry '{entry[0]}': {e}")
+                failed += 1
+
+        logger.info(
+            f"Cache '{cache_name}' warmed: {success} entries added, {failed} failed"
+        )
+        return {'success': success, 'failed': failed, 'cache_name': cache_name}
+
+    def warm_cache_from_callable(
+        self,
+        cache_name: str,
+        warm_functions: list[tuple[str, Callable[[], Any], float | None]],
+    ) -> dict[str, int]:
+        """
+        P2: Warm a cache by calling functions to compute values.
+
+        Args:
+            cache_name: Name of the cache to warm
+            warm_functions: List of (key, callable, ttl_seconds) tuples.
+                           The callable is invoked to generate the value.
+                           If ttl_seconds is None, uses the cache's default TTL.
+
+        Returns:
+            Dictionary with warming statistics
+        """
+        cache = self.get_cache(cache_name)
+        if cache is None:
+            logger.warning(f"Cache '{cache_name}' not found for warming")
+            return {'success': 0, 'failed': len(warm_functions), 'cache_name': cache_name}
+
+        success = 0
+        failed = 0
+
+        for entry in warm_functions:
+            try:
+                if len(entry) == 2:
+                    key, compute_fn = entry
+                    ttl = None
+                else:
+                    key, compute_fn, ttl = entry
+
+                value = compute_fn()
+                cache.set(key, value, ttl_seconds=ttl)
+                success += 1
+            except Exception as e:
+                logger.warning(f"Failed to warm cache entry '{entry[0]}' via callable: {e}")
+                failed += 1
+
+        logger.info(
+            f"Cache '{cache_name}' warmed from callables: {success} entries computed, {failed} failed"
+        )
+        return {'success': success, 'failed': failed, 'cache_name': cache_name}
+
+    def warm_all_caches(
+        self,
+        warm_specs: dict[str, list[tuple[str, Any, float | None]]],
+    ) -> dict[str, dict[str, int]]:
+        """
+        P2: Warm multiple caches at startup.
+
+        Args:
+            warm_specs: Dictionary mapping cache names to lists of
+                       (key, value, ttl_seconds) tuples.
+
+        Returns:
+            Dictionary mapping cache names to their warming statistics
+        """
+        results = {}
+        total_success = 0
+        total_failed = 0
+
+        for cache_name, entries in warm_specs.items():
+            result = self.warm_cache(cache_name, entries)
+            results[cache_name] = result
+            total_success += result['success']
+            total_failed += result['failed']
+
+        logger.info(
+            f"Cache warming complete: {total_success} total entries, {total_failed} failures"
+        )
+        results['_summary'] = {'total_success': total_success, 'total_failed': total_failed}
+        return results
+
 
 @dataclass
 class RateLimitConfig:

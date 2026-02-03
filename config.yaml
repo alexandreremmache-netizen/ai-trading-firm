@@ -1,19 +1,50 @@
 # AI Trading Firm Configuration
 # ================================
+#
+# CONFIGURATION GUIDE:
+# ====================
+# This file is organized into sections:
+#   - SAFE TO MODIFY: Settings you can change without risk
+#   - REVIEW CAREFULLY: Settings that affect trading behavior
+#   - ADVANCED/DANGEROUS: Settings that require expertise
+#
+# For first-time setup, only these 3 settings are REQUIRED:
+#   1. broker.port (4002 for paper, see comment)
+#   2. firm.mode (keep as "paper" until ready)
+#   3. transaction_reporting.firm_lei (get from gleif.org for production)
+
+
+# =============================================================================
+# === SAFE TO MODIFY - Basic Setup ===
+# =============================================================================
 
 firm:
   name: "AI Trading Firm"
   version: "1.0.0"
+  # SAFE: Trading mode - keep "paper" for testing
   mode: "paper"  # paper | live (NEVER change to live without explicit authorization)
 
 # Interactive Brokers Configuration
+# SAFE TO MODIFY: Connection settings
+# VALIDATION: Ensure IB Gateway/TWS is running before starting
 broker:
-  host: "127.0.0.1"
-  port: 4002  # 4002 for Gateway Paper, 4001 for Gateway Live, 7497 for TWS Paper
-  client_id: 2
-  timeout_seconds: 30
-  readonly: false
-  use_delayed_data: true  # Use free delayed data (no market data subscription needed)
+  host: "127.0.0.1"               # [string] IB host (usually localhost)
+  # REQUIRED: Set your IB port - MUST match your IB Gateway/TWS config
+  # Valid values and their meanings:
+  #   4002 = IB Gateway Paper Trading (RECOMMENDED for beginners)
+  #   4001 = IB Gateway Live Trading (DANGEROUS - real money!)
+  #   7497 = TWS Paper Trading
+  #   7496 = TWS Live Trading (DANGEROUS - real money!)
+  port: 4002                      # [int, 4001|4002|7496|7497] IB API port
+  client_id: 2                    # [int, 1-32] Unique client ID (each app needs different ID)
+  timeout_seconds: 30             # [int, 10-120] Connection timeout
+  readonly: false                 # [bool] If true, cannot place orders
+  # SAFE: Use delayed data (free, no subscription needed)
+  use_delayed_data: true          # [bool] Use delayed market data (15-20 min delay)
+
+# =============================================================================
+# === ADVANCED - Event System (usually no changes needed) ===
+# =============================================================================
 
 # Event Bus Configuration
 event_bus:
@@ -27,16 +58,40 @@ orchestrator:
   heartbeat_interval_seconds: 30.0
   shutdown_timeout_seconds: 60.0
 
+# =============================================================================
+# === REVIEW CAREFULLY - Risk Management ===
+# These settings protect your capital. Understand before changing.
+# =============================================================================
+
 # Risk Management (Capital Protection First)
+# VALIDATION: All values are percentages (0-100) or ratios as noted
 risk:
-  max_portfolio_var_pct: 2.0          # Maximum Value at Risk as % of portfolio
-  max_position_size_pct: 5.0          # Max single position as % of portfolio
-  max_sector_exposure_pct: 20.0       # Max exposure to single sector
-  max_daily_loss_pct: 3.0             # Stop trading if daily loss exceeds this
-  max_drawdown_pct: 10.0              # Stop trading if drawdown exceeds this
-  max_leverage: 2.0                   # Maximum leverage allowed
-  max_orders_per_minute: 10           # Rate limiting (anti-HFT)
-  min_order_interval_ms: 100          # Minimum time between orders (anti-HFT)
+  # Value at Risk limit (typical range: 1-5%)
+  # Example: 2.0 means max 2% of portfolio at risk per day
+  max_portfolio_var_pct: 2.0          # [float, 0.5-10.0] Maximum VaR as % of portfolio
+
+  # Position size limits (typical range: 2-10%)
+  # Example: 5.0 means no single position > 5% of portfolio
+  max_position_size_pct: 5.0          # [float, 1.0-20.0] Max single position %
+
+  # Sector concentration limit (typical range: 15-30%)
+  max_sector_exposure_pct: 20.0       # [float, 5.0-50.0] Max sector exposure %
+
+  # Loss limits - CRITICAL for capital preservation
+  # These trigger automatic trading halt (kill-switch)
+  max_daily_loss_pct: 3.0             # [float, 1.0-10.0] Daily loss limit %
+  max_drawdown_pct: 10.0              # [float, 5.0-25.0] Max drawdown from peak %
+
+  # Leverage limit (1.0 = no leverage, 2.0 = 2x leverage)
+  max_leverage: 2.0                   # [float, 1.0-4.0] Maximum leverage ratio
+
+  # Order rate limits (anti-HFT, regulatory compliance)
+  max_orders_per_minute: 10           # [int, 1-100] Orders per minute limit
+  min_order_interval_ms: 100          # [int, 50-5000] Minimum ms between orders
+
+# =============================================================================
+# === ADVANCED - Contract and Futures Settings ===
+# =============================================================================
 
 # Contract Specifications
 contract_specs:
@@ -111,6 +166,11 @@ risk_budget:
     MarketMakingAgent: 0.15
     OptionsVolAgent: 0.20
 
+# =============================================================================
+# === DANGEROUS - Regulatory Compliance ===
+# Changing these may violate EU regulations. Consult compliance officer.
+# =============================================================================
+
 # Market Surveillance (MAR 2014/596/EU)
 surveillance:
   wash_trading_detection: true
@@ -134,7 +194,10 @@ best_execution:
 transaction_reporting:
   enabled: true
   reporting_deadline_minutes: 15      # Report within 15 minutes
-  firm_lei: ""                        # REQUIRED: Enter your 20-character LEI here
+  # REQUIRED FOR PRODUCTION: Your 20-character LEI
+  # Get yours at: https://www.gleif.org/en/about-lei/get-an-lei-find-lei-issuing-organizations
+  # Example format: 5493006MHB84DD0ZWV18
+  firm_lei: ""
   firm_country: "FR"                  # France (AMF jurisdiction)
   default_venue: "XPAR"               # Paris exchange MIC
 
@@ -153,7 +216,12 @@ compliance:
     - "forex"
     - "commodity"
 
+# =============================================================================
+# === SAFE TO MODIFY - Logging and Monitoring ===
+# =============================================================================
+
 # Logging & Audit
+# SAFE: Adjust log level as needed (DEBUG, INFO, WARNING, ERROR)
 logging:
   level: "INFO"
   format: "%(asctime)s | %(name)s | %(levelname)s | %(message)s"
@@ -181,6 +249,11 @@ monitoring:
     var_95_pct:
       warning: 1.5
       critical: 2.0
+
+# =============================================================================
+# === SAFE TO MODIFY - Sector Mappings ===
+# Add your instruments here with their sector classification
+# =============================================================================
 
 # Sector Mapping for Risk Management
 sector_map:
@@ -225,6 +298,11 @@ sector_map:
   EUR: "forex"
   GBP: "forex"
   JPY: "forex"
+
+# =============================================================================
+# === SAFE TO MODIFY - Trading Universe ===
+# Add or remove instruments you want to trade
+# =============================================================================
 
 # Universe of Instruments
 universe:
@@ -357,6 +435,11 @@ universe:
     - symbol: "AUD"        # AUD/USD
       exchange: "IDEALPRO"
       currency: "USD"
+
+# =============================================================================
+# === REVIEW CAREFULLY - Agent Configuration ===
+# Strategy parameters - changes affect trading behavior
+# =============================================================================
 
 # Agent-Specific Configuration
 agents:

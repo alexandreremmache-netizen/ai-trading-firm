@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta, time
-from typing import TYPE_CHECKING, Optional, Set
+from typing import TYPE_CHECKING, Optional, Set, Callable, Any
 from enum import Enum
 from zoneinfo import ZoneInfo
 
@@ -380,7 +381,9 @@ class ComplianceAgent(ValidationAgent):
         self._current_positions: dict[str, float] = {}  # symbol -> weight
 
         # Decision cache for lookup (decision_id -> decision details)
-        self._decision_cache: dict[str, dict] = {}
+        # Use OrderedDict for O(1) cache eviction (PERF-P1-002)
+        self._decision_cache: OrderedDict[str, dict] = OrderedDict()
+        self._decision_cache_max_size: int = 1000
 
         # LEI for this entity (should be configured)
         self._entity_lei = config.parameters.get("entity_lei", "")
@@ -391,6 +394,73 @@ class ComplianceAgent(ValidationAgent):
         # Monitoring
         self._check_latencies: list[float] = []
         self._rejections_today: list[tuple[datetime, RejectionCode, str]] = []
+
+        # Pre-trade compliance checks caching (P2)
+        pretrade_cache_config = config.parameters.get("pretrade_cache", {})
+        self._pretrade_cache_enabled = pretrade_cache_config.get("enabled", True)
+        self._pretrade_cache_ttl_seconds = pretrade_cache_config.get("ttl_seconds", 300)  # 5 min default
+        self._pretrade_cache: dict[str, tuple[ComplianceCheckResult, datetime]] = {}  # key -> (result, timestamp)
+        self._pretrade_cache_hits = 0
+        self._pretrade_cache_misses = 0
+
+        # Regulatory calendar integration (P2)
+        reg_calendar_config = config.parameters.get("regulatory_calendar", {})
+        self._regulatory_calendar_enabled = reg_calendar_config.get("enabled", True)
+        self._regulatory_events: list[dict] = []  # List of upcoming regulatory events
+        self._regulatory_deadlines: list[dict] = []  # List of upcoming deadlines
+        self._regulatory_holidays: set[str] = set()  # YYYY-MM-DD format
+
+        # Audit report scheduling (P2)
+        audit_schedule_config = config.parameters.get("audit_schedule", {})
+        self._audit_schedule_enabled = audit_schedule_config.get("enabled", True)
+        self._scheduled_reports: list[dict] = []  # List of scheduled reports
+        self._last_report_times: dict[str, datetime] = {}  # report_type -> last run time
+        self._report_retention_days = audit_schedule_config.get("retention_days", 365)
+
+        # Compliance notifier for officer notifications (MON-012)
+        # Callable signature: (severity: str, alert_type: str, message: str, details: dict) -> None
+        self._compliance_notifier: Optional[Callable[[str, str, str, dict], Any]] = None
+
+    def set_compliance_notifier(self, compliance_notifier: Callable[[str, str, str, dict], Any]) -> None:
+        """
+        Set compliance officer notifier for real-time violation alerts (MON-012).
+
+        Args:
+            compliance_notifier: Callable that accepts (severity, alert_type, message, details)
+        """
+        self._compliance_notifier = compliance_notifier
+        logger.info("ComplianceNotifier connected to ComplianceAgent for real-time alerts")
+
+    async def _notify_compliance_violation(
+        self,
+        severity: str,
+        alert_type: str,
+        message: str,
+        details: dict
+    ) -> None:
+        """
+        Send real-time notification for compliance violations (MON-012).
+
+        Args:
+            severity: Alert severity (CRITICAL, HIGH, MEDIUM, LOW)
+            alert_type: Type of violation (e.g., MNPI, BLACKOUT, SSR)
+            message: Human-readable message
+            details: Additional context for the violation
+        """
+        if self._compliance_notifier is not None:
+            try:
+                result = self._compliance_notifier(severity, alert_type, message, details)
+                # Handle async notifiers
+                if hasattr(result, '__await__'):
+                    await result
+                logger.debug(f"Compliance notification sent: {alert_type} - {severity}")
+            except Exception as e:
+                logger.error(f"Failed to send compliance notification: {e}")
+        else:
+            logger.warning(
+                f"Compliance violation not notified (no notifier configured): "
+                f"{alert_type} - {message}"
+            )
 
     async def initialize(self) -> None:
         """Initialize compliance agent."""
@@ -525,6 +595,17 @@ class ComplianceAgent(ValidationAgent):
         restricted_check = self._check_restricted_instrument(symbol)
         checks.append(restricted_check)
         if not restricted_check.passed:
+            # MON-012: Send real-time notification for restricted instrument violation
+            await self._notify_compliance_violation(
+                severity="CRITICAL",
+                alert_type="RESTRICTED_INSTRUMENT",
+                message=restricted_check.message,
+                details={
+                    "symbol": symbol,
+                    "decision_id": decision.get("decision_id"),
+                    "code": restricted_check.code.value if restricted_check.code else None,
+                }
+            )
             return ComplianceValidationResult(
                 approved=False,
                 checks=checks,
@@ -536,6 +617,17 @@ class ComplianceAgent(ValidationAgent):
         blackout_check = await self._check_blackout_period(symbol)
         checks.append(blackout_check)
         if not blackout_check.passed:
+            # MON-012: Send real-time notification for blackout violation
+            await self._notify_compliance_violation(
+                severity="HIGH",
+                alert_type="BLACKOUT_PERIOD",
+                message=blackout_check.message,
+                details={
+                    "symbol": symbol,
+                    "decision_id": decision.get("decision_id"),
+                    "blackout_details": blackout_check.details,
+                }
+            )
             return ComplianceValidationResult(
                 approved=False,
                 checks=checks,
@@ -549,6 +641,19 @@ class ComplianceAgent(ValidationAgent):
         if not mnpi_check.passed:
             # This is serious - alert compliance officer
             await self._alert_mnpi_detected(decision, mnpi_check)
+            # MON-012: Send CRITICAL real-time notification for MNPI
+            await self._notify_compliance_violation(
+                severity="CRITICAL",
+                alert_type="MNPI_DETECTED",
+                message=mnpi_check.message,
+                details={
+                    "symbol": symbol,
+                    "decision_id": decision.get("decision_id"),
+                    "rationale": decision.get("rationale", "")[:200],
+                    "data_sources": decision.get("data_sources", []),
+                    "pattern_detected": mnpi_check.details.get("pattern"),
+                }
+            )
             return ComplianceValidationResult(
                 approved=False,
                 checks=checks,
@@ -571,6 +676,16 @@ class ComplianceAgent(ValidationAgent):
         suspended_check = self._check_trading_suspended(symbol)
         checks.append(suspended_check)
         if not suspended_check.passed:
+            # MON-012: Send real-time notification for suspended trading
+            await self._notify_compliance_violation(
+                severity="HIGH",
+                alert_type="TRADING_SUSPENDED",
+                message=suspended_check.message,
+                details={
+                    "symbol": symbol,
+                    "decision_id": decision.get("decision_id"),
+                }
+            )
             return ComplianceValidationResult(
                 approved=False,
                 checks=checks,
@@ -583,6 +698,17 @@ class ComplianceAgent(ValidationAgent):
             ssr_check = await self._check_ssr(symbol)
             checks.append(ssr_check)
             if not ssr_check.passed:
+                # MON-012: Send real-time notification for SSR violation
+                await self._notify_compliance_violation(
+                    severity="HIGH",
+                    alert_type="SSR_RESTRICTION",
+                    message=ssr_check.message,
+                    details={
+                        "symbol": symbol,
+                        "decision_id": decision.get("decision_id"),
+                        "action": "short_sell",
+                    }
+                )
                 return ComplianceValidationResult(
                     approved=False,
                     checks=checks,
@@ -599,6 +725,17 @@ class ComplianceAgent(ValidationAgent):
         source_check = self._check_data_sources(decision)
         checks.append(source_check)
         if not source_check.passed:
+            # MON-012: Send real-time notification for unapproved data source
+            await self._notify_compliance_violation(
+                severity="MEDIUM",
+                alert_type="UNAPPROVED_SOURCE",
+                message=source_check.message,
+                details={
+                    "symbol": symbol,
+                    "decision_id": decision.get("decision_id"),
+                    "sources": decision.get("data_sources", []),
+                }
+            )
             return ComplianceValidationResult(
                 approved=False,
                 checks=checks,
@@ -870,6 +1007,8 @@ class ComplianceAgent(ValidationAgent):
         """
         Cache a decision event for later compliance lookup.
 
+        Uses OrderedDict for O(1) eviction of oldest entries (PERF-P1-002).
+
         Args:
             decision: DecisionEvent to cache
         """
@@ -889,13 +1028,16 @@ class ComplianceAgent(ValidationAgent):
             "is_short": decision.action and decision.action.value == "sell",
         }
 
+        # If key exists, move to end (most recent)
+        if decision.event_id in self._decision_cache:
+            self._decision_cache.move_to_end(decision.event_id)
+
         self._decision_cache[decision.event_id] = decision_dict
 
-        # Cleanup old entries (keep last 1000 decisions)
-        if len(self._decision_cache) > 1000:
-            oldest_keys = list(self._decision_cache.keys())[:-1000]
-            for key in oldest_keys:
-                del self._decision_cache[key]
+        # Efficient O(1) eviction using OrderedDict.popitem(last=False)
+        # Remove oldest entries if over max size (PERF-P1-002 fix)
+        while len(self._decision_cache) > self._decision_cache_max_size:
+            self._decision_cache.popitem(last=False)
 
         logger.debug(f"Decision cached for compliance: {decision.event_id[:8]} ({decision.symbol})")
 
@@ -1160,6 +1302,12 @@ class ComplianceAgent(ValidationAgent):
                 sum(self._check_latencies) / len(self._check_latencies)
                 if self._check_latencies else 0
             ),
+            # P2: Pre-trade compliance checks caching
+            "pretrade_cache": self.get_pretrade_cache_stats(),
+            # P2: Regulatory calendar integration
+            "regulatory_calendar": self.get_regulatory_calendar_status(),
+            # P2: Audit report scheduling
+            "audit_schedule": self.get_audit_schedule_status(),
         }
 
     def _get_rejection_breakdown(
@@ -1172,3 +1320,473 @@ class ComplianceAgent(ValidationAgent):
                 key = code.value
                 breakdown[key] = breakdown.get(key, 0) + 1
         return breakdown
+
+    # =========================================================================
+    # PRE-TRADE COMPLIANCE CHECKS CACHING (P2)
+    # =========================================================================
+
+    def _get_pretrade_cache_key(self, symbol: str, action: str) -> str:
+        """
+        Generate cache key for pre-trade compliance check (P2).
+
+        Args:
+            symbol: Trading symbol
+            action: Buy/sell action
+
+        Returns:
+            Cache key string
+        """
+        return f"{symbol}:{action}"
+
+    def _get_cached_pretrade_check(self, symbol: str, action: str) -> ComplianceCheckResult | None:
+        """
+        Get cached pre-trade compliance check result if valid (P2).
+
+        Args:
+            symbol: Trading symbol
+            action: Buy/sell action
+
+        Returns:
+            Cached result if valid, None otherwise
+        """
+        if not self._pretrade_cache_enabled:
+            return None
+
+        key = self._get_pretrade_cache_key(symbol, action)
+        cached = self._pretrade_cache.get(key)
+
+        if cached is None:
+            self._pretrade_cache_misses += 1
+            return None
+
+        result, cached_time = cached
+        age = (datetime.now(timezone.utc) - cached_time).total_seconds()
+
+        if age > self._pretrade_cache_ttl_seconds:
+            # Cache entry expired
+            del self._pretrade_cache[key]
+            self._pretrade_cache_misses += 1
+            return None
+
+        self._pretrade_cache_hits += 1
+        logger.debug(f"Pre-trade cache hit for {symbol}:{action} (age: {age:.1f}s)")
+        return result
+
+    def _cache_pretrade_check(
+        self,
+        symbol: str,
+        action: str,
+        result: ComplianceCheckResult
+    ) -> None:
+        """
+        Cache a pre-trade compliance check result (P2).
+
+        Args:
+            symbol: Trading symbol
+            action: Buy/sell action
+            result: Check result to cache
+        """
+        if not self._pretrade_cache_enabled:
+            return
+
+        key = self._get_pretrade_cache_key(symbol, action)
+        self._pretrade_cache[key] = (result, datetime.now(timezone.utc))
+
+        # Prune cache if too large (keep last 1000 entries)
+        if len(self._pretrade_cache) > 1000:
+            # Remove oldest entries
+            oldest_keys = list(self._pretrade_cache.keys())[:100]
+            for k in oldest_keys:
+                del self._pretrade_cache[k]
+
+    def invalidate_pretrade_cache(self, symbol: str | None = None) -> int:
+        """
+        Invalidate pre-trade cache (P2).
+
+        Args:
+            symbol: Specific symbol to invalidate, or None to clear all
+
+        Returns:
+            Number of entries invalidated
+        """
+        if symbol is None:
+            count = len(self._pretrade_cache)
+            self._pretrade_cache.clear()
+            logger.info(f"Pre-trade cache cleared: {count} entries")
+            return count
+
+        # Invalidate specific symbol
+        count = 0
+        keys_to_remove = [k for k in self._pretrade_cache if k.startswith(f"{symbol}:")]
+        for key in keys_to_remove:
+            del self._pretrade_cache[key]
+            count += 1
+
+        if count > 0:
+            logger.info(f"Pre-trade cache invalidated for {symbol}: {count} entries")
+        return count
+
+    def get_pretrade_cache_stats(self) -> dict:
+        """
+        Get pre-trade cache statistics (P2).
+
+        Returns:
+            Cache statistics dict
+        """
+        total_requests = self._pretrade_cache_hits + self._pretrade_cache_misses
+        hit_rate = (self._pretrade_cache_hits / total_requests * 100) if total_requests > 0 else 0
+
+        return {
+            "enabled": self._pretrade_cache_enabled,
+            "ttl_seconds": self._pretrade_cache_ttl_seconds,
+            "entries": len(self._pretrade_cache),
+            "hits": self._pretrade_cache_hits,
+            "misses": self._pretrade_cache_misses,
+            "hit_rate_pct": round(hit_rate, 2),
+        }
+
+    # =========================================================================
+    # REGULATORY CALENDAR INTEGRATION (P2)
+    # =========================================================================
+
+    def add_regulatory_event(
+        self,
+        event_type: str,
+        event_date: datetime,
+        description: str,
+        jurisdiction: str = "EU",
+        affected_instruments: list[str] | None = None
+    ) -> None:
+        """
+        Add a regulatory event to the calendar (P2).
+
+        Args:
+            event_type: Type of event (e.g., 'EARNINGS_BLACKOUT', 'REGULATORY_FILING')
+            event_date: Date of the event
+            description: Human-readable description
+            jurisdiction: Regulatory jurisdiction
+            affected_instruments: List of affected symbols (None = all)
+        """
+        event = {
+            "event_type": event_type,
+            "event_date": event_date.isoformat(),
+            "description": description,
+            "jurisdiction": jurisdiction,
+            "affected_instruments": affected_instruments or [],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._regulatory_events.append(event)
+        logger.info(f"Regulatory event added: {event_type} on {event_date.date()} - {description}")
+
+    def add_regulatory_deadline(
+        self,
+        deadline_type: str,
+        deadline_date: datetime,
+        description: str,
+        priority: str = "MEDIUM"
+    ) -> None:
+        """
+        Add a regulatory deadline to the calendar (P2).
+
+        Args:
+            deadline_type: Type of deadline (e.g., 'TRANSACTION_REPORT', 'POSITION_DISCLOSURE')
+            deadline_date: Deadline date
+            description: Human-readable description
+            priority: Priority level (LOW, MEDIUM, HIGH, CRITICAL)
+        """
+        deadline = {
+            "deadline_type": deadline_type,
+            "deadline_date": deadline_date.isoformat(),
+            "description": description,
+            "priority": priority,
+            "days_until": (deadline_date - datetime.now(timezone.utc)).days,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._regulatory_deadlines.append(deadline)
+        logger.info(f"Regulatory deadline added: {deadline_type} on {deadline_date.date()} - {description}")
+
+    def add_regulatory_holiday(self, date: datetime | str) -> None:
+        """
+        Add a regulatory holiday when markets/regulators are closed (P2).
+
+        Args:
+            date: Holiday date (datetime or YYYY-MM-DD string)
+        """
+        if isinstance(date, datetime):
+            date_str = date.strftime("%Y-%m-%d")
+        else:
+            date_str = date
+
+        self._regulatory_holidays.add(date_str)
+        logger.info(f"Regulatory holiday added: {date_str}")
+
+    def is_regulatory_holiday(self, date: datetime | None = None) -> bool:
+        """
+        Check if a date is a regulatory holiday (P2).
+
+        Args:
+            date: Date to check (defaults to today)
+
+        Returns:
+            True if the date is a regulatory holiday
+        """
+        if date is None:
+            date = datetime.now(timezone.utc)
+
+        date_str = date.strftime("%Y-%m-%d")
+        return date_str in self._regulatory_holidays
+
+    def get_upcoming_events(self, days: int = 30) -> list[dict]:
+        """
+        Get upcoming regulatory events within the specified timeframe (P2).
+
+        Args:
+            days: Number of days to look ahead
+
+        Returns:
+            List of upcoming events
+        """
+        now = datetime.now(timezone.utc)
+        cutoff = now + timedelta(days=days)
+
+        upcoming = []
+        for event in self._regulatory_events:
+            event_date = datetime.fromisoformat(event["event_date"])
+            if now <= event_date <= cutoff:
+                event_copy = event.copy()
+                event_copy["days_until"] = (event_date - now).days
+                upcoming.append(event_copy)
+
+        # Sort by date
+        upcoming.sort(key=lambda x: x["event_date"])
+        return upcoming
+
+    def get_upcoming_deadlines(self, days: int = 30) -> list[dict]:
+        """
+        Get upcoming regulatory deadlines within the specified timeframe (P2).
+
+        Args:
+            days: Number of days to look ahead
+
+        Returns:
+            List of upcoming deadlines sorted by date
+        """
+        now = datetime.now(timezone.utc)
+        cutoff = now + timedelta(days=days)
+
+        upcoming = []
+        for deadline in self._regulatory_deadlines:
+            deadline_date = datetime.fromisoformat(deadline["deadline_date"])
+            if now <= deadline_date <= cutoff:
+                deadline_copy = deadline.copy()
+                deadline_copy["days_until"] = (deadline_date - now).days
+                upcoming.append(deadline_copy)
+
+        # Sort by date
+        upcoming.sort(key=lambda x: x["deadline_date"])
+        return upcoming
+
+    def get_regulatory_calendar_status(self) -> dict:
+        """
+        Get status of the regulatory calendar (P2).
+
+        Returns:
+            Calendar status and summary
+        """
+        now = datetime.now(timezone.utc)
+
+        # Get urgent deadlines (within 7 days)
+        urgent_deadlines = [d for d in self.get_upcoming_deadlines(7)]
+
+        return {
+            "enabled": self._regulatory_calendar_enabled,
+            "total_events": len(self._regulatory_events),
+            "total_deadlines": len(self._regulatory_deadlines),
+            "total_holidays": len(self._regulatory_holidays),
+            "is_today_holiday": self.is_regulatory_holiday(now),
+            "events_next_30_days": len(self.get_upcoming_events(30)),
+            "deadlines_next_30_days": len(self.get_upcoming_deadlines(30)),
+            "urgent_deadlines": urgent_deadlines,
+            "next_event": self.get_upcoming_events(90)[0] if self.get_upcoming_events(90) else None,
+            "next_deadline": self.get_upcoming_deadlines(90)[0] if self.get_upcoming_deadlines(90) else None,
+        }
+
+    # =========================================================================
+    # AUDIT REPORT SCHEDULING (P2)
+    # =========================================================================
+
+    def schedule_audit_report(
+        self,
+        report_type: str,
+        frequency: str,
+        description: str,
+        recipients: list[str] | None = None,
+        next_run: datetime | None = None
+    ) -> dict:
+        """
+        Schedule a recurring audit report (P2).
+
+        Args:
+            report_type: Type of report (e.g., 'DAILY_TRADE_SUMMARY', 'COMPLIANCE_VIOLATIONS')
+            frequency: Run frequency ('DAILY', 'WEEKLY', 'MONTHLY', 'QUARTERLY')
+            description: Report description
+            recipients: Email recipients for the report
+            next_run: Next scheduled run time (defaults based on frequency)
+
+        Returns:
+            Scheduled report configuration
+        """
+        now = datetime.now(timezone.utc)
+
+        # Calculate next run if not specified
+        if next_run is None:
+            if frequency == "DAILY":
+                # Next day at 6 AM UTC
+                next_run = (now + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+            elif frequency == "WEEKLY":
+                # Next Monday at 6 AM UTC
+                days_until_monday = (7 - now.weekday()) % 7 or 7
+                next_run = (now + timedelta(days=days_until_monday)).replace(hour=6, minute=0, second=0, microsecond=0)
+            elif frequency == "MONTHLY":
+                # First day of next month
+                if now.month == 12:
+                    next_run = now.replace(year=now.year + 1, month=1, day=1, hour=6, minute=0, second=0, microsecond=0)
+                else:
+                    next_run = now.replace(month=now.month + 1, day=1, hour=6, minute=0, second=0, microsecond=0)
+            elif frequency == "QUARTERLY":
+                # First day of next quarter
+                quarter_starts = [1, 4, 7, 10]
+                current_quarter = ((now.month - 1) // 3)
+                next_quarter_month = quarter_starts[(current_quarter + 1) % 4]
+                year = now.year if next_quarter_month > now.month else now.year + 1
+                next_run = datetime(year, next_quarter_month, 1, 6, 0, 0, tzinfo=timezone.utc)
+            else:
+                next_run = now + timedelta(days=1)
+
+        report = {
+            "report_type": report_type,
+            "frequency": frequency,
+            "description": description,
+            "recipients": recipients or [],
+            "next_run": next_run.isoformat(),
+            "enabled": True,
+            "created_at": now.isoformat(),
+        }
+
+        self._scheduled_reports.append(report)
+        logger.info(f"Audit report scheduled: {report_type} ({frequency}) - next run: {next_run.isoformat()}")
+
+        return report
+
+    def get_scheduled_reports(self) -> list[dict]:
+        """
+        Get all scheduled audit reports (P2).
+
+        Returns:
+            List of scheduled reports
+        """
+        now = datetime.now(timezone.utc)
+
+        reports = []
+        for report in self._scheduled_reports:
+            report_copy = report.copy()
+            next_run = datetime.fromisoformat(report["next_run"])
+            report_copy["hours_until_next_run"] = (next_run - now).total_seconds() / 3600
+            report_copy["overdue"] = next_run < now
+            reports.append(report_copy)
+
+        return reports
+
+    def get_due_reports(self) -> list[dict]:
+        """
+        Get reports that are due for execution (P2).
+
+        Returns:
+            List of reports that should be run
+        """
+        now = datetime.now(timezone.utc)
+
+        due_reports = []
+        for report in self._scheduled_reports:
+            if not report.get("enabled", True):
+                continue
+
+            next_run = datetime.fromisoformat(report["next_run"])
+            if next_run <= now:
+                due_reports.append(report.copy())
+
+        return due_reports
+
+    def mark_report_complete(self, report_type: str) -> bool:
+        """
+        Mark a report as completed and schedule next run (P2).
+
+        Args:
+            report_type: Type of report that was completed
+
+        Returns:
+            True if report was found and updated
+        """
+        now = datetime.now(timezone.utc)
+
+        for report in self._scheduled_reports:
+            if report["report_type"] == report_type:
+                self._last_report_times[report_type] = now
+
+                # Calculate next run based on frequency
+                frequency = report["frequency"]
+                if frequency == "DAILY":
+                    next_run = now + timedelta(days=1)
+                elif frequency == "WEEKLY":
+                    next_run = now + timedelta(weeks=1)
+                elif frequency == "MONTHLY":
+                    next_run = now + timedelta(days=30)
+                elif frequency == "QUARTERLY":
+                    next_run = now + timedelta(days=90)
+                else:
+                    next_run = now + timedelta(days=1)
+
+                report["next_run"] = next_run.isoformat()
+                logger.info(f"Report {report_type} completed - next run: {next_run.isoformat()}")
+                return True
+
+        return False
+
+    def get_audit_schedule_status(self) -> dict:
+        """
+        Get status of audit report scheduling (P2).
+
+        Returns:
+            Audit schedule status and summary
+        """
+        now = datetime.now(timezone.utc)
+        today = now.date()
+
+        # Count reports by frequency
+        frequency_counts = {}
+        for report in self._scheduled_reports:
+            freq = report["frequency"]
+            frequency_counts[freq] = frequency_counts.get(freq, 0) + 1
+
+        # Get due reports
+        due_reports = self.get_due_reports()
+
+        # Get reports run today
+        reports_today = [
+            rt for rt, time in self._last_report_times.items()
+            if time.date() == today
+        ]
+
+        return {
+            "enabled": self._audit_schedule_enabled,
+            "total_scheduled": len(self._scheduled_reports),
+            "frequency_breakdown": frequency_counts,
+            "due_reports": len(due_reports),
+            "due_report_types": [r["report_type"] for r in due_reports],
+            "reports_run_today": len(reports_today),
+            "report_types_today": reports_today,
+            "retention_days": self._report_retention_days,
+            "last_report_times": {
+                rt: time.isoformat() for rt, time in self._last_report_times.items()
+            },
+        }

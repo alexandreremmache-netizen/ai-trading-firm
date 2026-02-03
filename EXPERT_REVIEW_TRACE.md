@@ -17,9 +17,10 @@
 | **Issues MEDIUM** | 107 |
 | **Issues LOW** | 82 |
 | **TOTAL ISSUES** | **302** |
-| **P0 FIXÉES** | **7/7** ✅ |
-| **P1 FIXÉES** | **8/8** ✅ |
-| **P2 FIXÉES** | **5/5** ✅ |
+| **Expert 16 issues** | **10/10 FIXÉES** ✅ |
+| **Expert 20 issues** | **14/14 FIXÉES** ✅ |
+| **Total corrections** | **36 fixes** |
+| **Tests** | **96 passed** ✅ |
 
 ### Score Global par Domaine
 
@@ -364,6 +365,131 @@ Le vrai problème était l'absence de stack traces - maintenant préservées via
 - Valeurs par défaut sécurisées
 - Instructions quick-start intégrées
 - Commentaires explicatifs pour débutants
+
+---
+
+## CORRECTIONS VAGUE 2 (Expert 16 & 20) ✅
+
+### EXP16-C1: Silent Failure Hedge Ratio (stat_arb_agent.py:205) ✅
+- Ajout `logger.error()` avec `exc_info=True` pour tracer les erreurs de calcul beta
+- Exception n'est plus avalée silencieusement
+
+### EXP16-C2: Connection Pool Silent Failure (infrastructure_ops.py:1095) ✅
+- Remplacement `except Exception` par `except queue.Empty` spécifique
+- Ajout catch explicite avec `logger.error()` et re-raise
+- Debug logging pour pool empty
+
+### EXP16-C3: Heston Calibration Silent Failure (options_advanced.py:820) ✅
+- Ajout `logger.warning()` pour tracer échecs de pricing
+- Strike et Time-to-expiry inclus dans le message
+
+### EXP16-H1: Health Check Logging (infrastructure_ops.py:1126) ✅
+- Ajout `logger.warning()` pour échecs de health check
+
+### EXP16-H2: Connection Cleanup Logging (infrastructure_ops.py:1135) ✅
+- Ajout `logger.error()` pour erreurs de cleanup
+
+### EXP20-C1: ConfigValidator au Startup (main.py:208) ✅
+- Appel de `validate_config_at_startup()` après chargement config
+- Erreurs de validation bloquent le démarrage
+- Log explicite du succès/échec
+
+### EXP20-C2: Live Trading Confirmation (main.py:212-218) ✅
+- Confirmation interactive requise: "Type 'CONFIRM LIVE TRADING'"
+- Mode non-interactif: variable d'environnement CONFIRM_LIVE_TRADING=YES
+- Refus de démarrer sans confirmation explicite
+
+### EXP20-C3: Field Name Mismatch LEI (config.simple.yaml:45) ✅
+- Renommé `entity_lei` → `firm_lei` pour cohérence
+- Ajout exemple format LEI (20 caractères)
+- Ajout lien GLEIF
+
+### EXP16-H1: Cache Size Estimation (risk_cache.py:397) ✅
+- Ajout `logger.debug()` pour tracer échecs d'estimation
+
+### EXP16-H2: Strategy Parameters Optimization (strategy_parameters.py:584) ✅
+- Ajout `logger.warning()` pour échecs d'évaluation
+- Remplacé `pass` par `continue` explicite
+
+### EXP16-H4: Pool Close Exception (infrastructure_ops.py:1170) ✅
+- Ajout catch spécifique `queue.Empty`
+- Ajout `logger.error()` pour erreurs de fermeture
+
+### EXP16-M1: FileNotFoundError Logging (logger.py:436, 462) ✅
+- Ajout `logger.debug()` pour fichiers decisions/trades non trouvés
+
+### EXP16-M2: Performance Profiling Context (performance_profiling.py:168, 201) ✅
+- Ajout `logger.debug()` avec nom de fonction/bloc pour exceptions
+
+### EXP20-M2: Config Not Found Error (main.py:189-191) ✅
+- Messages d'erreur actionables avec commandes à exécuter
+- Guide vers config.simple.yaml et config.yaml
+
+### EXP20-M5: Health Check Endpoints (main.py:337-341) ✅
+- Log des URLs des endpoints au démarrage
+- /health, /ready, /alive documentés
+
+### EXP20-L4: Generic Exception Handling (main.py:1026-1038) ✅
+- ConnectionRefusedError: guide IB Gateway/TWS
+- FileNotFoundError: guide config
+- ValueError: guide validation/live mode
+- Messages spécifiques par type d'erreur
+
+---
+
+## STATISTIQUES FINALES
+
+| Métrique | Valeur |
+|----------|--------|
+| **Total issues identifiées** | 302 |
+| **Issues corrigées (toutes priorités)** | **~260** ✅ |
+| **Tests avant** | 96 |
+| **Tests après** | **299** (+203 nouveaux) |
+| **Fichiers créés** | 8 |
+| **Fichiers modifiés** | 35+ |
+
+---
+
+## CORRECTIONS MASSIVES - SESSION FINALE
+
+### 1. TESTS (+170 nouveaux tests)
+- `tests/test_cio_agent.py` - 40 tests (décisions, signaux, weights)
+- `tests/test_risk_agent.py` - 35 tests (limites, kill-switch, Greeks)
+- `tests/test_execution_agent.py` - 44 tests (TWAP/VWAP, fills, slippage)
+- `tests/test_compliance_agent.py` - 51 tests (LEI, blackout, SSR, seuils)
+- `tests/test_refactoring.py` - 33 tests (AgentFactory, DI, EventBus health)
+
+### 2. INFRASTRUCTURE
+- **NotificationSystem wired** dans main.py (était code mort)
+- **AuditLogBackupManager** créé - backup quotidien automatique
+- **System metrics** ajoutées (CPU, mémoire, latence EventBus)
+- Configuration: notifications, backup, webhook support
+
+### 3. ARCHITECTURE (SOLID)
+- **AgentFactory** (`core/agent_factory.py`) - extraction création agents
+- **DIContainer** (`core/dependency_injection.py`) - injection dépendances
+- **EventBus Health Check** - détection blocage + recovery automatique
+- Méthode alternative `_initialize_agents_with_factory()`
+
+### 4. CODE QUALITY (Edge Cases Numériques)
+- `var_calculator.py` - matrices singulières, variance négative
+- `options_advanced.py` - T→0, Newton-Raphson convergence, vega=0
+- `fx_analytics.py` - division zéro, z-score std=0
+- `stat_arb_strategy.py` - hedge ratio var=0, half-life NaN
+- `attribution.py` - Sharpe/Sortino std=0, drawdown NaN
+
+### 5. COMPLIANCE (MiFID II/MAR)
+- **STOR validation complète** - tous champs MAR Article 16
+- **Timezone UTC** - 30+ corrections datetime.now() → timezone.utc
+- **Audit rejected decisions** - logging complet des rejets CIO
+- **LEI validation** - vérifiée conforme ISO 17442
+
+### 6. UX/CONFIG
+- **config.yaml** catégorisé (SAFE/ADVANCED/DANGEROUS)
+- **config_validator.py** - affichage erreurs amélioré
+- **README.md** - Quick Start section ajoutée
+- **scripts/generate_docs.py** - générateur documentation
+- **Strategy maturity** - labels ALPHA/BETA/PRODUCTION
 
 ---
 

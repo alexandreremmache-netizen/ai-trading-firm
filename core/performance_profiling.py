@@ -165,8 +165,9 @@ class PerformanceProfiler:
                 is_error = False
                 try:
                     return func(*args, **kwargs)
-                except Exception:
+                except Exception as e:
                     is_error = True
+                    logger.debug(f"Exception in profiled function {func_name}: {e}")
                     raise
                 finally:
                     duration_ms = (time.perf_counter() - start) * 1000
@@ -198,8 +199,9 @@ class PerformanceProfiler:
         is_error = False
         try:
             yield
-        except Exception:
+        except Exception as e:
             is_error = True
+            logger.debug(f"Exception in profiled block {name}: {e}")
             raise
         finally:
             duration_ms = (time.perf_counter() - start) * 1000
@@ -622,3 +624,834 @@ def profiled(
 ):
     """Decorator using global profiler."""
     return get_profiler().profile(name=name, slow_threshold_ms=slow_threshold_ms)
+
+
+# =============================================================================
+# P3: FUNCTION-LEVEL TIMING DECORATORS
+# =============================================================================
+
+class FunctionTimer:
+    """
+    Function-level timing decorators with detailed metrics (P3).
+
+    Provides:
+    - Simple timing decorator
+    - Conditional timing based on thresholds
+    - Timing with callback support
+    - Cumulative timing across calls
+    """
+
+    def __init__(self):
+        self._timings: dict[str, list[float]] = defaultdict(list)
+        self._call_counts: dict[str, int] = defaultdict(int)
+        self._lock = threading.Lock()
+
+    def timed(
+        self,
+        name: str | None = None,
+        log_level: str = "DEBUG",
+        include_args: bool = False,
+    ):
+        """
+        Decorator to time function execution.
+
+        Args:
+            name: Custom name (default: function.__qualname__)
+            log_level: Logging level for timing output
+            include_args: Whether to log function arguments
+
+        Example:
+            @timer.timed()
+            def my_function():
+                ...
+
+            @timer.timed(name="custom_name", log_level="INFO")
+            def another_function():
+                ...
+        """
+        def decorator(func: Callable[..., T]) -> Callable[..., T]:
+            func_name = name or func.__qualname__
+
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs) -> T:
+                start = time.perf_counter()
+                try:
+                    result = func(*args, **kwargs)
+                    return result
+                finally:
+                    elapsed_ms = (time.perf_counter() - start) * 1000
+
+                    with self._lock:
+                        self._timings[func_name].append(elapsed_ms)
+                        self._call_counts[func_name] += 1
+
+                    log_msg = f"{func_name} completed in {elapsed_ms:.2f}ms"
+                    if include_args:
+                        log_msg += f" args={args}, kwargs={kwargs}"
+
+                    log_func = getattr(logger, log_level.lower(), logger.debug)
+                    log_func(log_msg)
+
+            return wrapper
+        return decorator
+
+    def timed_async(
+        self,
+        name: str | None = None,
+        log_level: str = "DEBUG",
+    ):
+        """
+        Decorator to time async function execution.
+
+        Args:
+            name: Custom name (default: function.__qualname__)
+            log_level: Logging level for timing output
+
+        Example:
+            @timer.timed_async()
+            async def my_async_function():
+                ...
+        """
+        def decorator(func: Callable[..., T]) -> Callable[..., T]:
+            func_name = name or func.__qualname__
+
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs) -> T:
+                start = time.perf_counter()
+                try:
+                    result = await func(*args, **kwargs)
+                    return result
+                finally:
+                    elapsed_ms = (time.perf_counter() - start) * 1000
+
+                    with self._lock:
+                        self._timings[func_name].append(elapsed_ms)
+                        self._call_counts[func_name] += 1
+
+                    log_func = getattr(logger, log_level.lower(), logger.debug)
+                    log_func(f"{func_name} completed in {elapsed_ms:.2f}ms")
+
+            return wrapper
+        return decorator
+
+    def conditional_timed(
+        self,
+        threshold_ms: float,
+        name: str | None = None,
+    ):
+        """
+        Decorator that only logs if execution exceeds threshold.
+
+        Args:
+            threshold_ms: Minimum duration to trigger logging
+            name: Custom name
+
+        Example:
+            @timer.conditional_timed(threshold_ms=100)
+            def potentially_slow_function():
+                ...
+        """
+        def decorator(func: Callable[..., T]) -> Callable[..., T]:
+            func_name = name or func.__qualname__
+
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs) -> T:
+                start = time.perf_counter()
+                try:
+                    result = func(*args, **kwargs)
+                    return result
+                finally:
+                    elapsed_ms = (time.perf_counter() - start) * 1000
+
+                    with self._lock:
+                        self._timings[func_name].append(elapsed_ms)
+                        self._call_counts[func_name] += 1
+
+                    if elapsed_ms >= threshold_ms:
+                        logger.warning(
+                            f"Slow execution: {func_name} took {elapsed_ms:.2f}ms "
+                            f"(threshold: {threshold_ms}ms)"
+                        )
+
+            return wrapper
+        return decorator
+
+    def timed_with_callback(
+        self,
+        callback: Callable[[str, float], None],
+        name: str | None = None,
+    ):
+        """
+        Decorator that calls a callback with timing data.
+
+        Args:
+            callback: Function(func_name, elapsed_ms) to call after execution
+            name: Custom name
+
+        Example:
+            def my_callback(func_name, elapsed_ms):
+                send_metrics(func_name, elapsed_ms)
+
+            @timer.timed_with_callback(my_callback)
+            def monitored_function():
+                ...
+        """
+        def decorator(func: Callable[..., T]) -> Callable[..., T]:
+            func_name = name or func.__qualname__
+
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs) -> T:
+                start = time.perf_counter()
+                try:
+                    result = func(*args, **kwargs)
+                    return result
+                finally:
+                    elapsed_ms = (time.perf_counter() - start) * 1000
+
+                    with self._lock:
+                        self._timings[func_name].append(elapsed_ms)
+                        self._call_counts[func_name] += 1
+
+                    try:
+                        callback(func_name, elapsed_ms)
+                    except Exception as e:
+                        logger.error(f"Timing callback error: {e}")
+
+            return wrapper
+        return decorator
+
+    def get_statistics(self, func_name: str) -> dict[str, Any]:
+        """Get timing statistics for a function."""
+        with self._lock:
+            timings = self._timings.get(func_name, [])
+
+        if not timings:
+            return {"function": func_name, "error": "no_data"}
+
+        return {
+            "function": func_name,
+            "call_count": len(timings),
+            "total_ms": sum(timings),
+            "avg_ms": statistics.mean(timings),
+            "min_ms": min(timings),
+            "max_ms": max(timings),
+            "std_ms": statistics.stdev(timings) if len(timings) > 1 else 0,
+            "p50_ms": statistics.median(timings),
+            "p95_ms": sorted(timings)[int(len(timings) * 0.95)] if len(timings) >= 20 else max(timings),
+        }
+
+    def get_all_statistics(self) -> dict[str, dict]:
+        """Get statistics for all timed functions."""
+        with self._lock:
+            func_names = list(self._timings.keys())
+        return {name: self.get_statistics(name) for name in func_names}
+
+    def reset(self, func_name: str | None = None) -> None:
+        """Reset timing data."""
+        with self._lock:
+            if func_name:
+                self._timings.pop(func_name, None)
+                self._call_counts.pop(func_name, None)
+            else:
+                self._timings.clear()
+                self._call_counts.clear()
+
+
+# Global function timer instance
+_function_timer: FunctionTimer | None = None
+
+
+def get_function_timer() -> FunctionTimer:
+    """Get global function timer instance."""
+    global _function_timer
+    if _function_timer is None:
+        _function_timer = FunctionTimer()
+    return _function_timer
+
+
+# Convenience decorators using global timer
+def timed(name: str | None = None, log_level: str = "DEBUG"):
+    """Simple timing decorator using global timer."""
+    return get_function_timer().timed(name=name, log_level=log_level)
+
+
+def timed_if_slow(threshold_ms: float = 100.0, name: str | None = None):
+    """Timing decorator that only logs slow executions."""
+    return get_function_timer().conditional_timed(threshold_ms=threshold_ms, name=name)
+
+
+# =============================================================================
+# P3: MEMORY PROFILING HOOKS
+# =============================================================================
+
+class MemoryProfilingHooks:
+    """
+    Memory profiling hooks and decorators (P3).
+
+    Provides:
+    - Memory tracking decorators
+    - Memory delta measurement
+    - Memory leak detection helpers
+    - Object count tracking
+    """
+
+    def __init__(self):
+        self._memory_snapshots: list[dict] = []
+        self._object_counts: dict[str, list[int]] = defaultdict(list)
+        self._tracking_enabled = False
+
+    def enable_tracking(self) -> None:
+        """Enable memory tracking with tracemalloc."""
+        if not tracemalloc.is_tracing():
+            tracemalloc.start()
+        self._tracking_enabled = True
+
+    def disable_tracking(self) -> None:
+        """Disable memory tracking."""
+        if tracemalloc.is_tracing():
+            tracemalloc.stop()
+        self._tracking_enabled = False
+
+    def memory_tracked(self, name: str | None = None, log_delta: bool = True):
+        """
+        Decorator to track memory usage of a function.
+
+        Args:
+            name: Custom name for the measurement
+            log_delta: Whether to log memory delta
+
+        Example:
+            @memory_hooks.memory_tracked()
+            def memory_intensive_function():
+                ...
+        """
+        def decorator(func: Callable[..., T]) -> Callable[..., T]:
+            func_name = name or func.__qualname__
+
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs) -> T:
+                if not self._tracking_enabled:
+                    return func(*args, **kwargs)
+
+                gc.collect()
+                before = tracemalloc.get_traced_memory()[0]
+
+                try:
+                    result = func(*args, **kwargs)
+                    return result
+                finally:
+                    gc.collect()
+                    after = tracemalloc.get_traced_memory()[0]
+                    delta_bytes = after - before
+                    delta_mb = delta_bytes / (1024 * 1024)
+
+                    self._memory_snapshots.append({
+                        "function": func_name,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "before_bytes": before,
+                        "after_bytes": after,
+                        "delta_bytes": delta_bytes,
+                        "delta_mb": delta_mb,
+                    })
+
+                    if log_delta:
+                        if delta_mb > 10:
+                            logger.warning(f"High memory usage in {func_name}: {delta_mb:.2f}MB")
+                        elif delta_mb > 1:
+                            logger.info(f"Memory delta in {func_name}: {delta_mb:.2f}MB")
+                        else:
+                            logger.debug(f"Memory delta in {func_name}: {delta_mb:.2f}MB")
+
+            return wrapper
+        return decorator
+
+    def memory_tracked_async(self, name: str | None = None, log_delta: bool = True):
+        """
+        Decorator to track memory usage of async functions.
+
+        Args:
+            name: Custom name for the measurement
+            log_delta: Whether to log memory delta
+        """
+        def decorator(func: Callable[..., T]) -> Callable[..., T]:
+            func_name = name or func.__qualname__
+
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs) -> T:
+                if not self._tracking_enabled:
+                    return await func(*args, **kwargs)
+
+                gc.collect()
+                before = tracemalloc.get_traced_memory()[0]
+
+                try:
+                    result = await func(*args, **kwargs)
+                    return result
+                finally:
+                    gc.collect()
+                    after = tracemalloc.get_traced_memory()[0]
+                    delta_bytes = after - before
+                    delta_mb = delta_bytes / (1024 * 1024)
+
+                    self._memory_snapshots.append({
+                        "function": func_name,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "before_bytes": before,
+                        "after_bytes": after,
+                        "delta_bytes": delta_bytes,
+                        "delta_mb": delta_mb,
+                    })
+
+                    if log_delta and delta_mb > 1:
+                        logger.info(f"Memory delta in {func_name}: {delta_mb:.2f}MB")
+
+            return wrapper
+        return decorator
+
+    @contextmanager
+    def track_memory_block(self, label: str):
+        """
+        Context manager to track memory for a code block.
+
+        Example:
+            with memory_hooks.track_memory_block("data_processing"):
+                process_large_data()
+        """
+        gc.collect()
+        before = tracemalloc.get_traced_memory()[0] if self._tracking_enabled else 0
+
+        yield
+
+        gc.collect()
+        after = tracemalloc.get_traced_memory()[0] if self._tracking_enabled else 0
+        delta_mb = (after - before) / (1024 * 1024)
+
+        self._memory_snapshots.append({
+            "label": label,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "delta_mb": delta_mb,
+        })
+
+        logger.debug(f"Memory block '{label}': {delta_mb:.2f}MB")
+
+    def track_object_counts(self, types_to_track: list[type] | None = None) -> dict[str, int]:
+        """
+        Track counts of objects by type.
+
+        Args:
+            types_to_track: Specific types to track (default: common types)
+
+        Returns:
+            Object counts by type name
+        """
+        if types_to_track is None:
+            types_to_track = [list, dict, set, tuple, str, bytes]
+
+        gc.collect()
+        counts = {}
+
+        for obj_type in types_to_track:
+            count = len([obj for obj in gc.get_objects() if isinstance(obj, obj_type)])
+            type_name = obj_type.__name__
+            counts[type_name] = count
+            self._object_counts[type_name].append(count)
+
+        return counts
+
+    def detect_potential_leaks(self, threshold_growth_pct: float = 50.0) -> list[dict]:
+        """
+        Detect potential memory leaks based on object count growth.
+
+        Args:
+            threshold_growth_pct: Growth percentage to flag as potential leak
+
+        Returns:
+            List of types with suspected leaks
+        """
+        leaks = []
+
+        for type_name, counts in self._object_counts.items():
+            if len(counts) < 3:
+                continue
+
+            initial = counts[0]
+            final = counts[-1]
+
+            if initial > 0:
+                growth_pct = ((final - initial) / initial) * 100
+                if growth_pct > threshold_growth_pct:
+                    leaks.append({
+                        "type": type_name,
+                        "initial_count": initial,
+                        "final_count": final,
+                        "growth_pct": growth_pct,
+                        "samples": len(counts),
+                    })
+
+        return leaks
+
+    def get_memory_report(self) -> dict[str, Any]:
+        """Get comprehensive memory profiling report."""
+        current_mem = tracemalloc.get_traced_memory() if self._tracking_enabled else (0, 0)
+
+        return {
+            "tracking_enabled": self._tracking_enabled,
+            "current_memory_mb": current_mem[0] / (1024 * 1024),
+            "peak_memory_mb": current_mem[1] / (1024 * 1024),
+            "snapshots_count": len(self._memory_snapshots),
+            "recent_snapshots": self._memory_snapshots[-10:],
+            "potential_leaks": self.detect_potential_leaks(),
+        }
+
+    def reset(self) -> None:
+        """Reset all memory tracking data."""
+        self._memory_snapshots.clear()
+        self._object_counts.clear()
+
+
+# Global memory hooks instance
+_memory_hooks: MemoryProfilingHooks | None = None
+
+
+def get_memory_hooks() -> MemoryProfilingHooks:
+    """Get global memory hooks instance."""
+    global _memory_hooks
+    if _memory_hooks is None:
+        _memory_hooks = MemoryProfilingHooks()
+    return _memory_hooks
+
+
+def memory_tracked(name: str | None = None):
+    """Memory tracking decorator using global hooks."""
+    return get_memory_hooks().memory_tracked(name=name)
+
+
+# =============================================================================
+# P3: ASYNC TASK PROFILING
+# =============================================================================
+
+@dataclass
+class AsyncTaskMetrics:
+    """Metrics for an async task."""
+    task_name: str
+    task_id: str
+    start_time: datetime
+    end_time: datetime | None = None
+    duration_ms: float | None = None
+    status: str = "running"  # running, completed, failed, cancelled
+    error: str | None = None
+    parent_task_id: str | None = None
+    children_task_ids: list[str] = field(default_factory=list)
+
+
+class AsyncTaskProfiler:
+    """
+    Profiling system for async tasks (P3).
+
+    Provides:
+    - Task execution tracking
+    - Concurrent task monitoring
+    - Task hierarchy visualization
+    - Async bottleneck detection
+    """
+
+    def __init__(self):
+        self._tasks: dict[str, AsyncTaskMetrics] = {}
+        self._task_counter = 0
+        self._lock = threading.Lock()
+        self._active_tasks: set[str] = set()
+
+    def _generate_task_id(self) -> str:
+        """Generate unique task ID."""
+        with self._lock:
+            self._task_counter += 1
+            return f"TASK-{self._task_counter:06d}"
+
+    def profile_async(
+        self,
+        name: str | None = None,
+        track_children: bool = True,
+    ):
+        """
+        Decorator to profile async functions.
+
+        Args:
+            name: Custom task name
+            track_children: Whether to track child tasks
+
+        Example:
+            @async_profiler.profile_async()
+            async def fetch_data():
+                ...
+        """
+        def decorator(func: Callable[..., T]) -> Callable[..., T]:
+            task_name = name or func.__qualname__
+
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs) -> T:
+                task_id = self._generate_task_id()
+                start_time = datetime.now(timezone.utc)
+
+                # Get parent task if any
+                parent_id = None
+                current_task = asyncio.current_task()
+                if current_task and hasattr(current_task, '_profiler_task_id'):
+                    parent_id = current_task._profiler_task_id
+
+                metrics = AsyncTaskMetrics(
+                    task_name=task_name,
+                    task_id=task_id,
+                    start_time=start_time,
+                    parent_task_id=parent_id,
+                )
+
+                with self._lock:
+                    self._tasks[task_id] = metrics
+                    self._active_tasks.add(task_id)
+                    if parent_id and parent_id in self._tasks:
+                        self._tasks[parent_id].children_task_ids.append(task_id)
+
+                # Mark current task with profiler ID
+                if current_task and track_children:
+                    current_task._profiler_task_id = task_id
+
+                try:
+                    result = await func(*args, **kwargs)
+                    metrics.status = "completed"
+                    return result
+                except asyncio.CancelledError:
+                    metrics.status = "cancelled"
+                    raise
+                except Exception as e:
+                    metrics.status = "failed"
+                    metrics.error = str(e)
+                    raise
+                finally:
+                    end_time = datetime.now(timezone.utc)
+                    metrics.end_time = end_time
+                    metrics.duration_ms = (end_time - start_time).total_seconds() * 1000
+
+                    with self._lock:
+                        self._active_tasks.discard(task_id)
+
+                    logger.debug(
+                        f"Async task {task_name} ({task_id}) "
+                        f"completed in {metrics.duration_ms:.2f}ms "
+                        f"status={metrics.status}"
+                    )
+
+            return wrapper
+        return decorator
+
+    @contextmanager
+    def profile_task_group(self, name: str):
+        """
+        Context manager to profile a group of tasks.
+
+        Example:
+            async with async_profiler.profile_task_group("batch_fetch"):
+                await asyncio.gather(fetch1(), fetch2(), fetch3())
+        """
+        task_id = self._generate_task_id()
+        start_time = datetime.now(timezone.utc)
+
+        metrics = AsyncTaskMetrics(
+            task_name=name,
+            task_id=task_id,
+            start_time=start_time,
+        )
+
+        with self._lock:
+            self._tasks[task_id] = metrics
+            self._active_tasks.add(task_id)
+
+        try:
+            yield task_id
+            metrics.status = "completed"
+        except Exception as e:
+            metrics.status = "failed"
+            metrics.error = str(e)
+            raise
+        finally:
+            end_time = datetime.now(timezone.utc)
+            metrics.end_time = end_time
+            metrics.duration_ms = (end_time - start_time).total_seconds() * 1000
+
+            with self._lock:
+                self._active_tasks.discard(task_id)
+
+    def get_active_tasks(self) -> list[dict]:
+        """Get currently running tasks."""
+        with self._lock:
+            active_ids = list(self._active_tasks)
+
+        return [
+            {
+                "task_id": tid,
+                "task_name": self._tasks[tid].task_name,
+                "running_ms": (datetime.now(timezone.utc) - self._tasks[tid].start_time).total_seconds() * 1000,
+                "parent_id": self._tasks[tid].parent_task_id,
+            }
+            for tid in active_ids
+            if tid in self._tasks
+        ]
+
+    def get_task_hierarchy(self, task_id: str) -> dict | None:
+        """Get task with its children recursively."""
+        if task_id not in self._tasks:
+            return None
+
+        task = self._tasks[task_id]
+        return {
+            "task_id": task.task_id,
+            "task_name": task.task_name,
+            "status": task.status,
+            "duration_ms": task.duration_ms,
+            "children": [
+                self.get_task_hierarchy(child_id)
+                for child_id in task.children_task_ids
+                if child_id in self._tasks
+            ],
+        }
+
+    def get_slowest_tasks(self, n: int = 10) -> list[dict]:
+        """Get slowest completed tasks."""
+        completed = [
+            t for t in self._tasks.values()
+            if t.status == "completed" and t.duration_ms is not None
+        ]
+
+        sorted_tasks = sorted(completed, key=lambda t: t.duration_ms or 0, reverse=True)
+
+        return [
+            {
+                "task_id": t.task_id,
+                "task_name": t.task_name,
+                "duration_ms": t.duration_ms,
+                "start_time": t.start_time.isoformat(),
+            }
+            for t in sorted_tasks[:n]
+        ]
+
+    def get_task_statistics(self, task_name: str | None = None) -> dict[str, Any]:
+        """Get statistics for tasks, optionally filtered by name."""
+        tasks = list(self._tasks.values())
+        if task_name:
+            tasks = [t for t in tasks if t.task_name == task_name]
+
+        if not tasks:
+            return {"error": "no_tasks"}
+
+        completed = [t for t in tasks if t.duration_ms is not None]
+        durations = [t.duration_ms for t in completed if t.duration_ms]
+
+        return {
+            "total_tasks": len(tasks),
+            "completed": len([t for t in tasks if t.status == "completed"]),
+            "failed": len([t for t in tasks if t.status == "failed"]),
+            "cancelled": len([t for t in tasks if t.status == "cancelled"]),
+            "active": len([t for t in tasks if t.status == "running"]),
+            "timing": {
+                "avg_ms": statistics.mean(durations) if durations else 0,
+                "min_ms": min(durations) if durations else 0,
+                "max_ms": max(durations) if durations else 0,
+                "total_ms": sum(durations),
+            } if durations else {},
+        }
+
+    def detect_bottlenecks(
+        self,
+        threshold_ms: float = 1000.0,
+        min_occurrences: int = 3
+    ) -> list[dict]:
+        """
+        Detect potential async bottlenecks.
+
+        Args:
+            threshold_ms: Duration threshold for slow tasks
+            min_occurrences: Minimum occurrences to flag
+
+        Returns:
+            List of potential bottlenecks
+        """
+        # Group tasks by name
+        task_groups: dict[str, list[AsyncTaskMetrics]] = defaultdict(list)
+        for task in self._tasks.values():
+            if task.duration_ms is not None:
+                task_groups[task.task_name].append(task)
+
+        bottlenecks = []
+        for task_name, tasks in task_groups.items():
+            slow_tasks = [t for t in tasks if (t.duration_ms or 0) > threshold_ms]
+
+            if len(slow_tasks) >= min_occurrences:
+                durations = [t.duration_ms for t in slow_tasks if t.duration_ms]
+                bottlenecks.append({
+                    "task_name": task_name,
+                    "slow_count": len(slow_tasks),
+                    "total_count": len(tasks),
+                    "slow_pct": len(slow_tasks) / len(tasks) * 100,
+                    "avg_slow_duration_ms": statistics.mean(durations) if durations else 0,
+                    "recommendation": "Consider caching or parallel execution",
+                })
+
+        return sorted(bottlenecks, key=lambda b: b["avg_slow_duration_ms"], reverse=True)
+
+    def get_concurrency_report(self) -> dict[str, Any]:
+        """Get report on task concurrency patterns."""
+        if not self._tasks:
+            return {"error": "no_tasks"}
+
+        # Group overlapping tasks
+        timeline = []
+        for task in self._tasks.values():
+            timeline.append((task.start_time, "start", task.task_id))
+            if task.end_time:
+                timeline.append((task.end_time, "end", task.task_id))
+
+        timeline.sort(key=lambda x: x[0])
+
+        max_concurrent = 0
+        current_concurrent = 0
+        concurrent_history = []
+
+        for ts, event_type, task_id in timeline:
+            if event_type == "start":
+                current_concurrent += 1
+            else:
+                current_concurrent -= 1
+
+            max_concurrent = max(max_concurrent, current_concurrent)
+            concurrent_history.append((ts, current_concurrent))
+
+        return {
+            "max_concurrent_tasks": max_concurrent,
+            "total_tasks_tracked": len(self._tasks),
+            "average_concurrent": (
+                sum(c for _, c in concurrent_history) / len(concurrent_history)
+                if concurrent_history else 0
+            ),
+        }
+
+    def reset(self) -> None:
+        """Reset all task tracking data."""
+        with self._lock:
+            self._tasks.clear()
+            self._active_tasks.clear()
+
+
+# Global async profiler instance
+_async_profiler: AsyncTaskProfiler | None = None
+
+
+def get_async_profiler() -> AsyncTaskProfiler:
+    """Get global async profiler instance."""
+    global _async_profiler
+    if _async_profiler is None:
+        _async_profiler = AsyncTaskProfiler()
+    return _async_profiler
+
+
+def profile_async(name: str | None = None):
+    """Async profiling decorator using global profiler."""
+    return get_async_profiler().profile_async(name=name)

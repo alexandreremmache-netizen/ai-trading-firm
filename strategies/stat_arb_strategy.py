@@ -4,6 +4,29 @@ Statistical Arbitrage Strategy
 
 Implements pairs trading, mean reversion, and commodity spreads.
 
+MATURITY: BETA
+--------------
+Status: Comprehensive implementation with commodity spreads
+- [x] Cointegration testing (simplified ADF)
+- [x] Hedge ratio estimation (OLS)
+- [x] Half-life calculation (OU process)
+- [x] Commodity spreads (crack, crush, inter-commodity)
+- [x] Optimal lag selection for ADF (#Q3)
+- [x] Dollar-neutral spread sizing
+- [ ] Johansen cointegration test (TODO)
+- [ ] Kalman filter for dynamic hedge ratio (TODO)
+- [ ] Transaction cost modeling (TODO)
+
+Production Readiness:
+- Unit tests: Partial coverage
+- Backtesting: Spread definitions validated historically
+- Live testing: Not yet performed
+
+Use in production: WITH CAUTION
+- Commodity spread ratios are industry-standard
+- ADF test is simplified; production should use statsmodels
+- Monitor half-life for regime changes
+
 Features:
 - Pairs trading (cointegration-based)
 - Commodity spreads (crack, crush, calendar)
@@ -14,7 +37,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -44,6 +67,7 @@ class CommoditySpread:
     typical_range: tuple[float, float] = (0.0, 0.0)  # Historical range
     seasonality: list[int] = field(default_factory=list)  # Best months
     margin_offset_pct: float = 0.0  # Margin reduction for recognized spread
+    storage_cost_annual_pct: float = 0.0  # Annual storage/carry cost as percentage (COM-005)
 
 
 # =============================================================================
@@ -66,6 +90,7 @@ COMMODITY_SPREADS: dict[str, CommoditySpread] = {
         typical_range=(5.0, 35.0),  # USD per barrel
         seasonality=[2, 3, 4, 5],  # Feb-May (pre-driving season)
         margin_offset_pct=75.0,
+        storage_cost_annual_pct=3.5,  # COM-005: Crude/products storage ~3-4% annually
     ),
 
     "gasoline_crack": CommoditySpread(
@@ -79,6 +104,7 @@ COMMODITY_SPREADS: dict[str, CommoditySpread] = {
         typical_range=(5.0, 40.0),
         seasonality=[2, 3, 4, 5, 6],  # Feb-Jun
         margin_offset_pct=70.0,
+        storage_cost_annual_pct=4.0,  # COM-005: Gasoline higher storage cost due to volatility
     ),
 
     "heating_oil_crack": CommoditySpread(
@@ -92,6 +118,7 @@ COMMODITY_SPREADS: dict[str, CommoditySpread] = {
         typical_range=(5.0, 30.0),
         seasonality=[9, 10, 11, 12],  # Sep-Dec (pre-winter)
         margin_offset_pct=70.0,
+        storage_cost_annual_pct=3.0,  # COM-005: Heating oil stable storage
     ),
 
     # =========================================================================
@@ -113,6 +140,7 @@ COMMODITY_SPREADS: dict[str, CommoditySpread] = {
         typical_range=(0.50, 1.50),  # USD per bushel gross crush margin
         seasonality=[9, 10, 11],  # Post-harvest
         margin_offset_pct=60.0,
+        storage_cost_annual_pct=5.0,  # COM-005: Grain storage ~4-6% annually
     ),
 
     "reverse_crush": CommoditySpread(
@@ -127,6 +155,7 @@ COMMODITY_SPREADS: dict[str, CommoditySpread] = {
         typical_range=(-1.50, -0.50),
         seasonality=[3, 4, 5],  # Planting season
         margin_offset_pct=60.0,
+        storage_cost_annual_pct=5.0,  # COM-005: Grain storage ~4-6% annually
     ),
 
     # Single contract crush (for smaller accounts)
@@ -142,6 +171,7 @@ COMMODITY_SPREADS: dict[str, CommoditySpread] = {
         typical_range=(0.50, 1.50),
         seasonality=[9, 10, 11],
         margin_offset_pct=50.0,  # Lower margin offset due to ratio mismatch
+        storage_cost_annual_pct=5.0,  # COM-005: Grain storage ~4-6% annually
     ),
 
     # =========================================================================
@@ -162,6 +192,7 @@ COMMODITY_SPREADS: dict[str, CommoditySpread] = {
                     "Ratio = (GC_price × 100) / (SI_price × 5000) for actual ratio exposure.",
         typical_range=(60.0, 90.0),  # Gold/Silver PRICE ratio range (for reference)
         margin_offset_pct=50.0,
+        storage_cost_annual_pct=0.5,  # COM-005: Precious metals low storage cost
     ),
 
     # Alternative: Micro gold/silver for smaller accounts
@@ -176,6 +207,7 @@ COMMODITY_SPREADS: dict[str, CommoditySpread] = {
         description="Micro contract version of gold/silver spread",
         typical_range=(60.0, 90.0),
         margin_offset_pct=40.0,
+        storage_cost_annual_pct=0.5,  # COM-005: Precious metals low storage cost
     ),
 
     "corn_wheat": CommoditySpread(
@@ -190,6 +222,7 @@ COMMODITY_SPREADS: dict[str, CommoditySpread] = {
         typical_range=(-1.50, 0.50),  # Wheat premium over corn in USD/bushel
         seasonality=[6, 7, 8],  # Summer
         margin_offset_pct=40.0,
+        storage_cost_annual_pct=5.5,  # COM-005: Grain storage ~5-6% annually
     ),
 
     # Corn/Soybean ratio (feed competition)
@@ -206,6 +239,7 @@ COMMODITY_SPREADS: dict[str, CommoditySpread] = {
         typical_range=(2.0, 3.0),  # Soybean/Corn price ratio
         seasonality=[1, 2, 3],  # Planting decision season
         margin_offset_pct=40.0,
+        storage_cost_annual_pct=5.0,  # COM-005: Grain storage ~4-6% annually
     ),
 
     "brent_wti": CommoditySpread(
@@ -219,6 +253,7 @@ COMMODITY_SPREADS: dict[str, CommoditySpread] = {
         description="Atlantic Basin crude oil spread (requires Brent contract)",
         typical_range=(-5.0, 10.0),
         margin_offset_pct=60.0,
+        storage_cost_annual_pct=3.5,  # COM-005: Crude oil storage ~3-4% annually
     ),
 
     # Platinum/Gold ratio
@@ -234,6 +269,7 @@ COMMODITY_SPREADS: dict[str, CommoditySpread] = {
                     "currently at deep discount.",
         typical_range=(0.5, 1.2),  # Pt/Au price ratio
         margin_offset_pct=50.0,
+        storage_cost_annual_pct=0.5,  # COM-005: Precious metals low storage cost
     ),
 
     # Copper/Gold ratio (economic indicator)
@@ -250,6 +286,7 @@ COMMODITY_SPREADS: dict[str, CommoditySpread] = {
                     "Higher ratio = risk-on, lower = risk-off.",
         typical_range=(0.0015, 0.0025),  # Cu/Au price ratio
         margin_offset_pct=40.0,
+        storage_cost_annual_pct=2.0,  # COM-005: Base metals moderate storage cost
     ),
 }
 
@@ -281,6 +318,16 @@ class PairAnalysis:
     half_life: float
     current_zscore: float
     is_cointegrated: bool
+    rationale: str = ""  # Explanation for cointegration status (ISSUE_002)
+    # P2: Rolling correlation monitoring
+    rolling_correlation: float = 0.0  # Short-term rolling correlation
+    correlation_stability: float = 0.0  # Stability score (0-1)
+    # P2: Mean-reversion speed estimation
+    reversion_speed: float = 0.0  # Daily mean reversion speed
+    expected_time_to_mean: float = 0.0  # Expected bars to reach mean
+    # P2: Entry timing optimization
+    entry_score: float = 0.0  # 0-1 score for entry quality
+    optimal_entry: bool = False  # True if timing is optimal
 
 
 class StatArbStrategy:
@@ -305,6 +352,302 @@ class StatArbStrategy:
         self._zscore_exit = config.get("zscore_exit_threshold", 0.5)
         self._min_half_life = config.get("min_half_life_days", 1)
         self._max_half_life = config.get("max_half_life_days", 30)
+        # Regime change detection thresholds (ISSUE_002)
+        self._correlation_spike_threshold = config.get("correlation_spike_threshold", 0.95)
+        self._bars_per_day = config.get("bars_per_day", 390)  # Default: minute bars for US equity
+
+        # P2: Rolling correlation monitoring settings
+        self._rolling_corr_window = config.get("rolling_corr_window", 20)  # Short-term window
+        self._corr_stability_threshold = config.get("corr_stability_threshold", 0.1)  # Max acceptable std
+
+        # P2: Mean-reversion speed estimation settings
+        self._speed_estimation_window = config.get("speed_estimation_window", 30)
+
+        # P2: Entry timing optimization settings
+        self._zscore_acceleration_threshold = config.get("zscore_acceleration_threshold", 0.1)
+        self._optimal_entry_zscore_range = config.get("optimal_entry_zscore_range", (1.8, 2.5))
+
+    def test_cointegration_rolling(
+        self,
+        prices_a: np.ndarray,
+        prices_b: np.ndarray,
+        hedge_ratio: float,
+    ) -> tuple[bool, str]:
+        """
+        Test cointegration stability with rolling windows and regime change detection (ISSUE_002).
+
+        Cointegration tested once is not enough - correlations can spike during crises.
+        This method detects regime changes by:
+        1. Comparing long-term (60d) vs short-term (10d) ADF test results
+        2. Detecting correlation spikes (> 0.95) which indicate crisis/regime change
+
+        Args:
+            prices_a: Price series for asset A
+            prices_b: Price series for asset B
+            hedge_ratio: Estimated hedge ratio
+
+        Returns:
+            (is_stable, rationale): Tuple of stability flag and explanation
+        """
+        bars_per_day = self._bars_per_day
+        min_bars_60d = 60 * bars_per_day
+        min_bars_10d = 10 * bars_per_day
+        min_bars_5d = 5 * bars_per_day
+
+        # Calculate spread
+        spread = prices_a - hedge_ratio * prices_b
+
+        # Test 1: Rolling ADF comparison (60d vs 10d)
+        if len(spread) >= min_bars_60d:
+            _, pvalue_60d, _ = self._adf_test(spread[-min_bars_60d:])
+            _, pvalue_10d, _ = self._adf_test(spread[-min_bars_10d:])
+
+            # If short-term cointegration breaks down while long-term holds,
+            # this indicates a potential regime change
+            if pvalue_60d < 0.05 and pvalue_10d > 0.10:
+                return (False, "REGIME_CHANGE: Short-term cointegration breakdown")
+
+        # Test 2: Correlation spike detection (crisis indicator)
+        if len(prices_a) >= min_bars_5d and len(prices_b) >= min_bars_5d:
+            recent_corr = np.corrcoef(prices_a[-min_bars_5d:], prices_b[-min_bars_5d:])[0, 1]
+
+            # Correlation spikes (near +1 or -1) indicate crisis/regime change
+            # In normal markets, correlated assets have stable correlation
+            # During crises, correlations spike as everything moves together
+            if abs(recent_corr) > self._correlation_spike_threshold:
+                return (False, f"REGIME_CHANGE: Correlation spike detected ({recent_corr:.3f})")
+
+        # Test 3: Check for structural break in spread mean
+        if len(spread) >= min_bars_60d:
+            mean_60d = np.mean(spread[-min_bars_60d:])
+            mean_10d = np.mean(spread[-min_bars_10d:])
+            std_60d = np.std(spread[-min_bars_60d:])
+
+            if std_60d > 1e-12:
+                mean_shift_zscore = abs(mean_10d - mean_60d) / std_60d
+                if mean_shift_zscore > 3.0:  # Mean shifted by more than 3 sigma
+                    return (False, f"REGIME_CHANGE: Spread mean shifted {mean_shift_zscore:.1f} sigma")
+
+        return (True, "STABLE: Rolling cointegration tests passed")
+
+    def calculate_rolling_correlation(
+        self,
+        prices_a: np.ndarray,
+        prices_b: np.ndarray,
+        window: int | None = None
+    ) -> tuple[float, float]:
+        """
+        P2: Calculate rolling correlation and stability.
+
+        Monitors pair correlation over time to detect regime changes
+        and assess relationship stability.
+
+        Args:
+            prices_a: Price series for asset A
+            prices_b: Price series for asset B
+            window: Rolling window size (defaults to _rolling_corr_window)
+
+        Returns:
+            (rolling_correlation, stability_score)
+            - rolling_correlation: Current short-term correlation
+            - stability_score: 0-1 where 1 is very stable
+        """
+        if window is None:
+            window = self._rolling_corr_window
+
+        if len(prices_a) < window * 2 or len(prices_b) < window * 2:
+            return 0.0, 0.0
+
+        # Calculate rolling correlations
+        correlations = []
+        for i in range(window, len(prices_a)):
+            corr = np.corrcoef(
+                prices_a[i - window:i],
+                prices_b[i - window:i]
+            )[0, 1]
+            if np.isfinite(corr):
+                correlations.append(corr)
+
+        if len(correlations) < 5:
+            return 0.0, 0.0
+
+        # Current rolling correlation
+        rolling_corr = correlations[-1]
+
+        # Stability score based on correlation standard deviation
+        corr_std = np.std(correlations)
+
+        # Lower std = more stable = higher score
+        # Normalize: std of 0 = score 1, std >= threshold = score 0
+        stability = max(0.0, 1.0 - (corr_std / self._corr_stability_threshold))
+
+        return rolling_corr, stability
+
+    def estimate_reversion_speed(
+        self,
+        spread: np.ndarray,
+        window: int | None = None
+    ) -> tuple[float, float]:
+        """
+        P2: Estimate mean-reversion speed and expected time to mean.
+
+        Uses Ornstein-Uhlenbeck process parameters to estimate
+        how quickly the spread reverts to its mean.
+
+        Args:
+            spread: Spread time series
+            window: Estimation window (defaults to _speed_estimation_window)
+
+        Returns:
+            (reversion_speed, expected_time_to_mean)
+            - reversion_speed: Daily reversion rate (0-1)
+            - expected_time_to_mean: Expected bars to reach mean
+        """
+        if window is None:
+            window = self._speed_estimation_window
+
+        if len(spread) < window + 1:
+            return 0.0, float("inf")
+
+        recent_spread = spread[-window - 1:]
+
+        # Calculate spread changes
+        spread_lag = recent_spread[:-1]
+        spread_diff = np.diff(recent_spread)
+
+        # Estimate theta (mean reversion rate) via OLS
+        # dS = theta * (mu - S) * dt + noise
+        # Regress dS on (S_lag - mean)
+        mean_spread = np.mean(recent_spread)
+        deviation = spread_lag - mean_spread
+
+        var_deviation = np.var(deviation)
+        if var_deviation < 1e-12:
+            return 0.0, float("inf")
+
+        cov_result = np.cov(spread_diff, deviation)
+        if cov_result.ndim == 0:
+            return 0.0, float("inf")
+
+        # theta = -cov(dS, S-mu) / var(S-mu)
+        theta = -cov_result[0, 1] / var_deviation
+
+        if not np.isfinite(theta) or theta <= 0:
+            return 0.0, float("inf")
+
+        # Reversion speed: portion of deviation corrected per period
+        reversion_speed = min(1.0, theta)
+
+        # Expected time to mean (half-life based)
+        # Expected time = |current deviation| / (theta * std(spread))
+        current_deviation = abs(spread[-1] - mean_spread)
+        std_spread = np.std(recent_spread)
+
+        if std_spread > 1e-12 and theta > 0:
+            # Expected time proportional to deviation in std units / theta
+            expected_time = (current_deviation / std_spread) / theta
+        else:
+            expected_time = float("inf")
+
+        return reversion_speed, expected_time
+
+    def calculate_entry_timing(
+        self,
+        spread: np.ndarray,
+        current_zscore: float,
+        half_life: float
+    ) -> tuple[float, bool]:
+        """
+        P2: Optimize entry timing based on spread dynamics.
+
+        Determines if current moment is optimal for entry based on:
+        1. Z-score level (not too extreme, not too mild)
+        2. Z-score momentum (ideally decelerating)
+        3. Half-life (faster reversion = better)
+
+        Args:
+            spread: Spread time series
+            current_zscore: Current z-score
+            half_life: Estimated half-life
+
+        Returns:
+            (entry_score, is_optimal)
+            - entry_score: 0-1 score for entry quality
+            - is_optimal: True if timing conditions are met
+        """
+        if len(spread) < 5:
+            return 0.0, False
+
+        abs_zscore = abs(current_zscore)
+
+        # Factor 1: Z-score level (0-1 score)
+        # Optimal range is typically 1.8-2.5 sigma
+        min_entry, max_entry = self._optimal_entry_zscore_range
+
+        if abs_zscore < min_entry:
+            # Too close to mean - not enough edge
+            zscore_score = 0.0
+        elif abs_zscore > max_entry + 1.0:
+            # Very extreme - might not revert (regime change risk)
+            zscore_score = max(0.0, 1.0 - (abs_zscore - max_entry - 1.0) / 2.0)
+        elif min_entry <= abs_zscore <= max_entry:
+            # Optimal range
+            zscore_score = 1.0
+        else:
+            # Between max_entry and max_entry + 1.0
+            zscore_score = 0.8
+
+        # Factor 2: Z-score momentum (looking for deceleration)
+        zscore_series = []
+        std_spread = np.std(spread)
+        mean_spread = np.mean(spread)
+
+        if std_spread > 1e-12:
+            for i in range(-5, 0):
+                if i + len(spread) >= 0:
+                    z = (spread[i] - mean_spread) / std_spread
+                    zscore_series.append(z)
+
+        momentum_score = 0.5  # Default neutral
+        if len(zscore_series) >= 3:
+            # Calculate acceleration (second derivative)
+            velocity = np.diff(zscore_series)
+            if len(velocity) >= 2:
+                acceleration = velocity[-1] - velocity[-2]
+
+                # For entry, we want deceleration (acceleration opposite to velocity)
+                if abs(velocity[-1]) > 0.01:
+                    if np.sign(acceleration) != np.sign(velocity[-1]):
+                        # Decelerating - good for entry
+                        momentum_score = min(1.0, 0.7 + abs(acceleration) / self._zscore_acceleration_threshold * 0.3)
+                    else:
+                        # Accelerating away from mean - risky
+                        momentum_score = max(0.0, 0.5 - abs(acceleration) / self._zscore_acceleration_threshold * 0.3)
+
+        # Factor 3: Half-life quality (faster = better within bounds)
+        if self._min_half_life <= half_life <= self._max_half_life:
+            # Normalize: shorter half-life = higher score
+            half_life_range = self._max_half_life - self._min_half_life
+            half_life_score = 1.0 - (half_life - self._min_half_life) / half_life_range
+        else:
+            half_life_score = 0.0
+
+        # Combined entry score (weighted average)
+        entry_score = (
+            zscore_score * 0.5 +
+            momentum_score * 0.3 +
+            half_life_score * 0.2
+        )
+
+        # Optimal entry: score > 0.6 and all factors reasonable
+        is_optimal = (
+            entry_score > 0.6 and
+            zscore_score > 0.5 and
+            momentum_score > 0.4 and
+            half_life_score > 0.3
+        )
+
+        return entry_score, is_optimal
 
     def test_cointegration(
         self,
@@ -313,6 +656,8 @@ class StatArbStrategy:
     ) -> PairAnalysis:
         """
         Test for cointegration between two price series.
+
+        Includes rolling cointegration test and regime change detection (ISSUE_002).
 
         TODO: Implement proper cointegration tests:
         - Augmented Dickey-Fuller on residuals
@@ -328,6 +673,7 @@ class StatArbStrategy:
                 half_life=float("inf"),
                 current_zscore=0,
                 is_cointegrated=False,
+                rationale="REJECTED: Insufficient data",
             )
 
         # Calculate correlation
@@ -347,12 +693,36 @@ class StatArbStrategy:
         half_life = self._estimate_half_life(spread)
 
         # Calculate current z-score
-        zscore = (spread[-1] - np.mean(spread)) / np.std(spread)
+        # Guard against division by zero (std=0 means constant spread)
+        spread_std = np.std(spread)
+        if spread_std < 1e-12:
+            zscore = 0.0
+        else:
+            zscore = (spread[-1] - np.mean(spread)) / spread_std
 
-        is_cointegrated = (
+        # Basic cointegration check
+        basic_cointegrated = (
             pvalue < 0.05
             and self._min_half_life <= half_life <= self._max_half_life
         )
+
+        # Rolling cointegration and regime change detection (ISSUE_002)
+        is_stable, rationale = self.test_cointegration_rolling(prices_a, prices_b, hedge_ratio)
+
+        # Final cointegration decision: must pass both basic test AND stability test
+        is_cointegrated = basic_cointegrated and is_stable
+
+        if not basic_cointegrated:
+            rationale = f"REJECTED: ADF p-value={pvalue:.3f}, half_life={half_life:.1f}"
+
+        # P2: Calculate rolling correlation and stability
+        rolling_corr, corr_stability = self.calculate_rolling_correlation(prices_a, prices_b)
+
+        # P2: Estimate mean-reversion speed
+        reversion_speed, expected_time = self.estimate_reversion_speed(spread)
+
+        # P2: Calculate entry timing
+        entry_score, optimal_entry = self.calculate_entry_timing(spread, zscore, half_life)
 
         return PairAnalysis(
             symbol_a="",
@@ -363,6 +733,13 @@ class StatArbStrategy:
             half_life=half_life,
             current_zscore=zscore,
             is_cointegrated=is_cointegrated,
+            rationale=rationale,
+            rolling_correlation=rolling_corr,
+            correlation_stability=corr_stability,
+            reversion_speed=reversion_speed,
+            expected_time_to_mean=expected_time,
+            entry_score=entry_score,
+            optimal_entry=optimal_entry,
         )
 
     def _estimate_hedge_ratio(
@@ -378,7 +755,22 @@ class StatArbStrategy:
         - Kalman filter for time-varying beta
         """
         # OLS: minimize sum((a - beta*b)^2)
-        beta = np.cov(prices_a, prices_b)[0, 1] / np.var(prices_b)
+        # Guard against zero variance in prices_b
+        var_b = np.var(prices_b)
+        if var_b < 1e-12:
+            logger.warning("Zero variance in prices_b, returning hedge ratio of 1.0")
+            return 1.0
+
+        cov_matrix = np.cov(prices_a, prices_b)
+        # Handle the case when cov_matrix is a scalar (single data point)
+        if cov_matrix.ndim == 0:
+            return 1.0
+
+        beta = cov_matrix[0, 1] / var_b
+        # Ensure beta is finite
+        if not np.isfinite(beta):
+            logger.warning(f"Non-finite hedge ratio computed: {beta}, returning 1.0")
+            return 1.0
         return beta
 
     def _select_optimal_lag(
@@ -615,12 +1007,26 @@ class StatArbStrategy:
             return float("inf")
 
         # theta estimate
-        theta = -np.cov(spread_diff, spread_lag)[0, 1] / np.var(spread_lag)
+        var_lag = np.var(spread_lag)
+        if var_lag < 1e-12:
+            return float("inf")
 
-        if theta <= 0:
+        cov_result = np.cov(spread_diff, spread_lag)
+        # Handle scalar result (shouldn't happen but defensive)
+        if cov_result.ndim == 0:
+            return float("inf")
+
+        theta = -cov_result[0, 1] / var_lag
+
+        # Guard against non-positive theta or non-finite values
+        if not np.isfinite(theta) or theta <= 0:
             return float("inf")
 
         half_life = np.log(2) / theta
+
+        # Sanity check on half-life
+        if not np.isfinite(half_life) or half_life < 0:
+            return float("inf")
 
         return half_life
 
@@ -632,25 +1038,53 @@ class StatArbStrategy:
         Generate trading signal from pair analysis.
 
         Returns signal dict with direction and strength.
+        Includes P2 enhancements for correlation monitoring and entry timing.
         """
         if not analysis.is_cointegrated:
-            return {"direction": "flat", "strength": 0.0}
+            return {
+                "direction": "flat",
+                "strength": 0.0,
+                "correlation_stability": analysis.correlation_stability,
+                "entry_score": analysis.entry_score,
+            }
 
         zscore = analysis.current_zscore
 
+        # P2: Adjust strength based on correlation stability and entry timing
+        stability_factor = 0.7 + (analysis.correlation_stability * 0.3)  # 0.7-1.0
+        timing_factor = 0.8 + (analysis.entry_score * 0.2)  # 0.8-1.0
+
         if zscore > self._zscore_entry:
             # Spread too high - short A, long B
+            base_strength = min(1.0, zscore / 3.0)
+            adjusted_strength = base_strength * stability_factor * timing_factor
+
             return {
                 "direction": "short_spread",
-                "strength": min(1.0, zscore / 3.0),
+                "strength": adjusted_strength,
                 "zscore": zscore,
+                "rolling_correlation": analysis.rolling_correlation,
+                "correlation_stability": analysis.correlation_stability,
+                "reversion_speed": analysis.reversion_speed,
+                "expected_time_to_mean": analysis.expected_time_to_mean,
+                "entry_score": analysis.entry_score,
+                "optimal_entry": analysis.optimal_entry,
             }
         elif zscore < -self._zscore_entry:
             # Spread too low - long A, short B
+            base_strength = min(1.0, abs(zscore) / 3.0)
+            adjusted_strength = base_strength * stability_factor * timing_factor
+
             return {
                 "direction": "long_spread",
-                "strength": min(1.0, abs(zscore) / 3.0),
+                "strength": adjusted_strength,
                 "zscore": zscore,
+                "rolling_correlation": analysis.rolling_correlation,
+                "correlation_stability": analysis.correlation_stability,
+                "reversion_speed": analysis.reversion_speed,
+                "expected_time_to_mean": analysis.expected_time_to_mean,
+                "entry_score": analysis.entry_score,
+                "optimal_entry": analysis.optimal_entry,
             }
         elif abs(zscore) < self._zscore_exit:
             # Near mean - exit
@@ -658,6 +1092,8 @@ class StatArbStrategy:
                 "direction": "exit",
                 "strength": 0.0,
                 "zscore": zscore,
+                "correlation_stability": analysis.correlation_stability,
+                "entry_score": analysis.entry_score,
             }
         else:
             # Hold current position
@@ -665,6 +1101,9 @@ class StatArbStrategy:
                 "direction": "hold",
                 "strength": abs(zscore) / self._zscore_entry,
                 "zscore": zscore,
+                "correlation_stability": analysis.correlation_stability,
+                "expected_time_to_mean": analysis.expected_time_to_mean,
+                "entry_score": analysis.entry_score,
             }
 
     # =========================================================================
@@ -766,7 +1205,7 @@ class StatArbStrategy:
         use_multipliers: bool = False
     ) -> np.ndarray:
         """
-        Calculate spread value time series.
+        Calculate spread value time series using vectorized NumPy operations (PERF-P1-004).
 
         Args:
             spread_def: Spread definition
@@ -779,26 +1218,36 @@ class StatArbStrategy:
         Returns:
             Array of spread values
         """
-        # Initialize with zeros
+        # Determine common length (PERF-P1-004: vectorized approach)
         min_len = min(len(prices[s]) for s in spread_def.legs)
         lookback = min(lookback, min_len)
 
-        spread_values = np.zeros(lookback)
+        # Build coefficient array and price matrix for vectorized computation
+        symbols = list(spread_def.legs.keys())
+        n_legs = len(symbols)
 
-        for symbol, ratio in spread_def.legs.items():
-            if symbol in prices:
-                price_series = prices[symbol][-lookback:]
+        # Preallocate price matrix: shape (lookback, n_legs)
+        price_matrix = np.empty((lookback, n_legs), dtype=np.float64)
+        coefficients = np.empty(n_legs, dtype=np.float64)
 
-                # Apply multiplier if requested
-                multiplier = 1.0
-                if use_multipliers and contract_specs and symbol in contract_specs:
-                    spec = contract_specs[symbol]
-                    if hasattr(spec, 'multiplier'):
-                        multiplier = spec.multiplier
-                    elif isinstance(spec, dict):
-                        multiplier = spec.get("multiplier", 1.0)
+        for i, symbol in enumerate(symbols):
+            ratio = spread_def.legs[symbol]
+            price_series = prices[symbol][-lookback:]
 
-                spread_values += ratio * price_series * multiplier
+            # Apply multiplier if requested
+            multiplier = 1.0
+            if use_multipliers and contract_specs and symbol in contract_specs:
+                spec = contract_specs[symbol]
+                if hasattr(spec, 'multiplier'):
+                    multiplier = spec.multiplier
+                elif isinstance(spec, dict):
+                    multiplier = spec.get("multiplier", 1.0)
+
+            price_matrix[:, i] = price_series
+            coefficients[i] = ratio * multiplier
+
+        # Vectorized spread calculation: single matrix-vector multiplication (PERF-P1-004)
+        spread_values = price_matrix @ coefficients
 
         return spread_values
 
@@ -1021,7 +1470,7 @@ class StatArbStrategy:
             List of spread names
         """
         if month is None:
-            month = datetime.now().month
+            month = datetime.now(timezone.utc).month
 
         seasonal = []
         for name, spread in COMMODITY_SPREADS.items():

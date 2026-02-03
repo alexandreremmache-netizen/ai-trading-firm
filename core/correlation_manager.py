@@ -185,7 +185,9 @@ class CorrelationManager:
     def calculate_correlation_matrix(
         self,
         symbols: list[str] | None = None,
-        lookback_days: int | None = None
+        lookback_days: int | None = None,
+        use_ewma: bool = False,
+        ewma_decay: float | None = None
     ) -> pd.DataFrame | None:
         """
         Calculate rolling correlation matrix.
@@ -193,6 +195,9 @@ class CorrelationManager:
         Args:
             symbols: List of symbols to include (default: all available)
             lookback_days: Rolling window (default: configured lookback)
+            use_ewma: If True, use EWMA (exponentially weighted) correlation (CORR-P1-1 fix)
+            ewma_decay: Decay factor for EWMA (0 < decay < 1, lower = more weight on recent).
+                       Default uses stress_decay_factor from config.
 
         Returns:
             Correlation matrix as DataFrame, or None if insufficient data
@@ -206,6 +211,11 @@ class CorrelationManager:
         if len(symbols) < 2:
             logger.warning("Need at least 2 symbols for correlation matrix")
             return None
+
+        # Use EWMA correlation if requested (CORR-P1-1 fix)
+        if use_ewma:
+            decay = ewma_decay if ewma_decay is not None else self._stress_decay_factor
+            return self._calculate_ewma_correlation_matrix(symbols, lookback_days, decay)
 
         # Build returns DataFrame
         returns_data = {}
@@ -354,19 +364,21 @@ class CorrelationManager:
         """
         Calculate effective number of independent bets.
 
-        Uses eigenvalue decomposition of the correlation matrix.
-        Effective N = (sum of eigenvalues)^2 / sum(eigenvalues^2)
-
-        For weighted portfolio, uses portfolio variance contribution.
+        Uses eigenvalue decomposition of the correlation matrix for unweighted case.
+        For weighted portfolio, uses the weighted effective N formula.
 
         Args:
             corr_matrix: Correlation matrix
-            weights: Portfolio weights
+            weights: Portfolio weights (if provided, uses weighted calculation)
 
         Returns:
             Effective N (1 = fully correlated, N = fully diversified)
         """
         n = len(corr_matrix)
+
+        # Use weighted calculation if weights provided (PM-10 fix)
+        if weights is not None and len(weights) > 0:
+            return self._calculate_effective_n_weighted(corr_matrix, weights)
 
         try:
             eigenvalues = np.linalg.eigvalsh(corr_matrix.values)
@@ -385,6 +397,88 @@ class CorrelationManager:
         except Exception as e:
             logger.warning(f"Effective N calculation failed: {e}")
             return float(n)  # Return actual N as fallback
+
+    def _calculate_effective_n_weighted(
+        self,
+        corr_matrix: pd.DataFrame,
+        weights: dict[str, float]
+    ) -> float:
+        """
+        Calculate effective N with dynamic portfolio weights (PM-10 fix).
+
+        Uses the formula: Effective N = 1 / sum(w_i^2 * (1 + sum(w_j * corr_ij for j != i)))
+        This accounts for both position concentration and correlation effects.
+
+        For a portfolio with equal weights and zero correlations, this returns N.
+        For a fully correlated portfolio, this approaches 1.
+
+        Args:
+            corr_matrix: Correlation matrix
+            weights: Portfolio weights by symbol
+
+        Returns:
+            Weighted effective N (1 = fully correlated, N = fully diversified)
+        """
+        symbols = list(corr_matrix.columns)
+        n = len(symbols)
+
+        if n == 0:
+            return 1.0
+
+        # Build weight vector, using 0 for missing symbols
+        w = np.array([weights.get(s, 0.0) for s in symbols])
+
+        # Handle all-zero weights
+        total_weight = np.sum(np.abs(w))
+        if total_weight == 0:
+            # Fall back to equal weights
+            w = np.ones(n) / n
+        else:
+            # Normalize weights (use absolute values for long/short)
+            w = np.abs(w) / total_weight
+
+        try:
+            corr_values = corr_matrix.values
+
+            # Calculate weighted effective N
+            # Formula: 1 / sum_i(w_i^2 * (1 + sum_j!=i(w_j * corr_ij)))
+            # Simplified: 1 / (w^T * (I + diag(w)^{-1} * C * diag(w) - I) * w)
+            # Which reduces to: 1 / (w^T * C * w) when normalized
+
+            # Alternative clearer formula:
+            # effective_n = 1 / sum_i(w_i * sum_j(w_j * corr_ij))
+            # This is equivalent to 1 / (w^T * C * w)
+            portfolio_correlation = np.dot(w, np.dot(corr_values, w))
+
+            # Portfolio correlation should be between 0 and 1
+            # When all correlations are 1, portfolio_correlation = 1
+            # When all correlations are 0 (diagonal), portfolio_correlation = sum(w_i^2) = HHI
+            portfolio_correlation = max(portfolio_correlation, 1e-10)
+
+            # Effective N = 1 / portfolio_correlation
+            # But this needs adjustment for the HHI baseline
+            # Better formula: effective_n = HHI / portfolio_correlation * n
+            hhi = np.sum(w ** 2)
+
+            # The ratio tells us diversification benefit
+            # For uncorrelated assets: portfolio_correlation = HHI
+            # For fully correlated: portfolio_correlation = 1
+            if portfolio_correlation > 0:
+                # Effective N ranges from 1 (fully correlated) to 1/HHI (uncorrelated)
+                # Scale to be comparable with eigenvalue-based effective N
+                effective_n = hhi / portfolio_correlation * n if portfolio_correlation > hhi else n
+
+                # Cap at actual number of positions
+                effective_n = min(effective_n, n)
+                effective_n = max(effective_n, 1.0)
+            else:
+                effective_n = float(n)
+
+            return float(effective_n)
+
+        except Exception as e:
+            logger.warning(f"Weighted effective N calculation failed: {e}")
+            return float(n)
 
     def _classify_regime(self, avg_correlation: float) -> CorrelationRegime:
         """
@@ -655,6 +749,15 @@ class CorrelationManager:
 
     def get_status(self) -> dict[str, Any]:
         """Get manager status for monitoring."""
+        # Calculate stress correlation average if available (PM-12 exposure)
+        stress_avg_corr = None
+        if self._stress_correlation_cache is not None:
+            upper_tri = self._stress_correlation_cache.values[
+                np.triu_indices_from(self._stress_correlation_cache.values, k=1)
+            ]
+            if len(upper_tri) > 0:
+                stress_avg_corr = float(np.mean(upper_tri))
+
         return {
             "symbols_tracked": len(self._returns_history),
             "lookback_days": self._lookback_days,
@@ -667,6 +770,9 @@ class CorrelationManager:
             "stress_mode": self._stress_mode,
             "stress_indicators": {k.value: v for k, v in self._stress_indicators.items()},
             "current_vix": self._current_vix,
+            # Stress correlation info (PM-12 exposure)
+            "stress_correlation_available": self._stress_correlation_cache is not None,
+            "stress_average_correlation": stress_avg_corr,
         }
 
     # =========================================================================
@@ -1011,3 +1117,397 @@ class CorrelationManager:
         if not self._stress_mode or self._stress_start_time is None:
             return None
         return (datetime.now(timezone.utc) - self._stress_start_time).total_seconds() / 3600
+
+    def refresh_stress_correlations(self) -> pd.DataFrame | None:
+        """
+        Force refresh of stress correlation cache (PM-12 enhancement).
+
+        Recalculates stress correlations using current data and stress parameters.
+        Useful when you need updated stress correlations without triggering
+        full stress mode.
+
+        Returns:
+            Updated stress correlation matrix, or None if insufficient data
+        """
+        self._recalculate_stress_correlations()
+        return self._stress_correlation_cache
+
+    def get_effective_n_weighted(
+        self,
+        weights: dict[str, float],
+        symbols: list[str] | None = None
+    ) -> float | None:
+        """
+        Calculate effective N with specific portfolio weights (PM-10 public API).
+
+        This method allows computing the weighted effective N without
+        calculating a full snapshot.
+
+        Args:
+            weights: Portfolio weights by symbol
+            symbols: Symbols to include (default: all symbols in weights)
+
+        Returns:
+            Weighted effective N, or None if insufficient data
+        """
+        if symbols is None:
+            symbols = list(weights.keys())
+
+        corr_matrix = self.calculate_correlation_matrix(symbols)
+        if corr_matrix is None:
+            return None
+
+        return self._calculate_effective_n_weighted(corr_matrix, weights)
+
+    # =========================================================================
+    # CORRELATION STABILITY METRICS (P2)
+    # =========================================================================
+
+    def calculate_correlation_stability(
+        self,
+        symbols: list[str] | None = None,
+        window_sizes: list[int] | None = None
+    ) -> dict[str, Any]:
+        """
+        Calculate correlation stability metrics across different time windows (P2).
+
+        Measures how stable correlations are over time by comparing
+        correlation matrices computed with different lookback periods.
+
+        Args:
+            symbols: Symbols to analyze (default: all)
+            window_sizes: List of window sizes to compare (default: [20, 40, 60])
+
+        Returns:
+            Dictionary with stability metrics including:
+            - stability_score: Overall stability (0-1, higher = more stable)
+            - window_divergence: Max divergence between windows
+            - unstable_pairs: Pairs with highly variable correlations
+        """
+        if window_sizes is None:
+            window_sizes = [20, 40, 60]
+
+        if symbols is None:
+            symbols = list(self._returns_history.keys())
+
+        if len(symbols) < 2:
+            return {
+                "stability_score": 1.0,
+                "window_divergence": 0.0,
+                "unstable_pairs": [],
+                "correlation_matrices": {},
+            }
+
+        # Calculate correlation matrices for each window
+        matrices = {}
+        for window in window_sizes:
+            matrix = self.calculate_correlation_matrix(symbols, lookback_days=window)
+            if matrix is not None:
+                matrices[window] = matrix
+
+        if len(matrices) < 2:
+            return {
+                "stability_score": 1.0,
+                "window_divergence": 0.0,
+                "unstable_pairs": [],
+                "correlation_matrices": matrices,
+            }
+
+        # Compare matrices pairwise
+        divergences = []
+        pair_stability = {}
+
+        window_list = sorted(matrices.keys())
+        for i in range(len(window_list)):
+            for j in range(i + 1, len(window_list)):
+                w1, w2 = window_list[i], window_list[j]
+                m1, m2 = matrices[w1], matrices[w2]
+
+                # Calculate divergence for each pair
+                common_symbols = list(set(m1.columns) & set(m2.columns))
+                for sym1 in common_symbols:
+                    for sym2 in common_symbols:
+                        if sym1 < sym2:
+                            corr1 = m1.loc[sym1, sym2]
+                            corr2 = m2.loc[sym1, sym2]
+                            diff = abs(corr1 - corr2)
+                            divergences.append(diff)
+
+                            pair_key = (sym1, sym2)
+                            if pair_key not in pair_stability:
+                                pair_stability[pair_key] = []
+                            pair_stability[pair_key].append(diff)
+
+        # Calculate overall stability
+        if divergences:
+            avg_divergence = float(np.mean(divergences))
+            max_divergence = float(np.max(divergences))
+            stability_score = max(0.0, 1.0 - avg_divergence)
+        else:
+            avg_divergence = 0.0
+            max_divergence = 0.0
+            stability_score = 1.0
+
+        # Find unstable pairs (divergence > 0.3)
+        unstable_pairs = []
+        for pair, diffs in pair_stability.items():
+            avg_diff = np.mean(diffs)
+            if avg_diff > 0.3:
+                unstable_pairs.append({
+                    "pair": pair,
+                    "avg_divergence": float(avg_diff),
+                    "max_divergence": float(np.max(diffs)),
+                })
+
+        # Sort by divergence
+        unstable_pairs.sort(key=lambda x: x["avg_divergence"], reverse=True)
+
+        return {
+            "stability_score": stability_score,
+            "avg_divergence": avg_divergence,
+            "window_divergence": max_divergence,
+            "unstable_pairs": unstable_pairs[:10],  # Top 10 most unstable
+            "windows_analyzed": window_list,
+        }
+
+    def check_correlation_breakdown(
+        self,
+        threshold_change: float = 0.25,
+        lookback_comparison: int = 20
+    ) -> list[CorrelationAlert]:
+        """
+        Check for correlation breakdown events (P2).
+
+        Correlation breakdown occurs when previously stable correlations
+        suddenly change significantly, often indicating regime change.
+
+        Args:
+            threshold_change: Minimum change to trigger alert (default: 0.25)
+            lookback_comparison: Days to compare against (default: 20)
+
+        Returns:
+            List of correlation breakdown alerts
+        """
+        alerts = []
+
+        symbols = list(self._returns_history.keys())
+        if len(symbols) < 2:
+            return alerts
+
+        # Get current and historical correlation matrices
+        current_matrix = self.calculate_correlation_matrix(symbols)
+        if current_matrix is None:
+            return alerts
+
+        # Calculate historical matrix with offset
+        historical_data = {}
+        for symbol in symbols:
+            if symbol in self._returns_history:
+                history = self._returns_history[symbol]
+                if len(history) > lookback_comparison + self._min_history_days:
+                    # Get data ending lookback_comparison days ago
+                    end_idx = len(history) - lookback_comparison
+                    start_idx = max(0, end_idx - self._lookback_days)
+                    historical_data[symbol] = history[start_idx:end_idx]
+
+        if len(historical_data) < 2:
+            return alerts
+
+        # Build historical returns DataFrame
+        returns_data = {}
+        for symbol, history in historical_data.items():
+            if len(history) >= self._min_history_days:
+                returns_data[symbol] = pd.Series(
+                    [r[1] for r in history],
+                    index=[r[0] for r in history]
+                )
+
+        if len(returns_data) < 2:
+            return alerts
+
+        returns_df = pd.DataFrame(returns_data).dropna(how="any")
+        if len(returns_df) < self._min_history_days:
+            return alerts
+
+        historical_matrix = returns_df.corr()
+
+        # Compare matrices and find breakdowns
+        common_symbols = list(set(current_matrix.columns) & set(historical_matrix.columns))
+
+        for i, sym1 in enumerate(common_symbols):
+            for sym2 in common_symbols[i+1:]:
+                current_corr = current_matrix.loc[sym1, sym2]
+                historical_corr = historical_matrix.loc[sym1, sym2]
+                change = current_corr - historical_corr
+
+                if abs(change) >= threshold_change:
+                    severity = "critical" if abs(change) >= 0.4 else "warning"
+                    direction = "increased" if change > 0 else "decreased"
+
+                    alert = self._generate_alert(
+                        alert_type="correlation_breakdown",
+                        severity=severity,
+                        message=(
+                            f"Correlation between {sym1} and {sym2} {direction} "
+                            f"by {abs(change):.2f} (from {historical_corr:.2f} to {current_corr:.2f})"
+                        ),
+                        details={
+                            "pair": (sym1, sym2),
+                            "current_correlation": float(current_corr),
+                            "historical_correlation": float(historical_corr),
+                            "change": float(change),
+                            "lookback_days": lookback_comparison,
+                        }
+                    )
+                    alerts.append(alert)
+
+        return alerts
+
+    def optimize_rolling_window(
+        self,
+        symbols: list[str] | None = None,
+        test_windows: list[int] | None = None,
+        metric: str = "stability"
+    ) -> dict[str, Any]:
+        """
+        Optimize rolling window size for correlation calculation (P2).
+
+        Tests different window sizes and recommends optimal based on:
+        - stability: Minimize correlation estimate variance
+        - responsiveness: Faster detection of regime changes
+        - balanced: Trade-off between stability and responsiveness
+
+        Args:
+            symbols: Symbols to analyze
+            test_windows: Window sizes to test (default: [20, 30, 40, 60, 90])
+            metric: Optimization metric ("stability", "responsiveness", "balanced")
+
+        Returns:
+            Dictionary with optimal window and analysis
+        """
+        if test_windows is None:
+            test_windows = [20, 30, 40, 60, 90]
+
+        if symbols is None:
+            symbols = list(self._returns_history.keys())
+
+        if len(symbols) < 2:
+            return {
+                "optimal_window": self._lookback_days,
+                "analysis": "Insufficient symbols for optimization",
+            }
+
+        results = []
+
+        for window in test_windows:
+            # Calculate matrices at multiple points in time
+            matrices = []
+            step = max(5, window // 4)
+
+            for offset in range(0, min(60, window * 2), step):
+                # Simulate historical calculation by using subset of data
+                returns_data = {}
+                for symbol in symbols:
+                    if symbol in self._returns_history:
+                        history = self._returns_history[symbol]
+                        end_idx = len(history) - offset if offset > 0 else len(history)
+                        start_idx = max(0, end_idx - window)
+                        if end_idx - start_idx >= self._min_history_days:
+                            subset = history[start_idx:end_idx]
+                            returns_data[symbol] = pd.Series(
+                                [r[1] for r in subset],
+                                index=[r[0] for r in subset]
+                            )
+
+                if len(returns_data) >= 2:
+                    df = pd.DataFrame(returns_data).dropna(how="any")
+                    if len(df) >= self._min_history_days:
+                        matrices.append(df.corr())
+
+            if len(matrices) < 2:
+                continue
+
+            # Calculate stability (variance of correlations across time)
+            all_corrs = []
+            for m in matrices:
+                upper_tri = m.values[np.triu_indices_from(m.values, k=1)]
+                all_corrs.extend(upper_tri.tolist())
+
+            if all_corrs:
+                stability = 1.0 - np.std(all_corrs)
+                responsiveness = 1.0 / window  # Shorter = more responsive
+                balanced = 0.6 * stability + 0.4 * responsiveness * 60  # Normalize
+
+                results.append({
+                    "window": window,
+                    "stability": float(stability),
+                    "responsiveness": float(responsiveness),
+                    "balanced": float(balanced),
+                    "n_matrices": len(matrices),
+                })
+
+        if not results:
+            return {
+                "optimal_window": self._lookback_days,
+                "analysis": "Could not compute metrics for any window",
+            }
+
+        # Select optimal based on metric
+        if metric == "stability":
+            optimal = max(results, key=lambda x: x["stability"])
+        elif metric == "responsiveness":
+            optimal = max(results, key=lambda x: x["responsiveness"])
+        else:  # balanced
+            optimal = max(results, key=lambda x: x["balanced"])
+
+        return {
+            "optimal_window": optimal["window"],
+            "metric_used": metric,
+            "optimal_score": optimal[metric],
+            "all_results": results,
+            "recommendation": (
+                f"Optimal window is {optimal['window']} days for {metric} metric. "
+                f"Stability={optimal['stability']:.3f}, Responsiveness={optimal['responsiveness']:.4f}"
+            ),
+        }
+
+    def calculate_ewma_correlation_matrix(
+        self,
+        symbols: list[str] | None = None,
+        lookback_days: int | None = None,
+        decay_factor: float | None = None
+    ) -> pd.DataFrame | None:
+        """
+        Public method to calculate EWMA correlation matrix (CORR-P1-1 public API).
+
+        EWMA (Exponentially Weighted Moving Average) correlations give more
+        weight to recent observations, which is useful for:
+        - Detecting regime changes faster
+        - Stress period analysis
+        - Forward-looking risk estimation
+
+        Args:
+            symbols: List of symbols (default: all available)
+            lookback_days: Window size (default: configured lookback)
+            decay_factor: EWMA decay factor (0 < decay < 1).
+                         Lower values = more weight on recent data.
+                         Default: stress_decay_factor from config (typically 0.90)
+
+        Returns:
+            EWMA correlation matrix as DataFrame, or None if insufficient data
+
+        Example:
+            # Standard EWMA correlation
+            ewma_corr = manager.calculate_ewma_correlation_matrix()
+
+            # Faster decay for more responsive correlations
+            fast_ewma = manager.calculate_ewma_correlation_matrix(decay_factor=0.85)
+        """
+        if lookback_days is None:
+            lookback_days = self._lookback_days
+        if decay_factor is None:
+            decay_factor = self._stress_decay_factor
+        if symbols is None:
+            symbols = list(self._returns_history.keys())
+
+        return self._calculate_ewma_correlation_matrix(symbols, lookback_days, decay_factor)

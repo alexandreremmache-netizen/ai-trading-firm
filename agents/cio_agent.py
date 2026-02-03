@@ -91,6 +91,23 @@ class StrategyPerformance:
     total_trades: int = 0  # Number of trades for statistical significance
 
 
+@dataclass
+class DecisionRecord:
+    """Record of a CIO decision for accuracy tracking (P2)."""
+    decision_id: str
+    symbol: str
+    direction: SignalDirection
+    quantity: int
+    conviction_score: float
+    timestamp: datetime
+    contributing_strategies: list[str]
+    regime_at_decision: str
+    # Outcome tracking
+    outcome_pnl: float | None = None
+    outcome_direction_correct: bool | None = None
+    outcome_recorded: bool = False
+
+
 class CIOAgent(DecisionAgent):
     """
     Chief Investment Officer Agent.
@@ -129,6 +146,21 @@ class CIOAgent(DecisionAgent):
 
         # Current effective weights (may be adjusted dynamically)
         self._weights = dict(self._base_weights)
+
+        # Sector concentration limits (PM-01)
+        self._max_sector_concentration = config.parameters.get("max_sector_concentration", 0.25)  # 25% max per sector
+        self._symbol_to_sector: dict[str, str] = {}  # symbol -> sector mapping
+        self._sector_positions: dict[str, float] = {}  # sector -> current exposure as fraction of portfolio
+
+        # Portfolio drawdown tracking (PM-06)
+        self._portfolio_drawdown = 0.0  # Current drawdown from peak (0.0 to 1.0)
+        self._portfolio_peak = config.parameters.get("portfolio_value", 1_000_000.0)
+        self._drawdown_kelly_threshold = config.parameters.get("drawdown_kelly_threshold", 0.05)  # 5% drawdown threshold
+        self._drawdown_kelly_floor = config.parameters.get("drawdown_kelly_floor", 0.5)  # Minimum kelly multiplier at max drawdown
+
+        # Stress correlation cache (PM-12)
+        self._stress_correlation_cache: dict[tuple[str, str], float] = {}
+        self._in_stress_mode = False
 
         # Decision thresholds
         self._min_conviction = config.parameters.get("min_conviction_threshold", 0.6)
@@ -172,6 +204,28 @@ class CIOAgent(DecisionAgent):
         self._max_signal_history = config.parameters.get("max_signal_history", 100)
         self._correlation_lookback = config.parameters.get("signal_correlation_lookback", 50)
         self._use_correlation_adjustment = config.parameters.get("use_signal_correlation_adjustment", True)
+
+        # P2: Historical decision accuracy tracking
+        self._decision_history: list[DecisionRecord] = []
+        self._max_decision_history = config.parameters.get("max_decision_history", 500)
+        self._decision_accuracy_by_strategy: dict[str, dict[str, float]] = {}  # strategy -> {accuracy, count}
+        self._decision_accuracy_by_regime: dict[str, dict[str, float]] = {}  # regime -> {accuracy, count}
+        self._overall_decision_accuracy: float = 0.0
+        self._total_decisions_tracked: int = 0
+
+        # P2: Signal confidence weighting configuration
+        self._min_signal_confidence = config.parameters.get("min_signal_confidence", 0.3)  # Filter low-confidence signals
+        self._confidence_weight_power = config.parameters.get("confidence_weight_power", 1.5)  # Apply non-linear weighting
+
+        # P2: Regime-based allocation adjustments
+        self._regime_allocation_multipliers = {
+            MarketRegime.RISK_ON: config.parameters.get("regime_alloc_risk_on", 1.2),  # Increase allocation
+            MarketRegime.RISK_OFF: config.parameters.get("regime_alloc_risk_off", 0.7),  # Decrease allocation
+            MarketRegime.VOLATILE: config.parameters.get("regime_alloc_volatile", 0.5),  # Significantly decrease
+            MarketRegime.TRENDING: config.parameters.get("regime_alloc_trending", 1.1),  # Slight increase
+            MarketRegime.MEAN_REVERTING: config.parameters.get("regime_alloc_mean_rev", 1.0),  # Neutral
+            MarketRegime.NEUTRAL: config.parameters.get("regime_alloc_neutral", 1.0),  # Baseline
+        }
 
         # Regime-specific weight adjustments
         self._regime_weights = {
@@ -244,8 +298,9 @@ class CIOAgent(DecisionAgent):
                     logger.info(f"CIO: Barrier complete with {len(signals)} signals")
                     await self._process_barrier_signals(signals)
                 else:
-                    # No signals, wait a bit before checking again
-                    await asyncio.sleep(0.1)
+                    # CONC-003: No signals, wait longer to avoid busy wait
+                    # Use 0.5s minimum when no barrier is active to reduce CPU usage
+                    await asyncio.sleep(0.5)
 
             except asyncio.CancelledError:
                 break
@@ -309,6 +364,102 @@ class CIOAgent(DecisionAgent):
             del self._active_decisions[did]
             logger.debug(f"CIO: Cleaned up stale decision {did[:8]}")
 
+    def _check_sector_concentration(self, symbol: str, proposed_size: int) -> tuple[bool, str]:
+        """
+        Check if adding a position would exceed sector concentration limits (PM-01).
+
+        Args:
+            symbol: The symbol to trade
+            proposed_size: The proposed position size in shares
+
+        Returns:
+            Tuple of (is_allowed, rejection_reason)
+            - is_allowed: True if trade is allowed, False if it would exceed limits
+            - rejection_reason: Empty string if allowed, explanation if rejected
+        """
+        sector = self._symbol_to_sector.get(symbol, "Unknown")
+
+        # Get current sector exposure
+        current_sector_exposure = self._sector_positions.get(sector, 0.0)
+
+        # Calculate proposed additional exposure
+        price = self._price_cache.get(symbol, 0.0)
+        if price <= 0:
+            # Can't calculate exposure without price, allow trade but log warning
+            logger.warning(f"CIO: No price for {symbol}, cannot check sector concentration")
+            return True, ""
+
+        proposed_value = proposed_size * price
+        proposed_exposure = proposed_value / self._portfolio_value if self._portfolio_value > 0 else 0
+
+        # Total exposure after this trade
+        total_sector_exposure = current_sector_exposure + proposed_exposure
+
+        if total_sector_exposure > self._max_sector_concentration:
+            rejection_reason = (
+                f"Sector concentration limit exceeded: {sector} would be "
+                f"{total_sector_exposure:.1%} (max {self._max_sector_concentration:.1%})"
+            )
+            return False, rejection_reason
+
+        return True, ""
+
+    def update_sector_mapping(self, symbol: str, sector: str) -> None:
+        """
+        Update the symbol to sector mapping (PM-01).
+
+        Called by orchestrator or data provider with sector classification.
+        """
+        self._symbol_to_sector[symbol] = sector
+
+    def update_sector_positions(self, sector_positions: dict[str, float]) -> None:
+        """
+        Update current sector exposures (PM-01).
+
+        Args:
+            sector_positions: Dict mapping sector name to exposure as fraction of portfolio
+        """
+        self._sector_positions = dict(sector_positions)
+
+    def update_portfolio_drawdown(self, current_value: float) -> None:
+        """
+        Update portfolio drawdown tracking for Kelly adjustment (PM-06).
+
+        Args:
+            current_value: Current portfolio value
+        """
+        # Update peak if current value exceeds it
+        if current_value > self._portfolio_peak:
+            self._portfolio_peak = current_value
+            self._portfolio_drawdown = 0.0
+        elif self._portfolio_peak > 0:
+            # Calculate drawdown as percentage from peak
+            self._portfolio_drawdown = (self._portfolio_peak - current_value) / self._portfolio_peak
+        else:
+            self._portfolio_drawdown = 0.0
+
+        # Update portfolio value for sizing
+        self._portfolio_value = current_value
+
+    def set_stress_mode(self, in_stress: bool) -> None:
+        """
+        Set stress mode flag for correlation adjustment (PM-12).
+
+        When in stress mode, use stress correlations instead of normal correlations.
+        """
+        if in_stress != self._in_stress_mode:
+            self._in_stress_mode = in_stress
+            logger.info(f"CIO: Stress mode {'enabled' if in_stress else 'disabled'}")
+
+    def update_stress_correlations(self, stress_correlations: dict[tuple[str, str], float]) -> None:
+        """
+        Update stress correlation cache (PM-12).
+
+        Stress correlations are typically higher than normal correlations
+        and should be used during market stress periods.
+        """
+        self._stress_correlation_cache = dict(stress_correlations)
+
     async def _make_decision_from_aggregation(self, agg: SignalAggregation) -> None:
         """
         Make a trading decision from aggregated signals (post-barrier).
@@ -323,9 +474,23 @@ class CIOAgent(DecisionAgent):
 
         # Check conviction threshold
         if agg.weighted_confidence < self._min_conviction:
-            logger.debug(
-                f"CIO: Insufficient conviction for {symbol} "
-                f"({agg.weighted_confidence:.2f} < {self._min_conviction})"
+            rejection_reason = (
+                f"Insufficient conviction: {agg.weighted_confidence:.2f} < {self._min_conviction}"
+            )
+            logger.debug(f"CIO: {rejection_reason} for {symbol}")
+            # Audit log rejected decision (COMPLIANCE REQUIREMENT)
+            self._audit_logger.log_agent_event(
+                agent_name=self.name,
+                event_type="decision_rejected",
+                details={
+                    "symbol": symbol,
+                    "rejection_reason": rejection_reason,
+                    "rejection_code": "INSUFFICIENT_CONVICTION",
+                    "weighted_confidence": agg.weighted_confidence,
+                    "min_conviction_threshold": self._min_conviction,
+                    "contributing_signals": [s for s in agg.signals.keys()],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
             )
             return
 
@@ -334,7 +499,21 @@ class CIOAgent(DecisionAgent):
 
         # Check concurrent decisions limit
         if len(self._active_decisions) >= self._max_concurrent:
-            logger.warning(f"CIO: Max concurrent decisions ({len(self._active_decisions)}) reached, skipping {symbol}")
+            rejection_reason = f"Max concurrent decisions limit reached ({len(self._active_decisions)}/{self._max_concurrent})"
+            logger.warning(f"CIO: {rejection_reason}, skipping {symbol}")
+            # Audit log rejected decision (COMPLIANCE REQUIREMENT)
+            self._audit_logger.log_agent_event(
+                agent_name=self.name,
+                event_type="decision_rejected",
+                details={
+                    "symbol": symbol,
+                    "rejection_reason": rejection_reason,
+                    "rejection_code": "MAX_CONCURRENT_DECISIONS",
+                    "active_decisions": len(self._active_decisions),
+                    "max_concurrent": self._max_concurrent,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
             return
 
         # Check risk budget availability (#P3)
@@ -347,17 +526,39 @@ class CIOAgent(DecisionAgent):
 
             budget = self._risk_budget_manager.get_budget(best_strategy)
             if budget and budget.is_frozen:
-                logger.warning(
-                    f"CIO: Strategy {best_strategy} is FROZEN ({budget.freeze_reason}), "
-                    f"skipping decision for {symbol}"
+                rejection_reason = f"Strategy {best_strategy} is FROZEN: {budget.freeze_reason}"
+                logger.warning(f"CIO: {rejection_reason}, skipping decision for {symbol}")
+                # Audit log rejected decision (COMPLIANCE REQUIREMENT)
+                self._audit_logger.log_agent_event(
+                    agent_name=self.name,
+                    event_type="decision_rejected",
+                    details={
+                        "symbol": symbol,
+                        "rejection_reason": rejection_reason,
+                        "rejection_code": "STRATEGY_FROZEN",
+                        "strategy": best_strategy,
+                        "freeze_reason": budget.freeze_reason,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
                 )
                 return
 
             available_budget = self._risk_budget_manager.get_available_budget(best_strategy)
             if available_budget <= 0:
-                logger.warning(
-                    f"CIO: Strategy {best_strategy} has no available risk budget, "
-                    f"skipping decision for {symbol}"
+                rejection_reason = f"Strategy {best_strategy} has no available risk budget"
+                logger.warning(f"CIO: {rejection_reason}, skipping decision for {symbol}")
+                # Audit log rejected decision (COMPLIANCE REQUIREMENT)
+                self._audit_logger.log_agent_event(
+                    agent_name=self.name,
+                    event_type="decision_rejected",
+                    details={
+                        "symbol": symbol,
+                        "rejection_reason": rejection_reason,
+                        "rejection_code": "NO_RISK_BUDGET",
+                        "strategy": best_strategy,
+                        "available_budget": available_budget,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
                 )
                 return
 
@@ -377,12 +578,57 @@ class CIOAgent(DecisionAgent):
 
         # Determine action
         if agg.consensus_direction == SignalDirection.FLAT:
+            # Audit log rejected decision (COMPLIANCE REQUIREMENT)
+            self._audit_logger.log_agent_event(
+                agent_name=self.name,
+                event_type="decision_rejected",
+                details={
+                    "symbol": symbol,
+                    "rejection_reason": "No consensus direction (FLAT)",
+                    "rejection_code": "NO_CONSENSUS_DIRECTION",
+                    "consensus_direction": agg.consensus_direction.value,
+                    "weighted_strength": agg.weighted_strength,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
             return
 
         # Calculate position size using Kelly criterion and market data
         quantity = self._calculate_position_size(agg)
 
         if quantity == 0:
+            # Audit log rejected decision (COMPLIANCE REQUIREMENT)
+            self._audit_logger.log_agent_event(
+                agent_name=self.name,
+                event_type="decision_rejected",
+                details={
+                    "symbol": symbol,
+                    "rejection_reason": "Position size calculated as zero",
+                    "rejection_code": "ZERO_POSITION_SIZE",
+                    "weighted_confidence": agg.weighted_confidence,
+                    "weighted_strength": agg.weighted_strength,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            return
+
+        # PM-01: Check sector concentration limits
+        sector_allowed, sector_rejection = self._check_sector_concentration(symbol, quantity)
+        if not sector_allowed:
+            logger.warning(f"CIO: {sector_rejection}, rejecting decision for {symbol}")
+            self._audit_logger.log_agent_event(
+                agent_name=self.name,
+                event_type="decision_rejected",
+                details={
+                    "symbol": symbol,
+                    "rejection_reason": sector_rejection,
+                    "rejection_code": "SECTOR_CONCENTRATION_EXCEEDED",
+                    "proposed_quantity": quantity,
+                    "sector": self._symbol_to_sector.get(symbol, "Unknown"),
+                    "max_sector_concentration": self._max_sector_concentration,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
             return
 
         # Create decision event
@@ -418,6 +664,16 @@ class CIOAgent(DecisionAgent):
         # Track active decisions (will be cleared when validated decision comes back)
         self._active_decisions[decision.event_id] = datetime.now(timezone.utc)
 
+        # P2: Record decision for accuracy tracking
+        self._record_decision(
+            decision_id=decision.event_id,
+            symbol=symbol,
+            direction=agg.consensus_direction,
+            quantity=quantity,
+            conviction_score=agg.weighted_confidence,
+            contributing_strategies=list(agg.signals.keys()),
+        )
+
         logger.info(
             f"CIO DECISION: {decision.action.value if decision.action else 'none'} "
             f"{quantity} {symbol} (conviction={agg.weighted_confidence:.2f})"
@@ -431,6 +687,7 @@ class CIOAgent(DecisionAgent):
         - Regime-dependent weight adjustment
         - Performance-weighted signals
         - Signal correlation adjustment (NEW)
+        - P2: Signal confidence weighting (filter low confidence, apply non-linear weighting)
         """
         # Update dynamic weights if enabled
         if self._use_dynamic_weights:
@@ -439,12 +696,26 @@ class CIOAgent(DecisionAgent):
         # Record signals to history for correlation tracking (#Q5)
         self._record_signals_to_history(agg.signals)
 
+        # P2: Filter out low-confidence signals
+        filtered_signals = {
+            agent: signal for agent, signal in agg.signals.items()
+            if signal.confidence >= self._min_signal_confidence
+        }
+
+        if not filtered_signals:
+            # If all signals filtered out, use original but log warning
+            logger.warning(
+                f"All signals for {agg.symbol} below confidence threshold "
+                f"({self._min_signal_confidence}), using unfiltered signals"
+            )
+            filtered_signals = agg.signals
+
         # Get correlation-adjusted weights (#Q5)
-        if self._use_correlation_adjustment and len(agg.signals) > 1:
-            adjusted_weights = self._get_correlation_adjusted_weights(agg.signals)
+        if self._use_correlation_adjustment and len(filtered_signals) > 1:
+            adjusted_weights = self._get_correlation_adjusted_weights(filtered_signals)
             agg.correlation_adjusted = True
         else:
-            adjusted_weights = {agent: self._weights.get(agent, 0.1) for agent in agg.signals}
+            adjusted_weights = {agent: self._weights.get(agent, 0.1) for agent in filtered_signals}
             agg.correlation_adjusted = False
 
         total_weight = 0.0
@@ -454,26 +725,32 @@ class CIOAgent(DecisionAgent):
         long_votes = 0.0
         short_votes = 0.0
 
-        for agent_name, signal in agg.signals.items():
+        for agent_name, signal in filtered_signals.items():
             weight = adjusted_weights.get(agent_name, 0.1)
-            total_weight += weight
+
+            # P2: Apply confidence weighting with non-linear power
+            # Higher power gives more weight to high-confidence signals
+            confidence_weight = signal.confidence ** self._confidence_weight_power
+            effective_weight = weight * confidence_weight
+
+            total_weight += effective_weight
 
             # Aggregate strength and confidence
-            weighted_strength += signal.strength * weight
-            weighted_confidence += signal.confidence * weight
+            weighted_strength += signal.strength * effective_weight
+            weighted_confidence += signal.confidence * effective_weight
 
-            # Count directional votes
+            # Count directional votes (also confidence-weighted)
             if signal.direction == SignalDirection.LONG:
-                long_votes += weight
+                long_votes += effective_weight
             elif signal.direction == SignalDirection.SHORT:
-                short_votes += weight
+                short_votes += effective_weight
 
         if total_weight > 0:
             agg.weighted_strength = weighted_strength / total_weight
             agg.weighted_confidence = weighted_confidence / total_weight
 
         # Calculate effective signal count (#Q5)
-        agg.effective_signal_count = self._calculate_effective_signal_count(agg.signals)
+        agg.effective_signal_count = self._calculate_effective_signal_count(filtered_signals)
 
         # Determine consensus direction
         if long_votes > short_votes and long_votes > total_weight * 0.4:
@@ -804,15 +1081,41 @@ class CIOAgent(DecisionAgent):
         """
         Calculate position size using Kelly criterion.
 
+        The Kelly criterion determines the optimal fraction of capital to risk
+        on a bet/trade to maximize long-term growth rate (geometric mean).
+
         Kelly formula: f* = (bp - q) / b
         Where:
-        - b = avg_win / avg_loss (win/loss ratio)
-        - p = win probability
-        - q = 1 - p
+            b = avg_win / avg_loss (win/loss ratio, also called "odds")
+            p = win probability (win rate)
+            q = 1 - p (loss probability)
+            f* = optimal fraction of capital to risk
 
-        Uses actual tracked statistics rather than estimation from Sharpe.
+        Mathematical derivation:
+            The Kelly formula maximizes E[log(wealth)] which is equivalent to
+            maximizing the geometric growth rate. For a series of bets with
+            binary outcomes (win amount b or lose amount 1), the optimal
+            fraction is: f* = p - q/b = (bp - q) / b
+
+        Example calculation:
+            If win_rate = 60% (p=0.6), avg_win = $200, avg_loss = $100:
+            b = 200/100 = 2 (win $2 for every $1 risked)
+            f* = (2 * 0.6 - 0.4) / 2 = 0.8 / 2 = 0.40 (40% of capital)
+
+        In practice, we use fractional Kelly (typically half-Kelly) to reduce
+        volatility while sacrificing only ~25% of growth rate.
+
+        Args:
+            agg: Aggregated signal data with weighted confidence and direction
+
+        Returns:
+            Position size in shares (integer), or 0 if conditions not met
+
+        Note:
+            Uses actual tracked statistics rather than estimation from Sharpe.
+            Requires minimum 50 trades for statistical significance.
         """
-        # Get strategy with highest contribution
+        # Get strategy with highest contribution to this signal
         best_strategy = max(
             agg.signals.keys(),
             key=lambda s: self._weights.get(s, 0) * agg.signals[s].confidence
@@ -825,10 +1128,11 @@ class CIOAgent(DecisionAgent):
             return self._calculate_conviction_size(agg)
 
         # P1-9: Need minimum trades for statistical significance
-        # 30 trades gives ~18% standard error on win rate estimation
-        # 50 trades gives ~14% standard error - more reliable for sizing
-        MIN_TRADES_FOR_KELLY = 50  # Increased from 30 for better reliability
-        WARN_TRADES_THRESHOLD = 100  # Warn if below this - still learning
+        # Standard error of win rate estimate = sqrt(p*(1-p)/n)
+        # At n=50, SE ~ 7%, giving 95% CI of ~14% width
+        # At n=100, SE ~ 5%, giving 95% CI of ~10% width
+        MIN_TRADES_FOR_KELLY = 50  # Minimum for meaningful Kelly estimate
+        WARN_TRADES_THRESHOLD = 100  # Below this, estimates are still noisy
 
         if perf.total_trades < MIN_TRADES_FOR_KELLY:
             logger.info(
@@ -844,54 +1148,81 @@ class CIOAgent(DecisionAgent):
             )
 
         # Kelly inputs from actual tracked data
-        win_rate = perf.win_rate
-        avg_win = perf.avg_win
-        avg_loss = perf.avg_loss
+        win_rate = perf.win_rate  # p: probability of winning trade
+        avg_win = perf.avg_win  # Average profit on winners (in $)
+        avg_loss = perf.avg_loss  # Average loss on losers (positive $)
 
-        # Validate inputs
+        # Validate inputs - need valid probabilities and positive P&L values
         if win_rate <= 0 or win_rate >= 1:
             return self._calculate_conviction_size(agg)
 
         if avg_win <= 0 or avg_loss <= 0:
             return self._calculate_conviction_size(agg)
 
-        # Calculate b = win/loss ratio (odds)
+        # Step 1: Calculate b = win/loss ratio (the "odds")
+        # This represents how much you win per dollar risked
         b = avg_win / avg_loss
 
-        p = win_rate
-        q = 1 - p
+        p = win_rate  # Probability of winning
+        q = 1 - p  # Probability of losing
 
-        # Kelly formula: f* = (bp - q) / b
+        # Step 2: Apply Kelly formula: f* = (bp - q) / b
+        # Equivalent to: f* = p - q/b = p - (1-p)/b
+        # This is the fraction of capital that maximizes log-wealth growth
         kelly_fraction = (b * p - q) / b if b > 0 else 0
 
-        # Ensure non-negative (negative means don't bet)
+        # Step 3: Handle edge cases
+        # Negative Kelly means negative expected value - don't trade
         kelly_fraction = max(0, kelly_fraction)
 
-        # Cap at reasonable maximum (full Kelly is too aggressive)
-        MAX_KELLY = 0.25  # Never risk more than 25% even with perfect Kelly
+        # Cap at reasonable maximum - full Kelly is too aggressive in practice
+        # Even with strong edge, >25% allocation creates unacceptable volatility
+        MAX_KELLY = 0.25
         kelly_fraction = min(kelly_fraction, MAX_KELLY)
 
-        # Apply half-Kelly for safety
+        # Step 4: Apply fractional Kelly (default: half-Kelly)
+        # Half-Kelly provides 75% of optimal growth rate with 50% of variance
+        # This is standard institutional practice for robustness
         kelly_fraction *= self._kelly_fraction
 
-        # P1-9: Apply sample size discount - be more conservative with fewer trades
-        # At 50 trades: 0.7x, at 100 trades: 0.85x, at 200+ trades: 1.0x
+        # Step 5: Apply sample size discount for estimation uncertainty
+        # Fewer trades = more uncertainty in p and b estimates
+        # Linear ramp: 62.5% at 50 trades, 75% at 100 trades, 100% at 200+ trades
         sample_discount = min(1.0, 0.5 + (perf.total_trades / 400))
         kelly_fraction *= sample_discount
 
-        # Calculate position value
+        # Step 6 (PM-06): Apply drawdown adjustment
+        # Reduce position size when portfolio is in drawdown to preserve capital
+        # This implements adaptive risk management: less risk when losing
+        if self._portfolio_drawdown > self._drawdown_kelly_threshold:
+            # Linear reduction from threshold to 15% drawdown, floored at kelly_floor
+            # Example: 5% threshold, 10% drawdown, 50% floor
+            # multiplier = max(0.5, 1.0 - 0.10/0.15) = max(0.5, 0.33) = 0.5
+            drawdown_multiplier = max(
+                self._drawdown_kelly_floor,
+                1.0 - self._portfolio_drawdown / 0.15
+            )
+            kelly_fraction *= drawdown_multiplier
+            logger.info(
+                f"Kelly: Drawdown adjustment applied ({self._portfolio_drawdown:.1%} drawdown), "
+                f"kelly multiplier reduced to {drawdown_multiplier:.2f}"
+            )
+
+        # Step 7: Calculate position value in currency
         position_value = self._portfolio_value * kelly_fraction
 
-        # Apply conviction adjustment
+        # Step 8: Apply conviction adjustment based on signal quality
+        # Higher conviction and stronger signals get larger positions
         conviction_multiplier = agg.weighted_confidence * abs(agg.weighted_strength)
         position_value *= conviction_multiplier
 
-        # Apply correlation discount if available
+        # Step 9: Apply correlation discount if available
+        # Reduces size for positions correlated with existing holdings
         if self._correlation_manager:
             correlation_discount = self._get_correlation_discount(agg.symbol)
             position_value *= correlation_discount
 
-        # Convert to shares using actual market price
+        # Step 10: Convert to shares using market price
         estimated_price = self._price_cache.get(agg.symbol)
         if estimated_price is None or estimated_price <= 0:
             logger.warning(f"CIO: No price data for {agg.symbol}, using conviction sizing")
@@ -902,13 +1233,34 @@ class CIOAgent(DecisionAgent):
         # Apply limits
         size = min(size, self._max_position_size)
 
+        # Minimum viable order size
         if size < 10:
             return 0
 
         return size
 
     def _calculate_conviction_size(self, agg: SignalAggregation) -> int:
-        """Calculate position size based on conviction (fallback method)."""
+        """
+        Calculate position size based on conviction (fallback method).
+
+        Used when Kelly criterion cannot be applied (insufficient trade history
+        or missing performance statistics). Sizes positions proportionally to
+        signal conviction and strength.
+
+        Formula:
+            size = base_position_size * conviction * strength * regime_multiplier
+
+        Where:
+            conviction = weighted average confidence across contributing signals
+            strength = weighted average signal strength (0 to 1)
+            regime_multiplier = adjustment based on current market regime
+
+        Args:
+            agg: Aggregated signal data with weighted confidence and direction
+
+        Returns:
+            Position size in shares (integer), or 0 if below minimum threshold
+        """
         conviction_factor = agg.weighted_confidence
         strength_factor = abs(agg.weighted_strength)
 
@@ -916,6 +1268,16 @@ class CIOAgent(DecisionAgent):
 
         # Apply limits
         size = min(size, self._max_position_size)
+
+        # P2: Apply regime-based allocation adjustment
+        regime_multiplier = self._regime_allocation_multipliers.get(self._current_regime, 1.0)
+        size = int(size * regime_multiplier)
+
+        if regime_multiplier != 1.0:
+            logger.debug(
+                f"Kelly: Regime allocation adjustment for {self._current_regime.value}: "
+                f"multiplier={regime_multiplier:.2f}"
+            )
 
         if size < 10:
             return 0
@@ -927,11 +1289,35 @@ class CIOAgent(DecisionAgent):
         Get correlation-based discount for position sizing.
 
         Reduces size if highly correlated with existing positions.
+
+        PM-12: Uses stress correlations when in stress mode.
+        Stress correlations are typically higher (correlations tend to 1 in crisis),
+        resulting in larger position discounts during stressed markets.
         """
         if not self._correlation_manager:
             return 1.0
 
-        # Get highly correlated pairs
+        # PM-12: Check if we should use stress correlations
+        if self._in_stress_mode and self._stress_correlation_cache:
+            # Use stress correlations from cache
+            max_correlation = 0.0
+            for (sym1, sym2), corr in self._stress_correlation_cache.items():
+                if sym1 == symbol or sym2 == symbol:
+                    max_correlation = max(max_correlation, abs(corr))
+
+            if max_correlation > 0.7:
+                # Apply more aggressive discount in stress mode
+                # Stress correlations are higher, so discount will be larger
+                discount = 1.0 - (max_correlation - 0.7) / 0.6
+                discount = max(0.3, discount)  # Floor at 0.3 in stress mode (vs 0.5 normal)
+                logger.debug(
+                    f"CIO: Stress correlation discount for {symbol}: {discount:.2f} "
+                    f"(stress_corr={max_correlation:.2f})"
+                )
+                return discount
+            return 1.0
+
+        # Normal mode: use correlation manager
         highly_correlated = self._correlation_manager.get_highly_correlated_pairs(0.7)
 
         # Check if symbol is in any highly correlated pair
@@ -1104,6 +1490,165 @@ class CIOAgent(DecisionAgent):
         """Get base (unadjusted) signal weights."""
         return dict(self._base_weights)
 
+    # =========================================================================
+    # P2: HISTORICAL DECISION ACCURACY TRACKING
+    # =========================================================================
+
+    def _record_decision(
+        self,
+        decision_id: str,
+        symbol: str,
+        direction: SignalDirection,
+        quantity: int,
+        conviction_score: float,
+        contributing_strategies: list[str],
+    ) -> None:
+        """
+        Record a decision for accuracy tracking (P2).
+
+        Stores decision details for later outcome recording and accuracy analysis.
+        """
+        record = DecisionRecord(
+            decision_id=decision_id,
+            symbol=symbol,
+            direction=direction,
+            quantity=quantity,
+            conviction_score=conviction_score,
+            timestamp=datetime.now(timezone.utc),
+            contributing_strategies=contributing_strategies,
+            regime_at_decision=self._current_regime.value,
+        )
+
+        self._decision_history.append(record)
+
+        # Trim old history
+        if len(self._decision_history) > self._max_decision_history:
+            self._decision_history = self._decision_history[-self._max_decision_history:]
+
+        logger.debug(f"CIO: Recorded decision {decision_id[:8]} for accuracy tracking")
+
+    def record_decision_outcome(
+        self,
+        decision_id: str,
+        pnl: float,
+        direction_correct: bool,
+    ) -> None:
+        """
+        Record the outcome of a decision (P2).
+
+        Called by the orchestrator or attribution system when a position is closed.
+
+        Args:
+            decision_id: The decision ID
+            pnl: Realized P&L from the position
+            direction_correct: Whether the direction call was correct
+        """
+        for record in self._decision_history:
+            if record.decision_id == decision_id and not record.outcome_recorded:
+                record.outcome_pnl = pnl
+                record.outcome_direction_correct = direction_correct
+                record.outcome_recorded = True
+
+                # Update accuracy metrics
+                self._update_decision_accuracy(record)
+
+                logger.debug(
+                    f"CIO: Recorded outcome for decision {decision_id[:8]}: "
+                    f"pnl=${pnl:.2f}, correct={direction_correct}"
+                )
+                return
+
+        logger.warning(f"CIO: Decision {decision_id} not found for outcome recording")
+
+    def _update_decision_accuracy(self, record: DecisionRecord) -> None:
+        """
+        Update accuracy metrics after recording an outcome (P2).
+        """
+        # Update overall accuracy
+        recorded_decisions = [d for d in self._decision_history if d.outcome_recorded]
+        self._total_decisions_tracked = len(recorded_decisions)
+
+        if self._total_decisions_tracked > 0:
+            correct_count = sum(1 for d in recorded_decisions if d.outcome_direction_correct)
+            self._overall_decision_accuracy = correct_count / self._total_decisions_tracked
+
+        # Update accuracy by strategy
+        for strategy in record.contributing_strategies:
+            strategy_decisions = [
+                d for d in recorded_decisions
+                if strategy in d.contributing_strategies
+            ]
+            if strategy_decisions:
+                correct = sum(1 for d in strategy_decisions if d.outcome_direction_correct)
+                self._decision_accuracy_by_strategy[strategy] = {
+                    "accuracy": correct / len(strategy_decisions),
+                    "count": len(strategy_decisions),
+                }
+
+        # Update accuracy by regime
+        regime = record.regime_at_decision
+        regime_decisions = [d for d in recorded_decisions if d.regime_at_decision == regime]
+        if regime_decisions:
+            correct = sum(1 for d in regime_decisions if d.outcome_direction_correct)
+            self._decision_accuracy_by_regime[regime] = {
+                "accuracy": correct / len(regime_decisions),
+                "count": len(regime_decisions),
+            }
+
+    def get_decision_accuracy(self) -> dict[str, Any]:
+        """
+        Get decision accuracy metrics (P2).
+
+        Returns:
+            Dictionary with accuracy statistics by overall, strategy, and regime
+        """
+        return {
+            "overall_accuracy": self._overall_decision_accuracy,
+            "total_decisions_tracked": self._total_decisions_tracked,
+            "by_strategy": dict(self._decision_accuracy_by_strategy),
+            "by_regime": dict(self._decision_accuracy_by_regime),
+            "recent_decisions": [
+                {
+                    "decision_id": d.decision_id[:8],
+                    "symbol": d.symbol,
+                    "direction": d.direction.value,
+                    "conviction": d.conviction_score,
+                    "outcome_recorded": d.outcome_recorded,
+                    "correct": d.outcome_direction_correct,
+                    "pnl": d.outcome_pnl,
+                }
+                for d in self._decision_history[-10:]
+            ],
+        }
+
+    def get_strategy_accuracy_weight_adjustment(self, strategy: str) -> float:
+        """
+        Get weight adjustment based on historical accuracy (P2).
+
+        Strategies with higher accuracy get a boost, lower accuracy get penalized.
+
+        Args:
+            strategy: Strategy name
+
+        Returns:
+            Multiplier for strategy weight (0.5 to 1.5)
+        """
+        if strategy not in self._decision_accuracy_by_strategy:
+            return 1.0
+
+        metrics = self._decision_accuracy_by_strategy[strategy]
+        accuracy = metrics.get("accuracy", 0.5)
+        count = metrics.get("count", 0)
+
+        # Need minimum sample size for reliable adjustment
+        if count < 20:
+            return 1.0
+
+        # Baseline is 50% accuracy (random)
+        # Scale: 30% accuracy -> 0.6x, 50% -> 1.0x, 70% -> 1.4x
+        adjustment = 0.5 + accuracy
+        return max(0.5, min(1.5, adjustment))
+
     def get_status(self) -> dict[str, Any]:
         """Get agent status for monitoring."""
         base_status = super().get_status()
@@ -1118,6 +1663,25 @@ class CIOAgent(DecisionAgent):
             "active_decisions": len(self._active_decisions),
             "pending_aggregations": len(self._pending_aggregations),
             "portfolio_value": self._portfolio_value,
+            # PM-01: Sector concentration tracking
+            "sector_concentration": {
+                "max_allowed": self._max_sector_concentration,
+                "current_exposures": dict(self._sector_positions),
+                "symbols_mapped": len(self._symbol_to_sector),
+            },
+            # PM-06: Portfolio drawdown tracking
+            "portfolio_drawdown": {
+                "current_drawdown": self._portfolio_drawdown,
+                "peak_value": self._portfolio_peak,
+                "drawdown_threshold": self._drawdown_kelly_threshold,
+                "kelly_floor": self._drawdown_kelly_floor,
+                "kelly_adjusted": self._portfolio_drawdown > self._drawdown_kelly_threshold,
+            },
+            # PM-12: Stress mode tracking
+            "stress_mode": {
+                "active": self._in_stress_mode,
+                "stress_correlations_cached": len(self._stress_correlation_cache),
+            },
             "strategy_performance": {
                 k: {
                     "sharpe": v.rolling_sharpe,
@@ -1137,6 +1701,24 @@ class CIOAgent(DecisionAgent):
                 "highly_correlated": len([
                     1 for v in self._signal_correlation_matrix.values() if abs(v) > 0.7
                 ]) // 2,
+            },
+            # P2: Historical decision accuracy tracking
+            "decision_accuracy": {
+                "overall_accuracy": self._overall_decision_accuracy,
+                "total_tracked": self._total_decisions_tracked,
+                "by_strategy": dict(self._decision_accuracy_by_strategy),
+                "by_regime": dict(self._decision_accuracy_by_regime),
+            },
+            # P2: Signal confidence weighting
+            "confidence_weighting": {
+                "min_confidence": self._min_signal_confidence,
+                "weight_power": self._confidence_weight_power,
+            },
+            # P2: Regime-based allocation
+            "regime_allocation": {
+                "current_regime": self._current_regime.value,
+                "current_multiplier": self._regime_allocation_multipliers.get(self._current_regime, 1.0),
+                "multipliers": {k.value: v for k, v in self._regime_allocation_multipliers.items()},
             },
         })
 

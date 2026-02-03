@@ -213,7 +213,7 @@ class CustomReportBuilder:
 
     def build(self, created_by: str) -> ReportDefinition:
         """Build report definition."""
-        report_id = f"RPT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        report_id = f"RPT-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
 
         return ReportDefinition(
             report_id=report_id,
@@ -234,6 +234,70 @@ class CustomReportBuilder:
         )
 
 
+@dataclass
+class ReportSchedule:
+    """Schedule definition for automated report generation (P3)."""
+    schedule_id: str
+    report_id: str
+    frequency: ReportFrequency
+    day_of_week: int | None = None  # 0=Monday, 6=Sunday (for weekly)
+    day_of_month: int | None = None  # 1-31 (for monthly)
+    hour: int = 8  # Hour of day (0-23)
+    minute: int = 0  # Minute (0-59)
+    timezone_str: str = "UTC"
+    enabled: bool = True
+    last_run: datetime | None = None
+    next_run: datetime | None = None
+    output_format: ReportFormat = ReportFormat.JSON
+    recipients: list[str] = field(default_factory=list)  # Email addresses
+
+    def to_dict(self) -> dict:
+        return {
+            'schedule_id': self.schedule_id,
+            'report_id': self.report_id,
+            'frequency': self.frequency.value,
+            'day_of_week': self.day_of_week,
+            'day_of_month': self.day_of_month,
+            'hour': self.hour,
+            'minute': self.minute,
+            'timezone': self.timezone_str,
+            'enabled': self.enabled,
+            'last_run': self.last_run.isoformat() if self.last_run else None,
+            'next_run': self.next_run.isoformat() if self.next_run else None,
+            'output_format': self.output_format.value,
+            'recipients': self.recipients,
+        }
+
+
+@dataclass
+class EmailDistribution:
+    """Email distribution configuration for reports (P3)."""
+    distribution_id: str
+    name: str
+    recipients: list[str]  # Email addresses
+    cc_recipients: list[str] = field(default_factory=list)
+    bcc_recipients: list[str] = field(default_factory=list)
+    subject_template: str = "Report: {report_name} - {date}"
+    body_template: str = "Please find attached the {report_name} report generated on {date}."
+    attach_report: bool = True
+    include_summary_in_body: bool = True
+    enabled: bool = True
+
+    def to_dict(self) -> dict:
+        return {
+            'distribution_id': self.distribution_id,
+            'name': self.name,
+            'recipients': self.recipients,
+            'cc_recipients': self.cc_recipients,
+            'bcc_recipients': self.bcc_recipients,
+            'subject_template': self.subject_template,
+            'body_template': self.body_template,
+            'attach_report': self.attach_report,
+            'include_summary_in_body': self.include_summary_in_body,
+            'enabled': self.enabled,
+        }
+
+
 class CustomReportEngine:
     """
     Custom report execution engine (#P19).
@@ -242,14 +306,23 @@ class CustomReportEngine:
     - Report definition management
     - Data source integration
     - Report execution and scheduling
-    - Multiple output formats
+    - Multiple output formats (including PDF/Excel export - P3)
     - Execution history
+    - Email distribution (P3)
     """
 
     def __init__(self):
         self._reports: dict[str, ReportDefinition] = {}
         self._executions: list[ReportExecution] = []
         self._execution_counter = 0
+
+        # Report scheduling (P3)
+        self._schedules: dict[str, ReportSchedule] = {}
+        self._schedule_counter = 0
+
+        # Email distributions (P3)
+        self._distributions: dict[str, EmailDistribution] = {}
+        self._distribution_counter = 0
 
         # Data source handlers
         self._data_handlers: dict[str, Callable] = {}
@@ -613,6 +686,425 @@ class CustomReportEngine:
         if report_id:
             history = [e for e in history if e.report_id == report_id]
         return history[-limit:]
+
+    # =========================================================================
+    # REPORT SCHEDULING (P3)
+    # =========================================================================
+
+    def create_schedule(
+        self,
+        report_id: str,
+        frequency: ReportFrequency,
+        hour: int = 8,
+        minute: int = 0,
+        day_of_week: int | None = None,
+        day_of_month: int | None = None,
+        output_format: ReportFormat = ReportFormat.JSON,
+        recipients: list[str] | None = None,
+    ) -> ReportSchedule:
+        """
+        Create a schedule for automated report generation (P3).
+
+        Args:
+            report_id: Report to schedule
+            frequency: How often to run
+            hour: Hour of day (0-23)
+            minute: Minute (0-59)
+            day_of_week: For weekly reports (0=Monday)
+            day_of_month: For monthly reports (1-31)
+            output_format: Output format for scheduled runs
+            recipients: Email recipients for distribution
+
+        Returns:
+            ReportSchedule
+        """
+        if report_id not in self._reports:
+            raise ValueError(f"Report not found: {report_id}")
+
+        self._schedule_counter += 1
+        schedule_id = f"SCHED-{self._schedule_counter:06d}"
+
+        schedule = ReportSchedule(
+            schedule_id=schedule_id,
+            report_id=report_id,
+            frequency=frequency,
+            day_of_week=day_of_week,
+            day_of_month=day_of_month,
+            hour=hour,
+            minute=minute,
+            output_format=output_format,
+            recipients=recipients or [],
+            next_run=self._calculate_next_run(frequency, hour, minute, day_of_week, day_of_month),
+        )
+
+        self._schedules[schedule_id] = schedule
+        logger.info(f"Schedule created: {schedule_id} for report {report_id}")
+        return schedule
+
+    def _calculate_next_run(
+        self,
+        frequency: ReportFrequency,
+        hour: int,
+        minute: int,
+        day_of_week: int | None = None,
+        day_of_month: int | None = None,
+    ) -> datetime:
+        """Calculate next scheduled run time."""
+        now = datetime.now(timezone.utc)
+        today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+        if frequency == ReportFrequency.HOURLY:
+            next_run = now.replace(minute=minute, second=0, microsecond=0)
+            if next_run <= now:
+                next_run += timedelta(hours=1)
+            return next_run
+
+        elif frequency == ReportFrequency.DAILY:
+            if today <= now:
+                return today + timedelta(days=1)
+            return today
+
+        elif frequency == ReportFrequency.WEEKLY:
+            if day_of_week is None:
+                day_of_week = 0  # Monday default
+            days_ahead = day_of_week - now.weekday()
+            if days_ahead <= 0 or (days_ahead == 0 and today <= now):
+                days_ahead += 7
+            return today + timedelta(days=days_ahead)
+
+        elif frequency == ReportFrequency.MONTHLY:
+            if day_of_month is None:
+                day_of_month = 1
+            # Try this month
+            try:
+                next_run = now.replace(day=day_of_month, hour=hour, minute=minute, second=0, microsecond=0)
+                if next_run <= now:
+                    # Move to next month
+                    if now.month == 12:
+                        next_run = next_run.replace(year=now.year + 1, month=1)
+                    else:
+                        next_run = next_run.replace(month=now.month + 1)
+                return next_run
+            except ValueError:
+                # Invalid day for month, use last day
+                return today + timedelta(days=30)
+
+        return today + timedelta(days=1)
+
+    def update_schedule(
+        self,
+        schedule_id: str,
+        enabled: bool | None = None,
+        hour: int | None = None,
+        minute: int | None = None,
+        recipients: list[str] | None = None,
+    ) -> ReportSchedule | None:
+        """Update an existing schedule (P3)."""
+        schedule = self._schedules.get(schedule_id)
+        if not schedule:
+            return None
+
+        if enabled is not None:
+            schedule.enabled = enabled
+        if hour is not None:
+            schedule.hour = hour
+        if minute is not None:
+            schedule.minute = minute
+        if recipients is not None:
+            schedule.recipients = recipients
+
+        # Recalculate next run
+        schedule.next_run = self._calculate_next_run(
+            schedule.frequency,
+            schedule.hour,
+            schedule.minute,
+            schedule.day_of_week,
+            schedule.day_of_month,
+        )
+
+        logger.info(f"Schedule updated: {schedule_id}")
+        return schedule
+
+    def delete_schedule(self, schedule_id: str) -> bool:
+        """Delete a schedule (P3)."""
+        if schedule_id in self._schedules:
+            del self._schedules[schedule_id]
+            logger.info(f"Schedule deleted: {schedule_id}")
+            return True
+        return False
+
+    def list_schedules(self, report_id: str | None = None) -> list[ReportSchedule]:
+        """List all schedules, optionally filtered by report (P3)."""
+        schedules = list(self._schedules.values())
+        if report_id:
+            schedules = [s for s in schedules if s.report_id == report_id]
+        return schedules
+
+    def get_due_schedules(self) -> list[ReportSchedule]:
+        """Get schedules that are due to run (P3)."""
+        now = datetime.now(timezone.utc)
+        due = []
+        for schedule in self._schedules.values():
+            if schedule.enabled and schedule.next_run and schedule.next_run <= now:
+                due.append(schedule)
+        return due
+
+    def execute_scheduled_report(self, schedule_id: str) -> tuple[str, ReportExecution] | None:
+        """
+        Execute a scheduled report and update schedule state (P3).
+
+        Returns:
+            (output_data, execution_record) or None if schedule not found
+        """
+        schedule = self._schedules.get(schedule_id)
+        if not schedule:
+            return None
+
+        # Execute the report
+        output, execution = self.execute_report(
+            schedule.report_id,
+            output_format=schedule.output_format,
+        )
+
+        # Update schedule
+        schedule.last_run = datetime.now(timezone.utc)
+        schedule.next_run = self._calculate_next_run(
+            schedule.frequency,
+            schedule.hour,
+            schedule.minute,
+            schedule.day_of_week,
+            schedule.day_of_month,
+        )
+
+        logger.info(f"Scheduled report executed: {schedule_id}, next run: {schedule.next_run}")
+        return output, execution
+
+    # =========================================================================
+    # PDF/EXCEL EXPORT (P3)
+    # =========================================================================
+
+    def export_to_pdf(self, report_id: str, data: list[dict] | None = None) -> bytes:
+        """
+        Export report to PDF format (P3).
+
+        Args:
+            report_id: Report to export
+            data: Optional pre-fetched data (if None, will execute report)
+
+        Returns:
+            PDF content as bytes
+
+        Note: This is a placeholder that generates a simple PDF-like structure.
+        In production, use libraries like reportlab or weasyprint.
+        """
+        report = self._reports.get(report_id)
+        if not report:
+            raise ValueError(f"Report not found: {report_id}")
+
+        # Get HTML output
+        html_output, _ = self.execute_report(report_id, output_format=ReportFormat.HTML)
+
+        # Create a simple PDF-like structure (placeholder)
+        # In production, use reportlab or similar
+        pdf_header = b"%PDF-1.4\n"
+        pdf_content = f"""
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length {len(html_output)} >>
+stream
+Report: {report.name}
+Generated: {datetime.now(timezone.utc).isoformat()}
+---
+{html_output[:500]}...
+endstream
+endobj
+xref
+0 5
+trailer
+<< /Root 1 0 R /Size 5 >>
+startxref
+0
+%%EOF
+""".encode('utf-8')
+
+        logger.info(f"PDF export generated for report: {report_id}")
+        return pdf_header + pdf_content
+
+    def export_to_excel(self, report_id: str, data: list[dict] | None = None) -> bytes:
+        """
+        Export report to Excel format (P3).
+
+        Args:
+            report_id: Report to export
+            data: Optional pre-fetched data
+
+        Returns:
+            Excel content as bytes (CSV format compatible with Excel)
+
+        Note: This generates CSV which Excel can open.
+        In production, use openpyxl or xlsxwriter for native Excel format.
+        """
+        report = self._reports.get(report_id)
+        if not report:
+            raise ValueError(f"Report not found: {report_id}")
+
+        # Get CSV output (Excel-compatible)
+        csv_output, _ = self.execute_report(report_id, output_format=ReportFormat.CSV)
+
+        logger.info(f"Excel export generated for report: {report_id}")
+        return csv_output.encode('utf-8')
+
+    # =========================================================================
+    # EMAIL DISTRIBUTION (P3)
+    # =========================================================================
+
+    def create_distribution(
+        self,
+        name: str,
+        recipients: list[str],
+        cc_recipients: list[str] | None = None,
+        subject_template: str | None = None,
+        body_template: str | None = None,
+    ) -> EmailDistribution:
+        """
+        Create an email distribution list (P3).
+
+        Args:
+            name: Distribution name
+            recipients: List of email addresses
+            cc_recipients: Optional CC recipients
+            subject_template: Optional subject template with {report_name}, {date}
+            body_template: Optional body template
+
+        Returns:
+            EmailDistribution
+        """
+        self._distribution_counter += 1
+        dist_id = f"DIST-{self._distribution_counter:06d}"
+
+        distribution = EmailDistribution(
+            distribution_id=dist_id,
+            name=name,
+            recipients=recipients,
+            cc_recipients=cc_recipients or [],
+            subject_template=subject_template or "Report: {report_name} - {date}",
+            body_template=body_template or "Please find attached the {report_name} report generated on {date}.",
+        )
+
+        self._distributions[dist_id] = distribution
+        logger.info(f"Distribution created: {dist_id} - {name}")
+        return distribution
+
+    def get_distribution(self, distribution_id: str) -> EmailDistribution | None:
+        """Get distribution by ID (P3)."""
+        return self._distributions.get(distribution_id)
+
+    def list_distributions(self) -> list[EmailDistribution]:
+        """List all email distributions (P3)."""
+        return list(self._distributions.values())
+
+    def prepare_email_distribution(
+        self,
+        report_id: str,
+        distribution_id: str,
+        output_format: ReportFormat = ReportFormat.JSON,
+    ) -> dict:
+        """
+        Prepare report for email distribution (P3).
+
+        Args:
+            report_id: Report to distribute
+            distribution_id: Distribution list to use
+            output_format: Format for attachment
+
+        Returns:
+            Dict with email details ready for sending
+        """
+        report = self._reports.get(report_id)
+        distribution = self._distributions.get(distribution_id)
+
+        if not report:
+            raise ValueError(f"Report not found: {report_id}")
+        if not distribution:
+            raise ValueError(f"Distribution not found: {distribution_id}")
+
+        # Execute report
+        output, execution = self.execute_report(report_id, output_format=output_format)
+
+        # Prepare email
+        now = datetime.now(timezone.utc)
+        date_str = now.strftime("%Y-%m-%d")
+
+        subject = distribution.subject_template.format(
+            report_name=report.name,
+            date=date_str,
+        )
+        body = distribution.body_template.format(
+            report_name=report.name,
+            date=date_str,
+        )
+
+        # Add summary to body if configured
+        if distribution.include_summary_in_body:
+            body += f"\n\nExecution Summary:\n- Rows: {execution.row_count}\n- Status: {execution.status}"
+
+        email_data = {
+            'subject': subject,
+            'body': body,
+            'recipients': distribution.recipients,
+            'cc_recipients': distribution.cc_recipients,
+            'bcc_recipients': distribution.bcc_recipients,
+            'attachment_name': f"{report.name.replace(' ', '_')}_{date_str}.{output_format.value}",
+            'attachment_content': output,
+            'report_id': report_id,
+            'execution_id': execution.execution_id,
+            'prepared_at': now.isoformat(),
+        }
+
+        logger.info(f"Email prepared for distribution: {distribution_id}, report: {report_id}")
+        return email_data
+
+    def send_report_email(
+        self,
+        report_id: str,
+        distribution_id: str,
+        output_format: ReportFormat = ReportFormat.JSON,
+        smtp_handler: Callable[[dict], bool] | None = None,
+    ) -> bool:
+        """
+        Send report via email distribution (P3).
+
+        Args:
+            report_id: Report to send
+            distribution_id: Distribution list
+            output_format: Format for attachment
+            smtp_handler: Optional callback to handle actual email sending
+
+        Returns:
+            True if email was prepared (or sent if handler provided)
+        """
+        email_data = self.prepare_email_distribution(report_id, distribution_id, output_format)
+
+        if smtp_handler:
+            try:
+                result = smtp_handler(email_data)
+                logger.info(f"Report email sent: {email_data['subject']}")
+                return result
+            except Exception as e:
+                logger.error(f"Failed to send report email: {e}")
+                return False
+
+        # Without handler, just log that email is ready
+        logger.info(f"Report email prepared (no SMTP handler): {email_data['subject']}")
+        return True
 
 
 # =============================================================================

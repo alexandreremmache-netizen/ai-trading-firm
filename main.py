@@ -22,8 +22,10 @@ Per the constitution (CLAUDE.md):
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
+import random
 import signal
 import sys
 from pathlib import Path
@@ -55,6 +57,16 @@ from core.health_check import (
     HealthCheckConfig,
     create_health_check_server,
 )
+from core.notifications import (
+    NotificationManager,
+    ComplianceOfficerNotifier,
+    RiskLimitBreachNotifier,
+    FileNotificationChannel,
+    WebhookNotificationChannel,
+    AlertSeverity,
+    AlertCategory,
+)
+from core.infrastructure_ops import AuditLogBackupManager
 
 # New Infrastructure Components
 from core.contract_specs import ContractSpecsManager
@@ -88,6 +100,12 @@ from agents.surveillance_agent import SurveillanceAgent
 from agents.transaction_reporting_agent import TransactionReportingAgent
 
 from data.market_data import MarketDataManager, SymbolConfig
+
+# SOLID Refactoring: AgentFactory for improved SRP
+from core.agent_factory import AgentFactory, AgentFactoryConfig
+
+# SOLID Refactoring: DI Container (optional usage)
+from core.dependency_injection import DIContainer, ServiceProvider
 
 
 logger = logging.getLogger(__name__)
@@ -158,6 +176,14 @@ class TradingFirmOrchestrator:
         self._health_checker: HealthChecker | None = None
         self._health_server: HealthCheckServer | None = None
 
+        # Notification system (#C33, #R27)
+        self._notification_manager: NotificationManager | None = None
+        self._compliance_notifier: ComplianceOfficerNotifier | None = None
+        self._risk_notifier: RiskLimitBreachNotifier | None = None
+
+        # Audit log backup manager
+        self._backup_manager: AuditLogBackupManager | None = None
+
         # Infrastructure components
         self._contract_specs: ContractSpecsManager | None = None
         self._correlation_manager: CorrelationManager | None = None
@@ -181,6 +207,13 @@ class TradingFirmOrchestrator:
         self._running = False
         self._shutdown_event = asyncio.Event()
         self._startup_time: datetime | None = None
+        self._dry_run: bool = False
+        self._shutdown_in_progress: bool = False
+        self._graceful_shutdown_timeout: float = 30.0
+
+    def set_dry_run(self, dry_run: bool) -> None:
+        """Enable dry-run mode (validate config without starting)."""
+        self._dry_run = dry_run
 
     def _load_config(self) -> dict[str, Any]:
         """Load configuration from YAML file."""
@@ -188,6 +221,11 @@ class TradingFirmOrchestrator:
 
         if not config_file.exists():
             logger.error(f"Config file not found: {config_file}")
+            logger.error("To create a config file, run one of:")
+            logger.error(f"  cp config.simple.yaml {config_file}  # Simple config for beginners")
+            logger.error(f"  cp config.yaml {config_file}         # Full config with all options")
+            logger.error("Or specify a different config with:")
+            logger.error("  python main.py --config path/to/config.yaml")
             raise FileNotFoundError(f"Config file not found: {config_file}")
 
         with open(config_file, "r", encoding="utf-8") as f:
@@ -195,6 +233,68 @@ class TradingFirmOrchestrator:
 
         logger.info(f"Loaded configuration from {config_file}")
         return config
+
+    def _print_startup_summary(self) -> None:
+        """Print startup validation summary."""
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("STARTUP VALIDATION SUMMARY")
+        logger.info("=" * 60)
+
+        # Configuration summary
+        mode = self._config.get("firm", {}).get("mode", "paper")
+        broker_host = self._config.get("broker", {}).get("host", "127.0.0.1")
+        broker_port = self._config.get("broker", {}).get("port", 4002)
+
+        logger.info(f"  Mode: {mode.upper()}")
+        logger.info(f"  Broker: {broker_host}:{broker_port}")
+
+        # Risk limits summary
+        risk = self._config.get("risk", {})
+        logger.info(f"  Max Position Size: {risk.get('max_position_size_pct', 5.0)}%")
+        logger.info(f"  Max Daily Loss: {risk.get('max_daily_loss_pct', 3.0)}%")
+        logger.info(f"  Max Drawdown: {risk.get('max_drawdown_pct', 10.0)}%")
+        logger.info(f"  Max Leverage: {risk.get('max_leverage', 2.0)}x")
+
+        # Universe summary
+        universe = self._config.get("universe", {})
+        equities_count = len(universe.get("equities", []))
+        etfs_count = len(universe.get("etfs", []))
+        futures_count = len(universe.get("futures", []))
+        forex_count = len(universe.get("forex", []))
+        total_instruments = equities_count + etfs_count + futures_count + forex_count
+
+        logger.info(f"  Trading Universe: {total_instruments} instruments")
+        logger.info(f"    - Equities: {equities_count}")
+        logger.info(f"    - ETFs: {etfs_count}")
+        logger.info(f"    - Futures: {futures_count}")
+        logger.info(f"    - Forex: {forex_count}")
+
+        # Agents summary
+        agents = self._config.get("agents", {})
+        enabled_agents = []
+        for agent_name in ["macro", "stat_arb", "momentum", "market_making", "options_vol"]:
+            if agents.get(agent_name, {}).get("enabled", True):
+                enabled_agents.append(agent_name)
+        logger.info(f"  Enabled Signal Agents: {len(enabled_agents)}")
+        for agent in enabled_agents:
+            logger.info(f"    - {agent}")
+
+        # Compliance summary
+        compliance = self._config.get("compliance", {})
+        logger.info(f"  Jurisdiction: {compliance.get('jurisdiction', 'EU')}")
+        logger.info(f"  Regulator: {compliance.get('regulator', 'AMF')}")
+
+        # Transaction reporting
+        tx_reporting = self._config.get("transaction_reporting", {})
+        lei = tx_reporting.get("firm_lei", "")
+        if lei:
+            logger.info(f"  LEI: {lei[:4]}...{lei[-4:] if len(lei) > 8 else ''}")
+        else:
+            logger.warning("  LEI: NOT CONFIGURED (required for live trading)")
+
+        logger.info("=" * 60)
+        logger.info("")
 
     async def initialize(self) -> None:
         """Initialize all components."""
@@ -207,13 +307,35 @@ class TradingFirmOrchestrator:
         # Load configuration
         self._config = self._load_config()
 
+        # Validate configuration at startup (CRITICAL - Expert 20 fix)
+        from core.config_validator import validate_config_at_startup
+        try:
+            validate_config_at_startup(self._config)
+            logger.info("Configuration validation passed")
+        except ValueError as e:
+            logger.error(f"Configuration validation failed:\n{e}")
+            raise
+
         # Validate mode
         mode = self._config.get("firm", {}).get("mode", "paper")
         if mode == "live":
             logger.critical("=" * 60)
-            logger.critical("WARNING: LIVE TRADING MODE")
-            logger.critical("Real money will be used. Proceed with caution!")
+            logger.critical("WARNING: LIVE TRADING MODE DETECTED")
+            logger.critical("Real money will be used. This is NOT a simulation!")
             logger.critical("=" * 60)
+            # CRITICAL: Require explicit confirmation for live trading
+            import sys
+            if sys.stdin.isatty():
+                confirmation = input("Type 'CONFIRM LIVE TRADING' to proceed: ")
+                if confirmation != "CONFIRM LIVE TRADING":
+                    logger.error("Live trading mode not confirmed. Exiting for safety.")
+                    raise ValueError("Live trading mode requires explicit confirmation")
+            else:
+                # Non-interactive mode - require environment variable
+                import os
+                if os.environ.get("CONFIRM_LIVE_TRADING") != "YES":
+                    logger.error("Live mode requires CONFIRM_LIVE_TRADING=YES environment variable")
+                    raise ValueError("Live trading mode not confirmed via environment")
         else:
             logger.info(f"Running in {mode.upper()} mode")
 
@@ -267,6 +389,17 @@ class TradingFirmOrchestrator:
         if self._health_checker:
             self._health_checker.set_ready(True)
 
+        # Print startup validation summary
+        self._print_startup_summary()
+
+        # Dry-run mode: stop after validation
+        if self._dry_run:
+            logger.info("=" * 60)
+            logger.info("DRY-RUN MODE: Configuration validated successfully")
+            logger.info("No trading will occur. Exiting.")
+            logger.info("=" * 60)
+            return
+
         logger.info("Initialization complete")
 
     async def _initialize_monitoring(self) -> None:
@@ -282,6 +415,81 @@ class TradingFirmOrchestrator:
         )
 
         logger.info("Monitoring system initialized")
+
+        # Initialize notification system (#C33, #R27)
+        await self._initialize_notifications()
+
+        # Initialize audit log backup manager
+        await self._initialize_backup_manager()
+
+    async def _initialize_notifications(self) -> None:
+        """Initialize notification system (#C33, #R27)."""
+        logger.info("Initializing notification system...")
+
+        notifications_config = self._config.get("notifications", {})
+
+        # Create notification channels
+        channels = []
+
+        # File channel (always enabled for audit trail)
+        file_channel = FileNotificationChannel(
+            filepath=notifications_config.get("alerts_file", "logs/alerts.jsonl")
+        )
+        channels.append(file_channel)
+
+        # Webhook channel (if configured)
+        webhook_url = notifications_config.get("webhook_url")
+        if webhook_url:
+            webhook_channel = WebhookNotificationChannel(
+                webhook_url=webhook_url,
+                timeout_seconds=notifications_config.get("webhook_timeout", 10.0),
+            )
+            channels.append(webhook_channel)
+            logger.info(f"Webhook notifications enabled: {webhook_url[:50]}...")
+
+        # Create notification manager
+        self._notification_manager = NotificationManager(
+            channels=channels,
+            throttle_minutes=notifications_config.get("throttle_minutes", 5.0),
+            escalation_delay_minutes=notifications_config.get("escalation_delay_minutes", 15.0),
+        )
+
+        # Create specialized notifiers
+        self._compliance_notifier = ComplianceOfficerNotifier(
+            notification_manager=self._notification_manager,
+            compliance_officer_email=notifications_config.get("compliance_officer_email"),
+            compliance_webhook=notifications_config.get("compliance_webhook"),
+        )
+
+        self._risk_notifier = RiskLimitBreachNotifier(
+            notification_manager=self._notification_manager,
+        )
+
+        logger.info(f"Notification system initialized with {len(channels)} channels")
+
+    async def _initialize_backup_manager(self) -> None:
+        """Initialize audit log backup manager."""
+        logger.info("Initializing audit log backup manager...")
+
+        backup_config = self._config.get("backup", {})
+
+        logging_config = self._config.get("logging", {})
+        log_dir = Path(logging_config.get("audit_file", "logs/audit.jsonl")).parent
+
+        self._backup_manager = AuditLogBackupManager(
+            log_dir=str(log_dir),
+            backup_dir=backup_config.get("backup_dir", "logs/backup"),
+            retention_days=backup_config.get("retention_days", 90),
+        )
+
+        # Schedule daily backup if enabled
+        if backup_config.get("enabled", True):
+            backup_hour = backup_config.get("backup_hour", 2)  # Default 2 AM
+            backup_minute = backup_config.get("backup_minute", 0)
+            self._backup_manager.schedule_daily_backup(hour=backup_hour, minute=backup_minute)
+            logger.info(f"Daily audit log backup scheduled at {backup_hour:02d}:{backup_minute:02d}")
+
+        logger.info("Audit log backup manager initialized")
 
     async def _initialize_health_check(self) -> None:
         """Initialize health check server (#S5)."""
@@ -309,7 +517,12 @@ class TradingFirmOrchestrator:
         # Start the health check server
         if health_config.get("enabled", True):
             self._health_server.start()
-            logger.info(f"Health check server started on port {config.port}")
+            logger.info("=" * 50)
+            logger.info("MONITORING ENDPOINTS:")
+            logger.info(f"  Health:    http://{config.host}:{config.port}/health")
+            logger.info(f"  Readiness: http://{config.host}:{config.port}/ready")
+            logger.info(f"  Liveness:  http://{config.host}:{config.port}/alive")
+            logger.info("=" * 50)
         else:
             logger.info("Health check server disabled in config")
 
@@ -520,6 +733,21 @@ class TradingFirmOrchestrator:
             self._broker.set_contract_specs_manager(self._contract_specs)
             logger.info("  ContractSpecsManager -> Broker")
 
+        # Wire Risk Notifier to Risk Agent (#R27)
+        if self._risk_agent and self._risk_notifier:
+            self._risk_agent.set_risk_notifier(self._risk_notifier)
+            logger.info("  RiskLimitBreachNotifier -> RiskAgent")
+
+        # Wire Compliance Notifier to Compliance Agent (#C33)
+        if self._compliance_agent and self._compliance_notifier:
+            self._compliance_agent.set_compliance_notifier(self._compliance_notifier)
+            logger.info("  ComplianceOfficerNotifier -> ComplianceAgent")
+
+        # Wire Compliance Notifier to Surveillance Agent
+        if self._surveillance_agent and self._compliance_notifier:
+            self._surveillance_agent.set_compliance_notifier(self._compliance_notifier)
+            logger.info("  ComplianceOfficerNotifier -> SurveillanceAgent")
+
         logger.info("Component wiring complete")
 
     async def _initialize_agents(self) -> None:
@@ -724,6 +952,42 @@ class TradingFirmOrchestrator:
         if self._transaction_reporting_agent:
             logger.info("  Reporting: TransactionReportingAgent (ESMA RTS 22/23)")
 
+    async def _initialize_agents_with_factory(self) -> None:
+        """
+        Initialize agents using AgentFactory (SOLID refactoring alternative).
+
+        This method demonstrates the use of AgentFactory for cleaner SRP.
+        Can be used instead of _initialize_agents() for improved testability.
+        """
+        factory_config = AgentFactoryConfig(
+            agents_config=self._config.get("agents", {}),
+            risk_config=self._config.get("risk", {}),
+            compliance_config=self._config.get("compliance", {}),
+            surveillance_config=self._config.get("surveillance", {}),
+            transaction_reporting_config=self._config.get("transaction_reporting", {}),
+            sector_map=self._config.get("sector_map", {}),
+        )
+
+        factory = AgentFactory(
+            event_bus=self._event_bus,
+            audit_logger=self._audit_logger,
+            broker=self._broker,
+            config=factory_config,
+        )
+
+        agents = factory.create_all_agents()
+
+        # Assign to orchestrator
+        self._signal_agents = agents.signal_agents
+        self._cio_agent = agents.cio_agent
+        self._risk_agent = agents.risk_agent
+        self._compliance_agent = agents.compliance_agent
+        self._execution_agent = agents.execution_agent
+        self._surveillance_agent = agents.surveillance_agent
+        self._transaction_reporting_agent = agents.transaction_reporting_agent
+
+        logger.info("Agents initialized via AgentFactory")
+
     async def start(self) -> None:
         """Start the trading system."""
         logger.info("=" * 60)
@@ -800,8 +1064,18 @@ class TradingFirmOrchestrator:
 
     async def _run_monitoring(self) -> None:
         """Run periodic monitoring tasks."""
+        # MON-007: Track monitoring loop health
+        _last_heartbeat: datetime = datetime.now(timezone.utc)
+
         while self._running:
             try:
+                # MON-007: Emit heartbeat metric at each iteration
+                _last_heartbeat = datetime.now(timezone.utc)
+                self._monitoring.metrics.record_metric(
+                    "monitoring_loop_heartbeat",
+                    _last_heartbeat.timestamp(),
+                )
+
                 # Collect portfolio metrics
                 if self._broker.is_connected:
                     portfolio = await self._broker.get_portfolio_state()
@@ -832,69 +1106,106 @@ class TradingFirmOrchestrator:
                         risk_status.get("risk_state", {}).get("leverage", 0)
                     )
 
-                await asyncio.sleep(30)  # Update every 30 seconds
+                # RT-P1-5: Add jitter to prevent thundering herd
+                # Base 30s interval with +/- 5s random jitter
+                sleep_duration = 30 + random.uniform(-5, 5)
+                await asyncio.sleep(sleep_duration)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Monitoring error: {e}")
-                await asyncio.sleep(5)
+                # RT-P1-5: Also add jitter to error recovery sleep
+                await asyncio.sleep(5 + random.uniform(-1, 1))
 
     async def stop(self) -> None:
-        """Stop the trading system gracefully."""
+        """Stop the trading system gracefully with timeout protection."""
+        # Prevent double shutdown
+        if self._shutdown_in_progress:
+            logger.warning("Shutdown already in progress, ignoring duplicate request")
+            return
+
+        self._shutdown_in_progress = True
+
         logger.info("=" * 60)
-        logger.info("AI TRADING FIRM - STOPPING")
+        logger.info("AI TRADING FIRM - GRACEFUL SHUTDOWN")
         logger.info("=" * 60)
 
         self._running = False
+        shutdown_start = datetime.now(timezone.utc)
+
+        # Helper for shutdown with timeout
+        async def _stop_with_timeout(coro, name: str, timeout: float = 5.0) -> None:
+            """Stop a component with timeout protection."""
+            try:
+                await asyncio.wait_for(coro, timeout=timeout)
+                logger.info(f"  [OK] {name} stopped")
+            except asyncio.TimeoutError:
+                logger.warning(f"  [TIMEOUT] {name} did not stop within {timeout}s")
+            except Exception as e:
+                logger.error(f"  [ERROR] {name} stop failed: {e}")
+
+        logger.info("Stopping components (timeout: {:.0f}s per component)...".format(
+            self._graceful_shutdown_timeout / 6  # Approximate per-component timeout
+        ))
 
         # Mark system as not ready (#S5)
         if self._health_checker:
             self._health_checker.set_ready(False)
+            logger.info("  [OK] Health check marked not ready")
 
         # Stop health check server (#S5)
         if self._health_server:
             self._health_server.stop()
+            logger.info("  [OK] Health check server stopped")
 
         # Stop market data first
         if self._market_data:
-            await self._market_data.stop()
+            await _stop_with_timeout(self._market_data.stop(), "MarketDataManager")
 
         # Stop compliance/surveillance agents
         if self._transaction_reporting_agent:
-            await self._transaction_reporting_agent.stop()
+            await _stop_with_timeout(
+                self._transaction_reporting_agent.stop(), "TransactionReportingAgent"
+            )
         if self._surveillance_agent:
-            await self._surveillance_agent.stop()
+            await _stop_with_timeout(self._surveillance_agent.stop(), "SurveillanceAgent")
 
-        # Stop agents in reverse order
+        # Stop agents in reverse order (execution -> compliance -> risk -> cio -> signals)
         if self._execution_agent:
-            await self._execution_agent.stop()
+            await _stop_with_timeout(self._execution_agent.stop(), "ExecutionAgent")
 
         if self._compliance_agent:
-            await self._compliance_agent.stop()
+            await _stop_with_timeout(self._compliance_agent.stop(), "ComplianceAgent")
 
         if self._risk_agent:
-            await self._risk_agent.stop()
+            await _stop_with_timeout(self._risk_agent.stop(), "RiskAgent")
 
         if self._cio_agent:
-            await self._cio_agent.stop()
+            await _stop_with_timeout(self._cio_agent.stop(), "CIOAgent")
 
         for agent in self._signal_agents:
-            await agent.stop()
+            await _stop_with_timeout(agent.stop(), agent.name)
 
         # Stop event bus
         if self._event_bus:
-            await self._event_bus.stop()
+            await _stop_with_timeout(self._event_bus.stop(), "EventBus")
 
-        # Disconnect broker
+        # Disconnect broker (longer timeout as it may have pending orders)
         if self._broker:
-            await self._broker.disconnect()
+            await _stop_with_timeout(self._broker.disconnect(), "Broker", timeout=10.0)
+
+        shutdown_duration = (datetime.now(timezone.utc) - shutdown_start).total_seconds()
 
         self._audit_logger.log_system_event("stopped", {
-            "uptime_seconds": (datetime.now(timezone.utc) - self._startup_time).total_seconds() if self._startup_time else 0
+            "uptime_seconds": (datetime.now(timezone.utc) - self._startup_time).total_seconds() if self._startup_time else 0,
+            "shutdown_duration_seconds": shutdown_duration,
+            "graceful": True,
         })
 
-        logger.info("Trading system stopped")
+        logger.info("=" * 60)
+        logger.info(f"SHUTDOWN COMPLETE (took {shutdown_duration:.1f}s)")
+        logger.info("=" * 60)
 
     async def _handle_risk_alert(self, event: RiskAlertEvent) -> None:
         """Handle risk alerts - may trigger emergency shutdown."""
@@ -922,9 +1233,11 @@ class TradingFirmOrchestrator:
                 data.last,
             )
 
-    def request_shutdown(self) -> None:
+    def request_shutdown(self, reason: str = "user request") -> None:
         """Request graceful shutdown."""
-        logger.info("Shutdown requested")
+        logger.info(f"Shutdown requested: {reason}")
+        if self._audit_logger:
+            self._audit_logger.log_system_event("shutdown_requested", {"reason": reason})
         self._shutdown_event.set()
 
     def get_status(self) -> dict[str, Any]:
@@ -973,15 +1286,51 @@ def setup_signal_handlers(orchestrator: TradingFirmOrchestrator) -> None:
         signal.signal(signal.SIGTERM, handle_signal)
 
 
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="AI Trading Firm - Multi-Agent Trading System",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py                          # Run with default config.yaml
+  python main.py --config config.simple.yaml  # Use simple config
+  python main.py --dry-run                # Validate config without starting
+  python main.py --dry-run --config my.yaml   # Validate specific config
+        """,
+    )
+    parser.add_argument(
+        "--config", "-c",
+        default="config.yaml",
+        help="Path to configuration file (default: config.yaml)",
+    )
+    parser.add_argument(
+        "--dry-run", "-n",
+        action="store_true",
+        help="Validate configuration without starting the system",
+    )
+    parser.add_argument(
+        "--log-level", "-l",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="Logging level (default: INFO)",
+    )
+    return parser.parse_args()
+
+
 async def main():
     """Main entry point."""
+    # Parse command-line arguments
+    args = parse_arguments()
+
     # Create logs directory
     Path("logs").mkdir(exist_ok=True)
     Path("logs/agents").mkdir(exist_ok=True)
 
     # Configure logging
+    log_level = getattr(logging, args.log_level)
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
         handlers=[
             logging.StreamHandler(),
@@ -993,10 +1342,17 @@ async def main():
     print("=" * 60)
     print("     AI TRADING FIRM - Multi-Agent Trading System")
     print("=" * 60)
+    if args.dry_run:
+        print("              [DRY-RUN MODE - Validation Only]")
+        print("=" * 60)
     print()
 
-    # Initialize orchestrator
-    orchestrator = TradingFirmOrchestrator()
+    # Initialize orchestrator with config path
+    orchestrator = TradingFirmOrchestrator(config_path=args.config)
+
+    # Enable dry-run mode if requested
+    if args.dry_run:
+        orchestrator.set_dry_run(True)
 
     # Set up signal handlers
     setup_signal_handlers(orchestrator)
@@ -1005,15 +1361,42 @@ async def main():
         # Initialize
         await orchestrator.initialize()
 
+        # In dry-run mode, stop after initialization
+        if args.dry_run:
+            logger.info("Dry-run complete. Exiting.")
+            return
+
         # Start
         await orchestrator.start()
 
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received")
+    except ConnectionRefusedError:
+        logger.error("=" * 60)
+        logger.error("CONNECTION ERROR: Could not connect to Interactive Brokers")
+        logger.error("=" * 60)
+        logger.error("Checklist:")
+        logger.error("  1. Is IB Gateway or TWS running?")
+        logger.error("  2. Is API enabled in IB Gateway/TWS settings?")
+        logger.error("  3. Check config port (default: 4002 for paper, 4001 for live)")
+        logger.error("  4. Check firewall settings")
+    except FileNotFoundError as e:
+        if "config" in str(e).lower():
+            logger.error("Config file not found. Run: cp config.simple.yaml config.yaml")
+        else:
+            logger.error(f"File not found: {e}")
+    except ValueError as e:
+        if "validation" in str(e).lower() or "configuration" in str(e).lower():
+            logger.error("Fix configuration errors above and try again")
+        elif "live trading" in str(e).lower():
+            logger.error("Live trading mode requires explicit confirmation")
+        else:
+            logger.error(f"Configuration error: {e}")
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
     finally:
-        await orchestrator.stop()
+        if not args.dry_run:
+            await orchestrator.stop()
 
 
 if __name__ == "__main__":

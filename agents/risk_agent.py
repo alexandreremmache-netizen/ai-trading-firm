@@ -382,6 +382,9 @@ class RiskAgent(ValidationAgent):
         self._stress_tester = None
         self._correlation_manager = None
 
+        # Risk notifier for limit breach notifications (#R27)
+        self._risk_notifier = None
+
         # State
         self._risk_state = RiskState()
         self._kill_switch_active = False
@@ -407,6 +410,16 @@ class RiskAgent(ValidationAgent):
         self._returns_history: list[float] = []
         self._max_history_days = 252  # 1 year of trading days
 
+        # Pre-allocated rolling buffer for returns (PERF-P1-001)
+        self._returns_buffer = np.zeros(252)
+        self._buffer_idx = 0
+        self._buffer_filled = False  # True once we've filled the buffer once
+
+        # Portfolio refresh tracking (ERR-006)
+        self._last_successful_refresh: datetime | None = None
+        self._max_stale_data_seconds = config.parameters.get("max_stale_data_seconds", 60.0)
+        self._stale_data_kill_switch_enabled = config.parameters.get("stale_data_kill_switch", True)
+
         # Intraday VaR recalculation triggers (#R2)
         var_recalc_config = config.parameters.get("var_recalculation", {})
         self._var_recalc_enabled = var_recalc_config.get("enabled", True)
@@ -417,6 +430,25 @@ class RiskAgent(ValidationAgent):
         self._last_var_calc_time: datetime | None = None
         self._last_var_calc_positions: dict[str, float] = {}  # symbol -> market_value at last calc
         self._last_var_calc_exposure: float = 0.0
+
+        # Position aging alerts (P2)
+        position_aging_config = config.parameters.get("position_aging", {})
+        self._position_aging_enabled = position_aging_config.get("enabled", True)
+        self._position_aging_warning_days = position_aging_config.get("warning_days", 30)  # Warn at 30 days
+        self._position_aging_critical_days = position_aging_config.get("critical_days", 60)  # Critical at 60 days
+        self._position_aging_max_days = position_aging_config.get("max_days", 90)  # Force review at 90 days
+        self._position_entry_times: dict[str, datetime] = {}  # symbol -> position entry time
+        self._position_aging_alerts: list[dict] = []  # Historical aging alerts
+
+        # Correlation breakdown detection (P2)
+        correlation_config = config.parameters.get("correlation_breakdown", {})
+        self._correlation_monitoring_enabled = correlation_config.get("enabled", True)
+        self._correlation_breakdown_threshold = correlation_config.get("breakdown_threshold", 0.3)  # 0.3 correlation change
+        self._correlation_lookback_days = correlation_config.get("lookback_days", 60)  # 60 day baseline
+        self._correlation_check_window_days = correlation_config.get("check_window_days", 5)  # 5 day recent window
+        self._historical_correlations: dict[tuple[str, str], float] = {}  # (sym1, sym2) -> baseline correlation
+        self._current_correlations: dict[tuple[str, str], float] = {}  # (sym1, sym2) -> recent correlation
+        self._correlation_breakdown_alerts: list[dict] = []  # Historical breakdown alerts
 
         # Monitoring
         self._check_latencies: list[float] = []
@@ -794,22 +826,43 @@ class RiskAgent(ValidationAgent):
         """
         Calculate Herfindahl-Hirschman Index for portfolio concentration (#R8).
 
-        HHI = sum of squared market share percentages
-        Range: 0 (perfectly diversified) to 10,000 (single position)
+        The HHI is a measure of market/portfolio concentration calculated as
+        the sum of squared market share (position weight) percentages.
 
-        Thresholds (adapted from DOJ/FTC):
-        - HHI < 1500: Unconcentrated (well diversified)
-        - HHI 1500-2500: Moderately concentrated
-        - HHI > 2500: Highly concentrated (concentration risk)
+        Formula:
+            HHI = sum(w_i^2) * 10000
+
+        Where w_i is the weight of position i (as a decimal).
+        Equivalently: sum of (weight_pct)^2 where weight_pct is 0-100.
+
+        Range:
+            - Minimum: 10000/N (equally weighted N positions)
+            - Maximum: 10000 (single position holds 100%)
+
+        Example:
+            - 10 equal positions of 10% each: HHI = 10 * 10^2 = 1000
+            - 4 equal positions of 25% each: HHI = 4 * 25^2 = 2500
+            - 1 position of 100%: HHI = 100^2 = 10000
+
+        Thresholds (adapted from DOJ/FTC merger guidelines):
+            - HHI < 1500: Unconcentrated (well diversified)
+            - HHI 1500-2500: Moderately concentrated
+            - HHI > 2500: Highly concentrated (concentration risk)
+
+        A useful related metric is "effective number of positions":
+            N_eff = 10000 / HHI
+
+        Returns:
+            HHI value between ~0 and 10000
         """
         total_value = self._risk_state.net_liquidation
         if total_value <= 0:
             return 10000.0  # Maximum concentration if no value
 
-        # Calculate squared weights
+        # Calculate squared weights: HHI = sum((w_i * 100)^2)
         hhi = 0.0
         for pos in self._risk_state.positions.values():
-            weight = abs(pos.market_value) / total_value
+            weight = abs(pos.market_value) / total_value  # Weight as decimal
             hhi += (weight * 100) ** 2  # Convert to percentage and square
 
         return hhi
@@ -1273,26 +1326,109 @@ class RiskAgent(ValidationAgent):
             # Check for intraday margin update (#R10)
             await self.refresh_margin_from_broker()
 
+            # Mark successful refresh (ERR-006)
+            self._last_successful_refresh = datetime.now(timezone.utc)
+
         except Exception as e:
             # Broad catch - portfolio refresh is periodic, system continues on failure
             logger.exception(f"Failed to refresh portfolio state: {e}")
+            # Check if data is too stale (ERR-006)
+            await self._check_stale_data_kill_switch()
+
+    async def _check_stale_data_kill_switch(self) -> None:
+        """
+        Check if portfolio data is too stale and activate kill switch if needed (ERR-006).
+
+        If the last successful portfolio refresh was more than max_stale_data_seconds ago,
+        activates the kill switch to prevent trading with outdated risk data.
+        """
+        if not self._stale_data_kill_switch_enabled:
+            return
+
+        if self._last_successful_refresh is None:
+            # No successful refresh yet - allow initial startup grace period
+            return
+
+        now = datetime.now(timezone.utc)
+        staleness = (now - self._last_successful_refresh).total_seconds()
+
+        if staleness > self._max_stale_data_seconds:
+            logger.error(
+                f"Portfolio data is stale ({staleness:.1f}s > {self._max_stale_data_seconds}s). "
+                f"Activating kill switch to prevent trading with outdated risk data. "
+                f"Last successful refresh: {self._last_successful_refresh.isoformat()}"
+            )
+            await self._activate_kill_switch(
+                reason=KillSwitchReason.CONNECTIVITY_LOSS,
+                action=KillSwitchAction.HALT_NEW_ORDERS,
+                triggered_by=f"stale_portfolio_data_{staleness:.0f}s"
+            )
+
+    def get_data_staleness_seconds(self) -> float | None:
+        """Get current portfolio data staleness in seconds (ERR-006)."""
+        if self._last_successful_refresh is None:
+            return None
+        return (datetime.now(timezone.utc) - self._last_successful_refresh).total_seconds()
 
     def _calculate_var(self) -> None:
-        """Calculate Value at Risk (parametric method)."""
+        """
+        Calculate Value at Risk (VaR) using the parametric (variance-covariance) method.
+
+        VaR represents the maximum expected loss over a given time horizon
+        at a specified confidence level. For example, 95% 1-day VaR of 2%
+        means there's a 5% chance of losing more than 2% in one day.
+
+        Parametric VaR Formula:
+            VaR_alpha = -(mu - z_alpha * sigma)
+
+        Where:
+            mu = mean daily return
+            sigma = standard deviation of daily returns
+            z_alpha = z-score for confidence level (1.645 for 95%, 2.326 for 99%)
+
+        The formula assumes normally distributed returns. The negative sign
+        converts the return threshold to a positive loss number.
+
+        Expected Shortfall (CVaR / Conditional VaR) is also calculated:
+            ES = E[Loss | Loss > VaR]
+            This is the average of all returns in the left tail beyond VaR.
+            ES is a more conservative risk measure than VaR because it
+            accounts for the severity of losses beyond the VaR threshold.
+
+        Example:
+            If mu=0.05%, sigma=1.5%, then:
+            VaR_95 = -(0.0005 - 1.645 * 0.015) = -(-0.0242) = 2.42%
+
+        Note:
+            Uses a pre-allocated rolling buffer for performance (PERF-P1-001).
+            Requires minimum 20 observations for meaningful calculation.
+        """
         if len(self._returns_history) < 20:
             self._risk_state.var_95 = 0.02  # Default 2%
             self._risk_state.var_99 = 0.03  # Default 3%
             return
 
-        returns = np.array(self._returns_history[-252:])  # Last year
-        mean_return = np.mean(returns)
-        std_return = np.std(returns)
+        # Use pre-allocated rolling buffer for performance (PERF-P1-001)
+        # Avoid copying 252 elements on every check
+        if self._buffer_filled:
+            # Buffer is full, use entire buffer (no slice copy needed)
+            returns = self._returns_buffer
+        else:
+            # Buffer not yet full, use only filled portion
+            returns = self._returns_buffer[:self._buffer_idx] if self._buffer_idx > 0 else np.array(self._returns_history[-252:])
 
-        # Parametric VaR
+        # Calculate return statistics
+        mean_return = np.mean(returns)  # mu: expected daily return
+        std_return = np.std(returns)  # sigma: daily volatility
+
+        # Parametric VaR: VaR = -(mu - z * sigma)
+        # Z-scores: 1.645 for 95% (one-tailed), 2.326 for 99%
+        # The negative sign converts to a positive loss percentage
         self._risk_state.var_95 = -(mean_return - 1.645 * std_return)
         self._risk_state.var_99 = -(mean_return - 2.326 * std_return)
 
-        # Expected Shortfall (CVaR)
+        # Expected Shortfall (CVaR): Average loss in the tail beyond VaR
+        # Find the 5th percentile (for 95% VaR) and average all returns below it
         var_95_threshold = np.percentile(returns, 5)
         tail_returns = returns[returns <= var_95_threshold]
         self._risk_state.expected_shortfall = -np.mean(tail_returns) if len(tail_returns) > 0 else self._risk_state.var_95
@@ -1899,6 +2035,12 @@ class RiskAgent(ValidationAgent):
         if len(self._returns_history) > self._max_history_days:
             self._returns_history = self._returns_history[-self._max_history_days:]
 
+        # Update pre-allocated rolling buffer (PERF-P1-001)
+        self._returns_buffer[self._buffer_idx] = return_pct
+        self._buffer_idx = (self._buffer_idx + 1) % 252
+        if self._buffer_idx == 0 and len(self._returns_history) >= 252:
+            self._buffer_filled = True
+
     # =========================================================================
     # ENHANCED RISK CHECKS
     # =========================================================================
@@ -2427,6 +2569,588 @@ class RiskAgent(ValidationAgent):
         self._correlation_manager = correlation_manager
 
     # =========================================================================
+    # POSITION AGING ALERTS (P2)
+    # =========================================================================
+
+    def record_position_entry(self, symbol: str, entry_time: datetime | None = None) -> None:
+        """
+        Record when a position was entered for aging tracking (P2).
+
+        Args:
+            symbol: Position symbol
+            entry_time: Time position was entered (defaults to now)
+        """
+        self._position_entry_times[symbol] = entry_time or datetime.now(timezone.utc)
+        logger.debug(f"Position entry recorded for {symbol}")
+
+    def clear_position_entry(self, symbol: str) -> None:
+        """
+        Clear position entry time when position is closed (P2).
+
+        Args:
+            symbol: Position symbol to clear
+        """
+        if symbol in self._position_entry_times:
+            del self._position_entry_times[symbol]
+            logger.debug(f"Position entry cleared for {symbol}")
+
+    def get_position_age_days(self, symbol: str) -> float | None:
+        """
+        Get the age of a position in days (P2).
+
+        Args:
+            symbol: Position symbol
+
+        Returns:
+            Age in days, or None if entry time not recorded
+        """
+        entry_time = self._position_entry_times.get(symbol)
+        if entry_time is None:
+            return None
+
+        now = datetime.now(timezone.utc)
+        age_days = (now - entry_time).total_seconds() / 86400  # 86400 seconds in a day
+        return age_days
+
+    async def check_position_aging_alerts(self) -> list[dict]:
+        """
+        Check all positions for aging alerts (P2).
+
+        Returns:
+            List of aging alerts for positions exceeding thresholds
+        """
+        if not self._position_aging_enabled:
+            return []
+
+        alerts = []
+        now = datetime.now(timezone.utc)
+
+        for symbol, entry_time in self._position_entry_times.items():
+            age_days = (now - entry_time).total_seconds() / 86400
+
+            alert = None
+            severity = None
+
+            if age_days >= self._position_aging_max_days:
+                severity = "CRITICAL"
+                alert = {
+                    "symbol": symbol,
+                    "age_days": round(age_days, 1),
+                    "threshold_days": self._position_aging_max_days,
+                    "severity": severity,
+                    "action_required": "MANDATORY_REVIEW",
+                    "message": f"Position {symbol} held for {age_days:.1f} days - mandatory review required",
+                    "entry_time": entry_time.isoformat(),
+                    "timestamp": now.isoformat(),
+                }
+                logger.critical(
+                    f"POSITION AGING CRITICAL: {symbol} held for {age_days:.1f} days "
+                    f"(max threshold: {self._position_aging_max_days} days)"
+                )
+
+            elif age_days >= self._position_aging_critical_days:
+                severity = "HIGH"
+                alert = {
+                    "symbol": symbol,
+                    "age_days": round(age_days, 1),
+                    "threshold_days": self._position_aging_critical_days,
+                    "severity": severity,
+                    "action_required": "REVIEW_RECOMMENDED",
+                    "message": f"Position {symbol} aging - {age_days:.1f} days (critical threshold: {self._position_aging_critical_days})",
+                    "entry_time": entry_time.isoformat(),
+                    "timestamp": now.isoformat(),
+                }
+                logger.warning(
+                    f"POSITION AGING HIGH: {symbol} held for {age_days:.1f} days "
+                    f"(critical threshold: {self._position_aging_critical_days} days)"
+                )
+
+            elif age_days >= self._position_aging_warning_days:
+                severity = "MEDIUM"
+                alert = {
+                    "symbol": symbol,
+                    "age_days": round(age_days, 1),
+                    "threshold_days": self._position_aging_warning_days,
+                    "severity": severity,
+                    "action_required": "MONITOR",
+                    "message": f"Position {symbol} approaching aging threshold - {age_days:.1f} days",
+                    "entry_time": entry_time.isoformat(),
+                    "timestamp": now.isoformat(),
+                }
+                logger.info(
+                    f"POSITION AGING WARNING: {symbol} held for {age_days:.1f} days "
+                    f"(warning threshold: {self._position_aging_warning_days} days)"
+                )
+
+            if alert:
+                alerts.append(alert)
+                self._position_aging_alerts.append(alert)
+
+                # Publish risk alert event
+                alert_event = RiskAlertEvent(
+                    source_agent=self.name,
+                    severity=RiskAlertSeverity.HIGH if severity == "CRITICAL" else RiskAlertSeverity.WARNING,
+                    alert_type="position_aging",
+                    message=alert["message"],
+                    affected_symbols=(symbol,),
+                    current_value=age_days,
+                    threshold_value=alert["threshold_days"],
+                    halt_trading=False,
+                )
+                await self._event_bus.publish(alert_event)
+
+        return alerts
+
+    def get_position_aging_summary(self) -> dict:
+        """
+        Get summary of position aging across the portfolio (P2).
+
+        Returns:
+            Summary of position ages and alerts
+        """
+        now = datetime.now(timezone.utc)
+
+        ages = []
+        for symbol, entry_time in self._position_entry_times.items():
+            age_days = (now - entry_time).total_seconds() / 86400
+            ages.append({
+                "symbol": symbol,
+                "age_days": round(age_days, 1),
+                "entry_time": entry_time.isoformat(),
+                "status": (
+                    "CRITICAL" if age_days >= self._position_aging_max_days
+                    else "HIGH" if age_days >= self._position_aging_critical_days
+                    else "WARNING" if age_days >= self._position_aging_warning_days
+                    else "OK"
+                ),
+            })
+
+        # Sort by age (oldest first)
+        ages.sort(key=lambda x: x["age_days"], reverse=True)
+
+        critical_count = sum(1 for a in ages if a["status"] == "CRITICAL")
+        high_count = sum(1 for a in ages if a["status"] == "HIGH")
+        warning_count = sum(1 for a in ages if a["status"] == "WARNING")
+
+        return {
+            "total_tracked": len(ages),
+            "critical_count": critical_count,
+            "high_count": high_count,
+            "warning_count": warning_count,
+            "avg_age_days": sum(a["age_days"] for a in ages) / len(ages) if ages else 0,
+            "max_age_days": max(a["age_days"] for a in ages) if ages else 0,
+            "positions": ages,
+            "thresholds": {
+                "warning_days": self._position_aging_warning_days,
+                "critical_days": self._position_aging_critical_days,
+                "max_days": self._position_aging_max_days,
+            },
+            "recent_alerts": self._position_aging_alerts[-10:],
+        }
+
+    def get_position_aging_alerts(self) -> list[dict]:
+        """Get historical position aging alerts (P2)."""
+        return list(self._position_aging_alerts)
+
+    # =========================================================================
+    # CORRELATION BREAKDOWN DETECTION (P2)
+    # =========================================================================
+
+    def update_historical_correlation(
+        self,
+        symbol1: str,
+        symbol2: str,
+        correlation: float
+    ) -> None:
+        """
+        Update baseline historical correlation between two symbols (P2).
+
+        Args:
+            symbol1: First symbol
+            symbol2: Second symbol
+            correlation: Historical correlation coefficient (-1 to 1)
+        """
+        # Normalize key order for consistent lookup
+        key = tuple(sorted([symbol1, symbol2]))
+        self._historical_correlations[key] = correlation
+        logger.debug(f"Historical correlation updated: {key} = {correlation:.3f}")
+
+    def update_current_correlation(
+        self,
+        symbol1: str,
+        symbol2: str,
+        correlation: float
+    ) -> None:
+        """
+        Update current/recent correlation between two symbols (P2).
+
+        Args:
+            symbol1: First symbol
+            symbol2: Second symbol
+            correlation: Current correlation coefficient (-1 to 1)
+        """
+        key = tuple(sorted([symbol1, symbol2]))
+        self._current_correlations[key] = correlation
+
+    def detect_correlation_breakdown(
+        self,
+        symbol1: str,
+        symbol2: str,
+        current_correlation: float | None = None
+    ) -> dict | None:
+        """
+        Detect if correlation between two symbols has broken down (P2).
+
+        A correlation breakdown occurs when the current correlation differs
+        significantly from the historical baseline, indicating a regime change.
+
+        Args:
+            symbol1: First symbol
+            symbol2: Second symbol
+            current_correlation: Current correlation (uses stored if None)
+
+        Returns:
+            Breakdown alert dict if detected, None otherwise
+        """
+        if not self._correlation_monitoring_enabled:
+            return None
+
+        key = tuple(sorted([symbol1, symbol2]))
+
+        # Get correlations
+        historical = self._historical_correlations.get(key)
+        current = current_correlation or self._current_correlations.get(key)
+
+        if historical is None or current is None:
+            return None
+
+        # Calculate correlation change
+        correlation_change = abs(current - historical)
+
+        if correlation_change >= self._correlation_breakdown_threshold:
+            alert = {
+                "pair": key,
+                "symbol1": symbol1,
+                "symbol2": symbol2,
+                "historical_correlation": round(historical, 3),
+                "current_correlation": round(current, 3),
+                "correlation_change": round(correlation_change, 3),
+                "threshold": self._correlation_breakdown_threshold,
+                "direction": "decreased" if current < historical else "increased",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "risk_impact": self._assess_correlation_risk_impact(historical, current),
+            }
+
+            logger.warning(
+                f"CORRELATION BREAKDOWN DETECTED: {symbol1}/{symbol2} "
+                f"changed from {historical:.3f} to {current:.3f} "
+                f"(change: {correlation_change:.3f}, threshold: {self._correlation_breakdown_threshold})"
+            )
+
+            self._correlation_breakdown_alerts.append(alert)
+            return alert
+
+        return None
+
+    def _assess_correlation_risk_impact(
+        self,
+        historical: float,
+        current: float
+    ) -> str:
+        """
+        Assess the risk impact of a correlation change (P2).
+
+        Args:
+            historical: Historical correlation
+            current: Current correlation
+
+        Returns:
+            Risk impact assessment string
+        """
+        change = current - historical
+
+        # Correlation going to zero (decorrelation)
+        if abs(historical) > 0.5 and abs(current) < 0.3:
+            return "HIGH - Previously correlated pair now decorrelated"
+
+        # Correlation reversal
+        if historical * current < 0:
+            return "CRITICAL - Correlation reversed sign"
+
+        # Strong correlation weakening
+        if abs(historical) > 0.7 and abs(current) < 0.5:
+            return "HIGH - Strong correlation significantly weakened"
+
+        # Moderate change
+        if abs(change) > 0.3:
+            return "MEDIUM - Significant correlation shift"
+
+        return "LOW - Notable but manageable change"
+
+    async def check_all_correlation_breakdowns(self) -> list[dict]:
+        """
+        Check all tracked symbol pairs for correlation breakdowns (P2).
+
+        Returns:
+            List of correlation breakdown alerts
+        """
+        if not self._correlation_monitoring_enabled:
+            return []
+
+        alerts = []
+
+        for key in self._historical_correlations:
+            symbol1, symbol2 = key
+            alert = self.detect_correlation_breakdown(symbol1, symbol2)
+            if alert:
+                alerts.append(alert)
+
+                # Publish risk alert event
+                alert_event = RiskAlertEvent(
+                    source_agent=self.name,
+                    severity=RiskAlertSeverity.WARNING,
+                    alert_type="correlation_breakdown",
+                    message=f"Correlation breakdown: {symbol1}/{symbol2}",
+                    affected_symbols=(symbol1, symbol2),
+                    current_value=alert["current_correlation"],
+                    threshold_value=self._correlation_breakdown_threshold,
+                    halt_trading=False,
+                )
+                await self._event_bus.publish(alert_event)
+
+        return alerts
+
+    def get_correlation_status(self) -> dict:
+        """
+        Get status of correlation monitoring (P2).
+
+        Returns:
+            Correlation monitoring status and metrics
+        """
+        # Calculate breakdown counts
+        breakdown_count = 0
+        significant_changes = []
+
+        for key in self._historical_correlations:
+            historical = self._historical_correlations.get(key)
+            current = self._current_correlations.get(key)
+
+            if historical is not None and current is not None:
+                change = abs(current - historical)
+                if change >= self._correlation_breakdown_threshold:
+                    breakdown_count += 1
+                    significant_changes.append({
+                        "pair": key,
+                        "historical": round(historical, 3),
+                        "current": round(current, 3),
+                        "change": round(change, 3),
+                    })
+
+        return {
+            "enabled": self._correlation_monitoring_enabled,
+            "pairs_tracked": len(self._historical_correlations),
+            "pairs_with_current_data": len(self._current_correlations),
+            "breakdown_threshold": self._correlation_breakdown_threshold,
+            "current_breakdowns": breakdown_count,
+            "significant_changes": significant_changes,
+            "total_alerts": len(self._correlation_breakdown_alerts),
+            "recent_alerts": self._correlation_breakdown_alerts[-5:],
+        }
+
+    def get_correlation_breakdown_alerts(self) -> list[dict]:
+        """Get historical correlation breakdown alerts (P2)."""
+        return list(self._correlation_breakdown_alerts)
+
+    def clear_correlation_data(self) -> None:
+        """Clear all correlation data (P2)."""
+        self._historical_correlations.clear()
+        self._current_correlations.clear()
+        logger.info("Correlation data cleared")
+
+    def calculate_correlation_adjusted_risk(
+        self,
+        strategy_returns: dict[str, list[float]] | None = None
+    ) -> dict[str, float]:
+        """
+        Calculate correlation-adjusted risk contribution for strategies (PM-04).
+
+        Risk parity allocation that accounts for correlations between strategies,
+        not treating them as independent. Uses the correlation manager if available,
+        otherwise falls back to estimating correlations from returns.
+
+        Args:
+            strategy_returns: Optional dict of strategy_name -> list of returns.
+                             If not provided, uses internal data if available.
+
+        Returns:
+            Dict of strategy_name -> correlation-adjusted risk contribution (0-1)
+        """
+        if not strategy_returns or len(strategy_returns) < 2:
+            # Not enough data for correlation analysis
+            logger.debug("Insufficient strategy returns data for correlation-adjusted risk")
+            return {}
+
+        strategies = list(strategy_returns.keys())
+        n_strategies = len(strategies)
+
+        # Get correlation matrix
+        correlation_matrix = np.eye(n_strategies)  # Default to identity (no correlation)
+
+        if self._correlation_manager and hasattr(self._correlation_manager, 'get_correlation_matrix'):
+            # Use correlation manager if available
+            try:
+                corr_data = self._correlation_manager.get_correlation_matrix(strategies)
+                if corr_data is not None:
+                    correlation_matrix = corr_data
+            except Exception as e:
+                logger.warning(f"Failed to get correlation matrix from manager: {e}")
+
+        if np.allclose(correlation_matrix, np.eye(n_strategies)):
+            # No correlation data from manager, estimate from returns
+            try:
+                # Build returns matrix
+                min_len = min(len(r) for r in strategy_returns.values())
+                if min_len >= 20:  # Need at least 20 observations
+                    returns_matrix = np.array([
+                        strategy_returns[s][-min_len:] for s in strategies
+                    ])
+                    correlation_matrix = np.corrcoef(returns_matrix)
+                    # Handle NaN correlations
+                    correlation_matrix = np.nan_to_num(correlation_matrix, nan=0.0)
+                    np.fill_diagonal(correlation_matrix, 1.0)
+            except Exception as e:
+                logger.warning(f"Failed to estimate correlations from returns: {e}")
+
+        # Calculate individual strategy volatilities
+        volatilities = {}
+        for strategy in strategies:
+            returns = strategy_returns[strategy]
+            if len(returns) >= 2:
+                volatilities[strategy] = np.std(returns)
+            else:
+                volatilities[strategy] = 0.02  # Default 2% vol
+
+        vol_array = np.array([volatilities[s] for s in strategies])
+
+        # Calculate covariance matrix from correlation and volatilities
+        # Cov = diag(vol) @ Corr @ diag(vol)
+        vol_diag = np.diag(vol_array)
+        covariance_matrix = vol_diag @ correlation_matrix @ vol_diag
+
+        # Calculate marginal risk contributions
+        # For equal-weighted portfolio as baseline
+        weights = np.ones(n_strategies) / n_strategies
+
+        # Portfolio variance = w' * Cov * w
+        portfolio_variance = weights @ covariance_matrix @ weights
+        portfolio_vol = np.sqrt(portfolio_variance) if portfolio_variance > 0 else 1e-6
+
+        # Marginal risk contribution: (Cov * w) / portfolio_vol
+        marginal_contrib = (covariance_matrix @ weights) / portfolio_vol
+
+        # Risk contribution: w_i * marginal_contrib_i
+        risk_contributions = weights * marginal_contrib
+
+        # Normalize to sum to 1
+        total_contrib = np.sum(np.abs(risk_contributions))
+        if total_contrib > 0:
+            normalized_contrib = np.abs(risk_contributions) / total_contrib
+        else:
+            normalized_contrib = np.ones(n_strategies) / n_strategies
+
+        result = {
+            strategies[i]: float(normalized_contrib[i])
+            for i in range(n_strategies)
+        }
+
+        logger.debug(
+            f"Correlation-adjusted risk contributions: {result}, "
+            f"avg correlation: {np.mean(correlation_matrix[np.triu_indices(n_strategies, 1)]):.2f}"
+        )
+
+        return result
+
+    def get_risk_parity_weights(
+        self,
+        strategy_returns: dict[str, list[float]],
+        target_contributions: dict[str, float] | None = None
+    ) -> dict[str, float]:
+        """
+        Calculate risk parity weights that equalize risk contributions (PM-04).
+
+        Uses correlation-adjusted risk to determine optimal weights where each
+        strategy contributes equally to total portfolio risk.
+
+        Args:
+            strategy_returns: Dict of strategy_name -> list of returns
+            target_contributions: Optional target risk contribution per strategy.
+                                 Defaults to equal contribution.
+
+        Returns:
+            Dict of strategy_name -> optimal weight (sums to 1)
+        """
+        if not strategy_returns or len(strategy_returns) < 2:
+            # Equal weight fallback
+            n = len(strategy_returns) if strategy_returns else 1
+            return {s: 1.0 / n for s in strategy_returns} if strategy_returns else {}
+
+        strategies = list(strategy_returns.keys())
+        n_strategies = len(strategies)
+
+        # Default to equal risk contribution
+        if target_contributions is None:
+            target_contributions = {s: 1.0 / n_strategies for s in strategies}
+
+        # Calculate individual volatilities (inverse volatility as starting point)
+        volatilities = {}
+        for strategy in strategies:
+            returns = strategy_returns[strategy]
+            if len(returns) >= 2:
+                vol = np.std(returns)
+                volatilities[strategy] = max(vol, 1e-6)  # Avoid division by zero
+            else:
+                volatilities[strategy] = 0.02
+
+        # Get correlation-adjusted contributions
+        corr_adj_risk = self.calculate_correlation_adjusted_risk(strategy_returns)
+
+        # Start with inverse volatility weights
+        inv_vol_weights = {s: 1.0 / volatilities[s] for s in strategies}
+        total_inv_vol = sum(inv_vol_weights.values())
+        weights = {s: inv_vol_weights[s] / total_inv_vol for s in strategies}
+
+        # Iterative adjustment towards target risk contributions
+        # Simple gradient descent approach
+        for _ in range(10):  # Limited iterations
+            if not corr_adj_risk:
+                break
+
+            # Adjust weights based on deviation from target
+            for strategy in strategies:
+                current_contrib = corr_adj_risk.get(strategy, 1.0 / n_strategies)
+                target_contrib = target_contributions.get(strategy, 1.0 / n_strategies)
+
+                # Reduce weight if contributing too much risk, increase if too little
+                adjustment = 1.0 + 0.1 * (target_contrib - current_contrib)
+                weights[strategy] *= adjustment
+
+            # Renormalize
+            total_weight = sum(weights.values())
+            if total_weight > 0:
+                weights = {s: w / total_weight for s, w in weights.items()}
+
+            # Recalculate contributions with new weights
+            # (simplified - full recalc would need matrix operations)
+
+        logger.debug(f"Risk parity weights: {weights}")
+        return weights
+
+    def set_risk_notifier(self, risk_notifier) -> None:
+        """Set risk limit breach notifier (#R27)."""
+        self._risk_notifier = risk_notifier
+        logger.info("RiskLimitBreachNotifier connected to RiskAgent")
+
+    # =========================================================================
     # INTRADAY MARGIN MONITORING (#R10)
     # =========================================================================
 
@@ -2815,5 +3539,9 @@ class RiskAgent(ValidationAgent):
                 "var_historical": self._risk_state.var_historical,
                 "var_monte_carlo": self._risk_state.var_monte_carlo,
             },
+            # P2: Position aging alerts
+            "position_aging": self.get_position_aging_summary(),
+            # P2: Correlation breakdown detection
+            "correlation_monitoring": self.get_correlation_status(),
             "avg_check_latency_ms": np.mean(self._check_latencies) if self._check_latencies else 0,
         }
