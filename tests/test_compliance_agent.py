@@ -7,6 +7,7 @@ Tests for the Compliance Agent that validates regulatory requirements.
 
 import pytest
 import asyncio
+from collections import deque
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone, timedelta, time
 from zoneinfo import ZoneInfo
@@ -609,11 +610,13 @@ class TestMonitoringLatency:
 
     def test_check_latencies_tracking(self, compliance_agent):
         """Test check latencies tracking."""
-        assert isinstance(compliance_agent._check_latencies, list)
+        # Memory safety: check_latencies uses deque instead of list
+        assert isinstance(compliance_agent._check_latencies, deque)
 
     def test_rejections_today_tracking(self, compliance_agent):
         """Test rejections tracking."""
-        assert isinstance(compliance_agent._rejections_today, list)
+        # Memory safety: rejections_today uses deque instead of list
+        assert isinstance(compliance_agent._rejections_today, deque)
 
     def test_latencies_capped(self, compliance_agent):
         """Test that latencies list is capped."""
@@ -861,7 +864,8 @@ class TestReportingDeadlines:
     def test_rejection_tracking_exists(self, compliance_agent):
         """Test rejection tracking for reporting."""
         assert hasattr(compliance_agent, "_rejections_today")
-        assert isinstance(compliance_agent._rejections_today, list)
+        # Memory safety: rejections_today uses deque instead of list
+        assert isinstance(compliance_agent._rejections_today, deque)
 
     def test_rejection_records_timestamp(self, compliance_agent):
         """Test rejection records include timestamp for reporting."""
@@ -883,7 +887,8 @@ class TestReportingDeadlines:
     def test_check_latency_tracking(self, compliance_agent):
         """Test compliance check latency tracking for reporting."""
         assert hasattr(compliance_agent, "_check_latencies")
-        assert isinstance(compliance_agent._check_latencies, list)
+        # Memory safety: check_latencies uses deque instead of list
+        assert isinstance(compliance_agent._check_latencies, deque)
 
     def test_latency_list_capping(self, compliance_agent):
         """Test latency list is capped to prevent memory issues."""

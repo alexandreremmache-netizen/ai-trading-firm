@@ -27,6 +27,7 @@ from core.events import (
     SignalDirection,
 )
 from core.demand_zones import DemandZoneDetector, CandleStick
+from core.session_checker import filter_signal_by_session, is_optimal_trading_time
 
 if TYPE_CHECKING:
     from core.event_bus import EventBus
@@ -104,6 +105,15 @@ class MomentumAgent(SignalAgent):
         self._zone_touch_threshold = config.parameters.get("zone_touch_threshold", 0.02)
         self._candle_period_seconds = config.parameters.get("candle_period_seconds", 300)  # 5-min candles
 
+        # Phase 2: RSI Trend Filter Mode
+        self._rsi_trend_filter_enabled = config.parameters.get("rsi_trend_filter_enabled", True)
+        self._rsi_trend_zone = config.parameters.get("rsi_trend_zone", (40, 60))
+        self._rsi_filter_mode = config.parameters.get("rsi_filter_mode", "adaptive")
+        # Modes: "trend" (only trade with trend), "reversal" (contrarian), "adaptive" (auto-switch)
+
+        # Minimum confidence threshold for signal generation
+        self._min_confidence = config.parameters.get("min_confidence", 0.75)
+
         # State per symbol
         self._symbols: dict[str, MomentumState] = {}
         self._max_lookback = max(self._slow_period, self._rsi_period) * 2
@@ -160,6 +170,12 @@ class MomentumAgent(SignalAgent):
         if len(state.prices) >= self._slow_period:
             signal = self._generate_momentum_signal(state)
             if signal:
+                # Filter weak signals by confidence threshold
+                if signal.confidence < self._min_confidence:
+                    logger.debug(
+                        f"Signal filtered: confidence {signal.confidence:.2f} < threshold {self._min_confidence}"
+                    )
+                    return
                 await self._event_bus.publish_signal(signal)
                 self._audit_logger.log_event(signal)
 
@@ -189,6 +205,14 @@ class MomentumAgent(SignalAgent):
         # Determine signal from indicator confluence
         signal_direction, strength, rationale = self._evaluate_indicators(state)
 
+        # Phase 2: Apply RSI trend filter
+        if self._rsi_trend_filter_enabled:
+            signal_direction, strength, filter_note = self._apply_rsi_trend_filter(
+                signal_direction, strength, state
+            )
+            if filter_note:
+                rationale = f"{rationale} | {filter_note}"
+
         # Only signal on direction change
         if signal_direction == state.last_signal:
             return None
@@ -198,10 +222,40 @@ class MomentumAgent(SignalAgent):
         if signal_direction == SignalDirection.FLAT:
             return None
 
+        # QUICK WIN #3: Check trading session quality
+        # Reduce or suppress signals during sub-optimal sessions
+        is_optimal, session_reason = is_optimal_trading_time(
+            state.symbol,
+            asset_class=self._get_asset_class(state.symbol),
+            config=self._config.parameters if hasattr(self._config, 'parameters') else {}
+        )
+        if not is_optimal and "Avoided" in session_reason:
+            logger.info(
+                f"Signal for {state.symbol} suppressed due to session: {session_reason}"
+            )
+            return None
+        elif not is_optimal:
+            # Reduce strength for sub-optimal sessions
+            strength = strength * 0.5
+            rationale = f"{rationale} [Session: {session_reason}]"
+
         # Build data sources tuple
         data_sources = ["ib_market_data", "momentum_indicator"]
         if self._demand_zones_enabled and (state.at_demand_zone or state.at_supply_zone):
             data_sources.extend(["demand_zone", "supply_zone", "price_level"])
+
+        # Calculate stop-loss and target price based on ATR (2% default if ATR not available)
+        current_price = prices[-1]
+        atr = self._calculate_atr(state) if hasattr(self, '_calculate_atr') else current_price * 0.02
+        stop_loss_distance = max(atr * 2.0, current_price * 0.02)  # 2x ATR or 2% minimum
+        target_distance = stop_loss_distance * 2.0  # 2:1 reward/risk ratio
+
+        if signal_direction == SignalDirection.LONG:
+            stop_loss = round(current_price - stop_loss_distance, 2)
+            target_price = round(current_price + target_distance, 2)
+        else:  # SHORT
+            stop_loss = round(current_price + stop_loss_distance, 2)
+            target_price = round(current_price - target_distance, 2)
 
         return SignalEvent(
             source_agent=self.name,
@@ -212,6 +266,8 @@ class MomentumAgent(SignalAgent):
             confidence=self._calculate_confidence(state),
             rationale=rationale,
             data_sources=tuple(data_sources),
+            target_price=target_price,
+            stop_loss=stop_loss,
         )
 
     def _calculate_rsi(self, state: MomentumState) -> float:
@@ -327,6 +383,40 @@ class MomentumAgent(SignalAgent):
         state.signal_ema = macd * signal_k + state.signal_ema * (1 - signal_k)
 
         return macd, state.signal_ema
+
+    def _calculate_atr(self, state: MomentumState, period: int = 14) -> float:
+        """
+        Calculate Average True Range (ATR) for volatility-based stop-loss.
+
+        ATR measures market volatility by decomposing the entire range of an asset
+        price for a period. Used for setting stop-loss distances.
+
+        True Range = max(High - Low, |High - Previous Close|, |Low - Previous Close|)
+        ATR = Moving average of True Range over N periods
+
+        Args:
+            state: MomentumState containing price history
+            period: ATR calculation period (default 14)
+
+        Returns:
+            ATR value (or 2% of current price if insufficient data)
+        """
+        prices = list(state.prices)
+        if len(prices) < period + 1:
+            # Not enough data, return 2% of current price as fallback
+            return prices[-1] * 0.02 if prices else 0.0
+
+        # Calculate True Range approximation using price changes
+        # (In a full implementation, we'd use High, Low, Close)
+        true_ranges = []
+        for i in range(1, min(period + 1, len(prices))):
+            tr = abs(prices[-i] - prices[-i - 1])
+            true_ranges.append(tr)
+
+        if not true_ranges:
+            return prices[-1] * 0.02
+
+        return sum(true_ranges) / len(true_ranges)
 
     def _evaluate_indicators(
         self,
@@ -504,3 +594,150 @@ class MomentumAgent(SignalAgent):
 
         current_price = state.prices[-1] if state.prices else 0
         return state.zone_detector.get_zone_analysis(current_price)
+
+    def _get_asset_class(self, symbol: str) -> str:
+        """
+        QUICK WIN #3: Determine asset class from symbol.
+
+        Used for session-based filtering.
+        """
+        symbol_upper = symbol.upper()
+
+        # Forex pairs
+        if len(symbol) == 6 and symbol_upper.isalpha():
+            return "forex"
+        if symbol_upper in ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD"]:
+            return "forex"
+
+        # Index futures
+        if symbol_upper in ["ES", "MES", "NQ", "MNQ", "YM", "MYM", "RTY", "M2K"]:
+            return "futures"
+
+        # Energy commodities
+        if symbol_upper in ["CL", "MCL", "NG", "RB", "HO"]:
+            return "commodities"
+
+        # Metals
+        if symbol_upper in ["GC", "MGC", "SI", "SIL", "HG", "PL"]:
+            return "commodities"
+
+        # Agriculture
+        if symbol_upper in ["ZC", "ZW", "ZS", "ZM", "ZL"]:
+            return "commodities"
+
+        # Bonds
+        if symbol_upper in ["ZB", "ZN", "ZF"]:
+            return "futures"
+
+        # Default to equity
+        return "equity"
+
+    # =========================================================================
+    # Phase 2: RSI Trend Filter Mode
+    # =========================================================================
+
+    def _get_rsi_filter_mode(self, rsi: float) -> str:
+        """
+        Determine RSI filter mode based on current RSI level.
+
+        Phase 2: RSI Trend Filter Mode
+        - Trend Zone (40-60): Only trade with MA trend direction
+        - Reversal Zone (<30 or >70): Contrarian signals allowed
+        - Transition Zone: Reduced signal strength
+
+        Args:
+            rsi: Current RSI value
+
+        Returns:
+            Filter mode: "trend", "reversal", or "transition"
+        """
+        if self._rsi_filter_mode != "adaptive":
+            return self._rsi_filter_mode
+
+        low_zone, high_zone = self._rsi_trend_zone
+
+        if rsi <= self._rsi_oversold or rsi >= self._rsi_overbought:
+            return "reversal"
+        elif low_zone <= rsi <= high_zone:
+            return "trend"
+        else:
+            return "transition"
+
+    def _apply_rsi_trend_filter(
+        self,
+        direction: SignalDirection,
+        strength: float,
+        state: MomentumState,
+    ) -> tuple[SignalDirection, float, str]:
+        """
+        Apply RSI trend filter to the signal.
+
+        Phase 2: RSI Trend Filter Mode
+        Based on research showing RSI works differently in trending vs ranging markets:
+        - In trending markets (RSI 40-60): Follow the trend, ignore RSI extremes
+        - In extreme RSI: Look for reversals
+
+        Args:
+            direction: Proposed signal direction
+            strength: Signal strength
+            state: MomentumState with RSI and MA data
+
+        Returns:
+            (adjusted_direction, adjusted_strength, filter_note)
+        """
+        if not self._rsi_trend_filter_enabled:
+            return direction, strength, ""
+
+        rsi = state.rsi
+        filter_mode = self._get_rsi_filter_mode(rsi)
+
+        ma_bullish = state.fast_ma > state.slow_ma
+
+        if filter_mode == "trend":
+            # In trend zone: only trade with MA direction
+            if direction == SignalDirection.LONG and not ma_bullish:
+                return SignalDirection.FLAT, 0.0, "RSI_FILTER: Long blocked (MA bearish in trend zone)"
+            elif direction == SignalDirection.SHORT and ma_bullish:
+                return SignalDirection.FLAT, 0.0, "RSI_FILTER: Short blocked (MA bullish in trend zone)"
+            else:
+                # Signal aligned with trend, boost slightly
+                return direction, min(1.0, strength * 1.1), "RSI_FILTER: Aligned with trend"
+
+        elif filter_mode == "reversal":
+            # In extreme RSI zone: contrarian signals more valid
+            if rsi <= self._rsi_oversold and direction == SignalDirection.LONG:
+                # Oversold + Long = good reversal setup
+                return direction, min(1.0, strength * 1.2), f"RSI_FILTER: Oversold reversal ({rsi:.1f})"
+            elif rsi >= self._rsi_overbought and direction == SignalDirection.SHORT:
+                # Overbought + Short = good reversal setup
+                return direction, min(1.0, strength * 1.2), f"RSI_FILTER: Overbought reversal ({rsi:.1f})"
+            elif rsi <= self._rsi_oversold and direction == SignalDirection.SHORT:
+                # Shorting into oversold - risky
+                return direction, strength * 0.5, f"RSI_FILTER: Caution shorting oversold ({rsi:.1f})"
+            elif rsi >= self._rsi_overbought and direction == SignalDirection.LONG:
+                # Buying into overbought - risky
+                return direction, strength * 0.5, f"RSI_FILTER: Caution buying overbought ({rsi:.1f})"
+
+        else:  # transition
+            # In transition zone: reduce all signals slightly
+            return direction, strength * 0.8, f"RSI_FILTER: Transition zone ({rsi:.1f})"
+
+        return direction, strength, ""
+
+    def get_rsi_filter_status(self, symbol: str) -> dict | None:
+        """Get RSI filter status for a symbol."""
+        if symbol not in self._symbols:
+            return None
+
+        state = self._symbols[symbol]
+        filter_mode = self._get_rsi_filter_mode(state.rsi)
+
+        return {
+            "enabled": self._rsi_trend_filter_enabled,
+            "rsi": state.rsi,
+            "filter_mode": filter_mode,
+            "ma_bullish": state.fast_ma > state.slow_ma,
+            "trend_zone": self._rsi_trend_zone,
+            "overbought": self._rsi_overbought,
+            "oversold": self._rsi_oversold,
+        }

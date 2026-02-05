@@ -40,13 +40,468 @@ NOTE: Not HFT - operates at 100ms+ latencies due to IB constraints.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
 
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# AVELLANEDA-STOIKOV OPTIMAL MARKET MAKING
+# =============================================================================
+
+
+@dataclass
+class AvellanedaStoikovParams:
+    """
+    Parameters for Avellaneda-Stoikov optimal market making model.
+
+    Reference: Avellaneda & Stoikov (2008) "High-frequency trading in a limit order book"
+
+    The model provides closed-form solutions for:
+    - Optimal reservation price (adjusted mid based on inventory)
+    - Optimal bid-ask spread (balancing adverse selection vs fill probability)
+
+    Key parameters:
+    - gamma: Risk aversion (higher = more conservative, wider spreads)
+    - sigma: Asset volatility (daily or appropriate timeframe)
+    - k: Order arrival intensity (orders per time unit)
+    - A: Order arrival sensitivity to spread (how much spread affects fills)
+    - T: Time horizon for optimization (fraction of day remaining)
+    """
+    gamma: float = 0.1          # Risk aversion parameter (typical: 0.01-1.0)
+    sigma: float = 0.02         # Daily volatility (e.g., 2% = 0.02)
+    k: float = 1.5              # Order arrival intensity (orders/time)
+    A: float = 140.0            # Arrival sensitivity parameter
+    T: float = 1.0              # Time horizon (1.0 = full day remaining)
+    max_inventory: int = 1000   # Maximum inventory limit
+    min_spread_bps: float = 5.0 # Minimum spread in basis points
+    tick_size: float = 0.01     # Price tick size
+
+    def validate(self) -> list[str]:
+        """Validate parameters and return list of issues."""
+        issues = []
+        if self.gamma <= 0:
+            issues.append("gamma must be positive")
+        if self.sigma <= 0:
+            issues.append("sigma must be positive")
+        if self.k <= 0:
+            issues.append("k (order arrival) must be positive")
+        if self.A <= 0:
+            issues.append("A (arrival sensitivity) must be positive")
+        if self.T <= 0 or self.T > 1:
+            issues.append("T must be in (0, 1]")
+        return issues
+
+
+@dataclass
+class ASQuoteResult:
+    """Result of Avellaneda-Stoikov quote calculation."""
+    reservation_price: float
+    optimal_spread: float
+    bid_price: float
+    ask_price: float
+    bid_delta: float        # Distance from mid to bid
+    ask_delta: float        # Distance from mid to ask
+    inventory_adjustment: float
+    spread_bps: float
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "reservation_price": self.reservation_price,
+            "optimal_spread": self.optimal_spread,
+            "bid_price": self.bid_price,
+            "ask_price": self.ask_price,
+            "bid_delta": self.bid_delta,
+            "ask_delta": self.ask_delta,
+            "inventory_adjustment": self.inventory_adjustment,
+            "spread_bps": self.spread_bps,
+            "timestamp": self.timestamp.isoformat(),
+        }
+
+
+def calculate_reservation_price(
+    mid: float,
+    inventory: int,
+    gamma: float,
+    sigma: float,
+    T: float,
+) -> float:
+    """
+    Calculate optimal reservation price (indifference price).
+
+    The reservation price is the price at which the market maker is
+    indifferent between holding or liquidating inventory.
+
+    Formula: r = s - q * gamma * sigma^2 * T
+
+    Where:
+    - s: Current mid price
+    - q: Current inventory
+    - gamma: Risk aversion
+    - sigma: Volatility
+    - T: Time remaining
+
+    Args:
+        mid: Current mid price
+        inventory: Current inventory (positive = long, negative = short)
+        gamma: Risk aversion parameter
+        sigma: Volatility (daily)
+        T: Time horizon (0 to 1)
+
+    Returns:
+        Reservation (indifference) price
+    """
+    # Inventory adjustment term
+    # When long (q > 0), reservation price < mid (want to sell)
+    # When short (q < 0), reservation price > mid (want to buy)
+    adjustment = inventory * gamma * (sigma ** 2) * T
+
+    reservation = mid - adjustment
+
+    return reservation
+
+
+def calculate_optimal_spread(
+    gamma: float,
+    sigma: float,
+    k: float,
+    A: float,
+) -> float:
+    """
+    Calculate optimal bid-ask spread.
+
+    The optimal spread balances:
+    - Wider spread = more profit per trade but fewer fills
+    - Narrower spread = more fills but less profit per trade
+
+    Formula: delta = gamma * sigma^2 * T + (2/gamma) * ln(1 + gamma/k)
+
+    For the simplified case (constant arrival rate):
+    delta = (2/gamma) * ln(1 + gamma/k)
+
+    The full formula includes time-dependent terms.
+
+    Args:
+        gamma: Risk aversion parameter
+        sigma: Volatility
+        k: Order arrival intensity
+        A: Arrival sensitivity (not used in basic formula)
+
+    Returns:
+        Optimal half-spread (bid and ask distance from reservation price)
+    """
+    # Basic spread component from order arrival
+    if gamma > 0 and k > 0:
+        spread_component = (2 / gamma) * math.log(1 + gamma / k)
+    else:
+        spread_component = 0.01  # Default minimum
+
+    # Volatility component
+    vol_component = gamma * (sigma ** 2)
+
+    optimal_spread = spread_component + vol_component
+
+    return optimal_spread
+
+
+def calculate_optimal_quotes(
+    mid: float,
+    inventory: int,
+    params: AvellanedaStoikovParams,
+) -> ASQuoteResult:
+    """
+    Calculate optimal bid and ask prices using Avellaneda-Stoikov model.
+
+    This is the main entry point for A-S quote generation.
+
+    Args:
+        mid: Current mid price
+        inventory: Current inventory position
+        params: A-S model parameters
+
+    Returns:
+        ASQuoteResult with optimal quotes
+    """
+    # Validate parameters
+    issues = params.validate()
+    if issues:
+        logger.warning(f"A-S parameter issues: {issues}")
+
+    # Calculate reservation price
+    reservation = calculate_reservation_price(
+        mid=mid,
+        inventory=inventory,
+        gamma=params.gamma,
+        sigma=params.sigma,
+        T=params.T,
+    )
+
+    # Calculate optimal spread
+    half_spread = calculate_optimal_spread(
+        gamma=params.gamma,
+        sigma=params.sigma,
+        k=params.k,
+        A=params.A,
+    ) / 2
+
+    # Apply minimum spread
+    min_half_spread = (params.min_spread_bps / 10000) * mid / 2
+    half_spread = max(half_spread, min_half_spread)
+
+    # Calculate bid and ask
+    bid_price = reservation - half_spread
+    ask_price = reservation + half_spread
+
+    # Round to tick size
+    bid_price = round(bid_price / params.tick_size) * params.tick_size
+    ask_price = round(ask_price / params.tick_size) * params.tick_size
+
+    # Ensure positive spread
+    if ask_price <= bid_price:
+        ask_price = bid_price + params.tick_size
+
+    # Calculate metrics
+    inventory_adjustment = mid - reservation
+    spread_bps = (ask_price - bid_price) / mid * 10000
+
+    return ASQuoteResult(
+        reservation_price=reservation,
+        optimal_spread=ask_price - bid_price,
+        bid_price=bid_price,
+        ask_price=ask_price,
+        bid_delta=mid - bid_price,
+        ask_delta=ask_price - mid,
+        inventory_adjustment=inventory_adjustment,
+        spread_bps=spread_bps,
+    )
+
+
+def update_inventory_risk(
+    current_inventory: int,
+    max_inventory: int,
+) -> tuple[float, str]:
+    """
+    Calculate inventory risk level and recommended action.
+
+    Args:
+        current_inventory: Current position
+        max_inventory: Maximum allowed inventory
+
+    Returns:
+        (risk_level, action) tuple
+        - risk_level: 0.0 (safe) to 1.0 (at limit)
+        - action: Recommended action string
+    """
+    if max_inventory <= 0:
+        return 1.0, "invalid_max_inventory"
+
+    inventory_ratio = abs(current_inventory) / max_inventory
+    risk_level = min(inventory_ratio, 1.0)
+
+    if risk_level < 0.5:
+        action = "normal_quoting"
+    elif risk_level < 0.8:
+        action = "reduce_exposure"
+    elif risk_level < 1.0:
+        action = "aggressive_reduction"
+    else:
+        action = "stop_quoting"
+
+    return risk_level, action
+
+
+class AvellanedaStoikovMM:
+    """
+    Avellaneda-Stoikov Market Making strategy class.
+
+    Provides a complete implementation of the A-S optimal market making
+    framework with practical extensions for live trading.
+
+    Features:
+    - Dynamic parameter adjustment based on market conditions
+    - Inventory risk management
+    - Volatility regime adaptation
+    - Quote caching for efficiency
+    """
+
+    def __init__(
+        self,
+        params: AvellanedaStoikovParams | None = None,
+        volatility_lookback: int = 20,
+        adapt_to_volatility: bool = True,
+    ):
+        """
+        Initialize A-S market maker.
+
+        Args:
+            params: A-S parameters (uses defaults if None)
+            volatility_lookback: Periods for volatility estimation
+            adapt_to_volatility: Whether to adjust params for volatility
+        """
+        self.params = params or AvellanedaStoikovParams()
+        self.volatility_lookback = volatility_lookback
+        self.adapt_to_volatility = adapt_to_volatility
+
+        # State tracking
+        self._returns_history: list[float] = []
+        self._current_volatility: float = self.params.sigma
+        self._last_quote: ASQuoteResult | None = None
+
+    def update_volatility(self, price: float) -> None:
+        """
+        Update volatility estimate with new price.
+
+        Args:
+            price: Latest price observation
+        """
+        if len(self._returns_history) > 0:
+            # Simple return calculation
+            # In production, use log returns for accuracy
+            last_price = self._returns_history[-1]
+            if last_price > 0:
+                ret = (price - last_price) / last_price
+                self._returns_history.append(price)
+
+                # Keep only recent history
+                if len(self._returns_history) > self.volatility_lookback + 1:
+                    self._returns_history = self._returns_history[-self.volatility_lookback - 1:]
+
+                # Calculate realized volatility
+                if len(self._returns_history) >= 3:
+                    returns = []
+                    for i in range(1, len(self._returns_history)):
+                        r = (self._returns_history[i] - self._returns_history[i-1]) / self._returns_history[i-1]
+                        returns.append(r)
+                    if returns:
+                        self._current_volatility = float(np.std(returns)) * np.sqrt(252)
+        else:
+            self._returns_history.append(price)
+
+    def update_time_horizon(self, time_remaining_fraction: float) -> None:
+        """
+        Update time horizon parameter.
+
+        Typically called periodically during the trading day.
+
+        Args:
+            time_remaining_fraction: Fraction of trading day remaining (0-1)
+        """
+        self.params.T = max(0.01, min(1.0, time_remaining_fraction))
+
+    def generate_quotes(
+        self,
+        mid: float,
+        inventory: int,
+        override_params: AvellanedaStoikovParams | None = None,
+    ) -> ASQuoteResult:
+        """
+        Generate optimal quotes using A-S model.
+
+        Args:
+            mid: Current mid price
+            inventory: Current inventory position
+            override_params: Optional parameter override
+
+        Returns:
+            ASQuoteResult with optimal bid/ask
+        """
+        params = override_params or self.params
+
+        # Optionally adapt sigma to current volatility
+        if self.adapt_to_volatility and self._current_volatility > 0:
+            params = AvellanedaStoikovParams(
+                gamma=params.gamma,
+                sigma=self._current_volatility,
+                k=params.k,
+                A=params.A,
+                T=params.T,
+                max_inventory=params.max_inventory,
+                min_spread_bps=params.min_spread_bps,
+                tick_size=params.tick_size,
+            )
+
+        result = calculate_optimal_quotes(mid, inventory, params)
+        self._last_quote = result
+
+        return result
+
+    def get_inventory_risk(self, inventory: int) -> tuple[float, str]:
+        """
+        Get current inventory risk level.
+
+        Args:
+            inventory: Current position
+
+        Returns:
+            (risk_level, action) tuple
+        """
+        return update_inventory_risk(inventory, self.params.max_inventory)
+
+    def should_quote(
+        self,
+        inventory: int,
+        market_spread_bps: float,
+    ) -> tuple[bool, str]:
+        """
+        Determine if quoting is advisable.
+
+        Args:
+            inventory: Current inventory
+            market_spread_bps: Current market spread in bps
+
+        Returns:
+            (should_quote, reason) tuple
+        """
+        risk_level, action = self.get_inventory_risk(inventory)
+
+        if action == "stop_quoting":
+            return False, "inventory_at_limit"
+
+        if market_spread_bps < self.params.min_spread_bps * 0.8:
+            return False, "market_spread_too_tight"
+
+        return True, "ok"
+
+    def calculate_expected_pnl(
+        self,
+        inventory: int,
+        fill_probability: float = 0.5,
+    ) -> float:
+        """
+        Estimate expected P&L from current quotes.
+
+        This is a simplified calculation assuming symmetric fills.
+
+        Args:
+            inventory: Current inventory
+            fill_probability: Probability of fill (0-1)
+
+        Returns:
+            Expected P&L in price units
+        """
+        if self._last_quote is None:
+            return 0.0
+
+        # Spread capture
+        spread_capture = self._last_quote.optimal_spread * fill_probability
+
+        # Inventory cost (variance of P&L from inventory)
+        inventory_cost = (
+            abs(inventory) *
+            self.params.gamma *
+            (self.params.sigma ** 2) *
+            self.params.T
+        )
+
+        return spread_capture - inventory_cost
 
 
 @dataclass
@@ -64,7 +519,7 @@ class Quote:
 class MarketMakingSignal:
     """Market making signal output."""
     symbol: str
-    action: str  # "quote", "cancel", "adjust"
+    action: str  # "quote", "cancel", "adjust", "exit"
     quote: Quote | None
     inventory_action: str | None  # "reduce_long", "reduce_short", None
     urgency: float  # 0 to 1
@@ -75,6 +530,23 @@ class MarketMakingSignal:
     toxic_flow_detected: bool = False
     # P2: Volatility-adjusted quotes
     volatility_adjustment_bps: float = 0.0  # Spread adjustment for volatility
+    # RISK-001: Stop-loss levels
+    inventory_stop_loss: int | None = None     # Max inventory before forced exit
+    pnl_stop_loss: float | None = None         # P&L threshold for stop
+    # RISK-002: Maximum holding period
+    max_position_duration_seconds: int = 300   # Max time to hold inventory position
+    # RISK-003: Strategy-level risk limit
+    strategy_max_loss_pct: float = 2.0         # Max daily loss for MM strategy
+    daily_loss_limit: float | None = None      # Absolute daily loss limit
+    # RISK-004: Regime detection
+    market_regime: str = "normal"              # "normal", "trending", "volatile", "illiquid"
+    regime_suitable: bool = True               # False if regime unfavorable for MM
+    regime_warning: str | None = None
+    # RISK-005: Exit signal info
+    is_exit_signal: bool = False
+    exit_reason: str | None = None
+    # RISK-006: Spread floor
+    min_profitable_spread_bps: float = 5.0     # Minimum spread to be profitable
 
 
 class MarketMakingStrategy:
@@ -122,6 +594,25 @@ class MarketMakingStrategy:
         self._vol_spread_multiplier = config.get("vol_spread_multiplier", 1.5)
         self._base_volatility = config.get("base_volatility", 0.01)  # 1% daily vol baseline
         self._max_vol_adjustment_bps = config.get("max_vol_adjustment_bps", 20)
+
+        # RISK-001: Stop-loss settings
+        self._inventory_stop_loss_pct = config.get("inventory_stop_loss_pct", 120)  # 120% of max
+        self._pnl_stop_loss = config.get("pnl_stop_loss", -1000.0)  # Absolute P&L stop
+
+        # RISK-002: Maximum holding period
+        self._max_position_duration_seconds = config.get("max_position_duration_seconds", 300)
+
+        # RISK-003: Strategy-level risk limit
+        self._strategy_max_loss_pct = config.get("strategy_max_loss_pct", 2.0)  # 2% daily max
+        self._daily_loss_limit = config.get("daily_loss_limit", -5000.0)  # Absolute daily limit
+
+        # RISK-004: Regime detection thresholds
+        self._trending_threshold = config.get("trending_threshold", 0.02)  # 2% move = trending
+        self._volatile_threshold = config.get("volatile_threshold", 2.0)  # 2x normal vol
+        self._illiquidity_threshold = config.get("illiquidity_threshold", 0.5)  # 50% of normal volume
+
+        # RISK-006: Spread floor
+        self._min_profitable_spread_bps = config.get("min_profitable_spread_bps", 5.0)
 
     def estimate_fair_value(
         self,
@@ -474,6 +965,23 @@ class MarketMakingStrategy:
         if adverse_selection_risk > 0.5:
             urgency = max(urgency, adverse_selection_risk)
 
+        # RISK-004: Detect market regime (simplified - would need price history)
+        # For now, use volatility and adverse selection as proxy
+        vol_ratio = volatility / self._base_volatility if self._base_volatility > 0 else 1.0
+
+        if toxic_flow_detected:
+            market_regime = "trending"
+            regime_suitable = False
+            regime_warning = "Toxic flow detected - possible trending market"
+        elif vol_ratio > self._volatile_threshold:
+            market_regime = "volatile"
+            regime_suitable = False
+            regime_warning = f"High volatility ({vol_ratio:.1f}x normal)"
+        else:
+            market_regime = "normal"
+            regime_suitable = True
+            regime_warning = None
+
         return MarketMakingSignal(
             symbol=symbol,
             action="quote",
@@ -484,6 +992,160 @@ class MarketMakingStrategy:
             adverse_selection_risk=adverse_selection_risk,
             toxic_flow_detected=toxic_flow_detected,
             volatility_adjustment_bps=vol_adj_bps,
+            inventory_stop_loss=int(self._max_inventory * (self._inventory_stop_loss_pct / 100)),
+            pnl_stop_loss=self._pnl_stop_loss,
+            max_position_duration_seconds=self._max_position_duration_seconds,
+            strategy_max_loss_pct=self._strategy_max_loss_pct,
+            daily_loss_limit=self._daily_loss_limit,
+            market_regime=market_regime,
+            regime_suitable=regime_suitable,
+            regime_warning=regime_warning,
+            is_exit_signal=False,
+            exit_reason=None,
+            min_profitable_spread_bps=self._min_profitable_spread_bps,
+        )
+
+    def detect_mm_regime(
+        self,
+        price_change_pct: float,
+        volatility: float,
+        volume_ratio: float
+    ) -> tuple[str, bool, str | None]:
+        """
+        RISK-004: Detect market regime suitability for market making.
+
+        Market making works best in:
+        - Ranging/mean-reverting markets (NOT trending)
+        - Normal volatility (NOT too high or low)
+        - Adequate liquidity
+
+        Args:
+            price_change_pct: Recent price change as percentage
+            volatility: Current volatility relative to baseline
+            volume_ratio: Current volume / average volume
+
+        Returns:
+            (regime, is_suitable, warning)
+        """
+        vol_ratio = volatility / self._base_volatility if self._base_volatility > 0 else 1.0
+
+        # Detect trending market
+        if abs(price_change_pct) > self._trending_threshold:
+            regime = "trending"
+            suitable = False
+            warning = f"Market trending ({price_change_pct:.1%}) - MM at risk of adverse selection"
+
+        # Detect high volatility
+        elif vol_ratio > self._volatile_threshold:
+            regime = "volatile"
+            suitable = False
+            warning = f"High volatility ({vol_ratio:.1f}x normal) - widen spreads or pause"
+
+        # Detect illiquidity
+        elif volume_ratio < self._illiquidity_threshold:
+            regime = "illiquid"
+            suitable = False
+            warning = f"Low liquidity ({volume_ratio:.1%} of normal) - wide spreads expected"
+
+        else:
+            regime = "normal"
+            suitable = True
+            warning = None
+
+        return regime, suitable, warning
+
+    def check_exit_conditions(
+        self,
+        inventory: int,
+        current_pnl: float,
+        daily_pnl: float,
+        position_duration_seconds: int,
+        adverse_selection_risk: float
+    ) -> tuple[bool, str | None]:
+        """
+        RISK-005: Check if exit conditions are met for MM position.
+
+        Args:
+            inventory: Current inventory position
+            current_pnl: Current position P&L
+            daily_pnl: Daily strategy P&L
+            position_duration_seconds: How long current inventory held
+            adverse_selection_risk: Current adverse selection risk score
+
+        Returns:
+            (should_exit, reason)
+        """
+        # Check inventory stop-loss
+        inventory_stop = int(self._max_inventory * (self._inventory_stop_loss_pct / 100))
+        if abs(inventory) >= inventory_stop:
+            return True, "inventory_stop_loss_exceeded"
+
+        # Check P&L stop-loss
+        if current_pnl <= self._pnl_stop_loss:
+            return True, "pnl_stop_loss_triggered"
+
+        # Check daily loss limit
+        if daily_pnl <= self._daily_loss_limit:
+            return True, "daily_loss_limit_reached"
+
+        # Check max position duration
+        if position_duration_seconds >= self._max_position_duration_seconds:
+            return True, "max_position_duration_exceeded"
+
+        # Check adverse selection - exit if too high
+        if adverse_selection_risk > self._toxic_flow_threshold * 1.5:
+            return True, "extreme_adverse_selection"
+
+        return False, None
+
+    def generate_exit_signal(
+        self,
+        symbol: str,
+        exit_reason: str,
+        inventory: int,
+        fair_value: float
+    ) -> MarketMakingSignal:
+        """
+        RISK-005: Generate exit signal for MM position.
+
+        Args:
+            symbol: Trading symbol
+            exit_reason: Reason for exit
+            inventory: Current inventory
+            fair_value: Current fair value
+
+        Returns:
+            MarketMakingSignal with exit action
+        """
+        # Determine inventory action based on current position
+        if inventory > 0:
+            inventory_action = "reduce_long"
+        elif inventory < 0:
+            inventory_action = "reduce_short"
+        else:
+            inventory_action = None
+
+        return MarketMakingSignal(
+            symbol=symbol,
+            action="exit",
+            quote=None,
+            inventory_action=inventory_action,
+            urgency=1.0,  # High urgency for exits
+            inventory_skew_bps=0.0,
+            adverse_selection_risk=0.0,
+            toxic_flow_detected=False,
+            volatility_adjustment_bps=0.0,
+            inventory_stop_loss=int(self._max_inventory * (self._inventory_stop_loss_pct / 100)),
+            pnl_stop_loss=self._pnl_stop_loss,
+            max_position_duration_seconds=self._max_position_duration_seconds,
+            strategy_max_loss_pct=self._strategy_max_loss_pct,
+            daily_loss_limit=self._daily_loss_limit,
+            market_regime="unknown",
+            regime_suitable=False,
+            regime_warning=f"Exit: {exit_reason}",
+            is_exit_signal=True,
+            exit_reason=exit_reason,
+            min_profitable_spread_bps=self._min_profitable_spread_bps,
         )
 
     def should_quote(
@@ -492,6 +1154,7 @@ class MarketMakingStrategy:
         our_spread: float,
         inventory: int,
         adverse_selection_risk: float = 0.0,
+        market_regime: str = "normal"
     ) -> bool:
         """
         Determine if we should be quoting.
@@ -501,8 +1164,19 @@ class MarketMakingStrategy:
         - Inventory is at limit
         - Market is too fast (adverse selection)
         - Adverse selection risk is too high (P2)
+        - Market regime is unfavorable (RISK-004)
         """
+        # RISK-004: Check market regime
+        if market_regime in ["trending", "volatile"]:
+            logger.info(f"Not quoting due to {market_regime} market regime")
+            return False
+
         # Check if spread is profitable
+        min_spread = self._min_profitable_spread_bps / 10000
+        if current_spread < min_spread:
+            logger.debug(f"Spread {current_spread:.4f} below minimum {min_spread:.4f}")
+            return False
+
         if current_spread < our_spread * 0.8:
             return False  # Can't compete
 

@@ -132,7 +132,6 @@ class AgentFactory:
         from agents.stat_arb_agent import StatArbAgent
         from agents.momentum_agent import MomentumAgent
         from agents.market_making_agent import MarketMakingAgent
-        from agents.options_vol_agent import OptionsVolAgent
 
         agents_config = self._config.agents_config
         signal_agents = []
@@ -195,20 +194,6 @@ class AgentFactory:
             signal_agents.append(mm_agent)
             self._event_bus.register_signal_agent("MarketMakingAgent")
 
-        # Options Vol Agent
-        if agents_config.get("options_vol", {}).get("enabled", True):
-            options_agent = OptionsVolAgent(
-                config=AgentConfig(
-                    name="OptionsVolAgent",
-                    enabled=True,
-                    parameters=agents_config.get("options_vol", {}),
-                ),
-                event_bus=self._event_bus,
-                audit_logger=self._audit_logger,
-            )
-            signal_agents.append(options_agent)
-            self._event_bus.register_signal_agent("OptionsVolAgent")
-
         # Sentiment Agent (LLM-powered news analysis)
         if agents_config.get("sentiment", {}).get("enabled", True):
             from agents.sentiment_agent import SentimentAgent
@@ -268,6 +253,110 @@ class AgentFactory:
             signal_agents.append(forecasting_agent)
             self._event_bus.register_signal_agent("ForecastingAgent")
 
+        # ============ Phase 6 New Strategy Agents ============
+
+        # Session Agent (Opening Range Breakout, Session Momentum)
+        if agents_config.get("session", {}).get("enabled", True):
+            from agents.session_agent import SessionAgent
+
+            session_config = agents_config.get("session", {})
+            session_agent = SessionAgent(
+                config=AgentConfig(
+                    name="SessionAgent",
+                    enabled=True,
+                    parameters=session_config,
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+            )
+            signal_agents.append(session_agent)
+            self._event_bus.register_signal_agent("SessionAgent")
+
+        # Index Spread Agent (MES/MNQ pairs trading)
+        if agents_config.get("index_spread", {}).get("enabled", True):
+            from agents.index_spread_agent import IndexSpreadAgent
+
+            spread_config = agents_config.get("index_spread", {})
+            spread_agent = IndexSpreadAgent(
+                config=AgentConfig(
+                    name="IndexSpreadAgent",
+                    enabled=True,
+                    parameters=spread_config,
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+            )
+            signal_agents.append(spread_agent)
+            self._event_bus.register_signal_agent("IndexSpreadAgent")
+
+        # TTM Squeeze Agent (Volatility Breakout)
+        if agents_config.get("ttm_squeeze", {}).get("enabled", True):
+            from agents.ttm_squeeze_agent import TTMSqueezeAgent
+
+            squeeze_config = agents_config.get("ttm_squeeze", {})
+            squeeze_agent = TTMSqueezeAgent(
+                config=AgentConfig(
+                    name="TTMSqueezeAgent",
+                    enabled=True,
+                    parameters=squeeze_config,
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+            )
+            signal_agents.append(squeeze_agent)
+            self._event_bus.register_signal_agent("TTMSqueezeAgent")
+
+        # Event-Driven Agent (FOMC, NFP, CPI)
+        if agents_config.get("event_driven", {}).get("enabled", True):
+            from agents.event_driven_agent import EventDrivenAgent
+
+            event_config = agents_config.get("event_driven", {})
+            event_agent = EventDrivenAgent(
+                config=AgentConfig(
+                    name="EventDrivenAgent",
+                    enabled=True,
+                    parameters=event_config,
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+            )
+            signal_agents.append(event_agent)
+            self._event_bus.register_signal_agent("EventDrivenAgent")
+
+        # Mean Reversion Agent (RSI, Bollinger Bands, Z-score)
+        if agents_config.get("mean_reversion", {}).get("enabled", True):
+            from agents.mean_reversion_agent import MeanReversionAgent
+
+            reversion_config = agents_config.get("mean_reversion", {})
+            reversion_agent = MeanReversionAgent(
+                config=AgentConfig(
+                    name="MeanReversionAgent",
+                    enabled=True,
+                    parameters=reversion_config,
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+            )
+            signal_agents.append(reversion_agent)
+            self._event_bus.register_signal_agent("MeanReversionAgent")
+
+        # MACD-v Agent (Volatility-Normalized MACD)
+        if agents_config.get("macdv", {}).get("enabled", True):
+            from agents.macdv_agent import MACDvAgent
+
+            macdv_config = agents_config.get("macdv", {})
+            macdv_agent = MACDvAgent(
+                config=AgentConfig(
+                    name="MACDvAgent",
+                    enabled=True,
+                    parameters=macdv_config,
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+            )
+            signal_agents.append(macdv_agent)
+            self._event_bus.register_signal_agent("MACDvAgent")
+
         logger.info(f"Created {len(signal_agents)} signal agents")
         return signal_agents
 
@@ -293,6 +382,10 @@ class AgentFactory:
         logger.info("Creating Risk agent...")
 
         risk_config = self._config.risk_config
+        # Get drawdown config (may be nested dict or flat)
+        drawdown_config = risk_config.get("drawdown", {})
+        max_drawdown_pct = risk_config.get("max_drawdown_pct", 10.0)
+
         risk_params = {
             "limits": {
                 "max_position_size_pct": risk_config.get("max_position_size_pct", 5.0),
@@ -300,13 +393,20 @@ class AgentFactory:
                 "max_leverage": risk_config.get("max_leverage", 2.0),
                 "max_portfolio_var_pct": risk_config.get("max_portfolio_var_pct", 2.0),
                 "max_daily_loss_pct": risk_config.get("max_daily_loss_pct", 3.0),
-                "max_drawdown_pct": risk_config.get("max_drawdown_pct", 10.0),
+                "max_drawdown_pct": max_drawdown_pct,
             },
             "rate_limits": {
                 "max_orders_per_minute": risk_config.get("max_orders_per_minute", 10),
                 "min_order_interval_ms": risk_config.get("min_order_interval_ms", 100),
             },
             "sector_map": self._config.sector_map,
+            # Pass drawdown config with halt_pct defaulting to max_drawdown_pct
+            "drawdown": {
+                "warning_pct": drawdown_config.get("warning_pct", 5.0),
+                "reduce_pct": drawdown_config.get("reduce_pct", 7.5),
+                "halt_pct": drawdown_config.get("halt_pct", max_drawdown_pct),
+                "position_reduction_factor": drawdown_config.get("position_reduction_factor", 0.5),
+            },
         }
 
         return RiskAgent(

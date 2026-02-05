@@ -61,6 +61,40 @@ class MacroIndicators:
     unemployment: float = 0.0
 
 
+@dataclass
+class MacroSignal:
+    """Macro strategy signal output with risk controls."""
+    direction: str  # "risk_on", "risk_off", "neutral", "exit"
+    strength: float  # 0 to 1
+    regime: MacroRegime
+    sector_signals: dict[str, float]
+    risk_allocation: float
+    # RISK-001: Portfolio-level stop-loss and take-profit
+    stop_loss_pct: float = 5.0              # Portfolio-level stop
+    take_profit_pct: float = 10.0           # Portfolio-level take profit
+    # RISK-001b: Position-level stop-loss and take-profit (NEW)
+    position_stop_loss: float | None = None   # Absolute price level for stop-loss
+    position_take_profit: float | None = None # Absolute price level for take-profit
+    position_stop_loss_pct: float = 2.0       # Position-level stop % (default 2%)
+    position_take_profit_pct: float = 4.0     # Position-level TP % (default 4%)
+    entry_price: float | None = None          # Reference price for SL/TP calculation
+    reward_risk_ratio: float = 2.0            # R:R ratio (TP/SL distance)
+    # RISK-002: Maximum holding period
+    max_holding_days: int = 90              # Macro positions held longer
+    # RISK-003: Strategy-level risk limit
+    strategy_max_loss_pct: float = 10.0     # Max loss for macro strategy
+    # RISK-004: Regime suitability
+    regime_confidence: float = 0.0          # Confidence in regime classification
+    regime_warning: str | None = None       # Warning about regime transition
+    # RISK-005: Exit signal info
+    is_exit_signal: bool = False
+    exit_reason: str | None = None
+    # Additional macro-specific risk metrics
+    vix_level: float = 0.0                  # Current VIX
+    yield_curve_slope: float = 0.0          # 10y - 2y spread
+    credit_spread_percentile: float = 50.0  # Credit spread percentile
+
+
 class MacroStrategy:
     """
     Macro Strategy Implementation.
@@ -82,6 +116,31 @@ class MacroStrategy:
         self._current_indicators = MacroIndicators()
         self._current_regime = MacroRegime.EXPANSION
         self._regime_history: list[MacroRegime] = []
+
+        # RISK-001: Portfolio-level stop-loss and take-profit settings
+        self._stop_loss_pct = config.get("stop_loss_pct", 5.0)
+        self._take_profit_pct = config.get("take_profit_pct", 10.0)
+
+        # RISK-001b: Position-level stop-loss and take-profit (NEW)
+        self._position_stop_loss_pct = config.get("position_stop_loss_pct", 2.0)  # 2% per position
+        self._position_take_profit_pct = config.get("position_take_profit_pct", 4.0)  # 4% per position
+        self._min_reward_risk_ratio = config.get("min_reward_risk_ratio", 2.0)  # Minimum R:R ratio
+
+        # RISK-002: Maximum holding period
+        self._max_holding_days = config.get("max_holding_days", 90)  # Macro = longer horizon
+
+        # RISK-003: Strategy-level risk limit
+        self._strategy_max_loss_pct = config.get("strategy_max_loss_pct", 10.0)
+
+        # RISK-004: Regime detection thresholds
+        self._vix_crisis_threshold = config.get("vix_crisis_threshold", 30)
+        self._vix_elevated_threshold = config.get("vix_elevated_threshold", 20)
+        self._yield_curve_inversion_threshold = config.get("yield_curve_inversion_threshold", -0.1)
+        self._regime_change_lookback = config.get("regime_change_lookback", 5)  # Days to confirm regime
+
+        # Track regime stability
+        self._regime_change_counter = 0
+        self._last_confirmed_regime = MacroRegime.EXPANSION
 
     def update_indicator(self, name: str, value: float) -> None:
         """Update a macro indicator value."""
@@ -134,6 +193,369 @@ class MacroStrategy:
             MacroRegime.RECOVERY: 0.8,
         }
         return regime_allocations.get(self._current_regime, 0.5)
+
+    def calculate_regime_confidence(self) -> float:
+        """
+        RISK-004: Calculate confidence in current regime classification.
+
+        Returns confidence score 0-1 based on indicator alignment.
+        """
+        ind = self._current_indicators
+        yield_spread = ind.yield_10y - ind.yield_2y
+
+        # Count supporting indicators for current regime
+        supporting_indicators = 0
+        total_indicators = 4
+
+        if self._current_regime == MacroRegime.EXPANSION:
+            if yield_spread > 0.5:
+                supporting_indicators += 1
+            if ind.vix < 15:
+                supporting_indicators += 1
+            if ind.pmi > 50:
+                supporting_indicators += 1
+            if ind.unemployment < 5:
+                supporting_indicators += 1
+        elif self._current_regime == MacroRegime.RECESSION:
+            if yield_spread < 0:
+                supporting_indicators += 1
+            if ind.vix > 25:
+                supporting_indicators += 1
+            if ind.pmi < 50:
+                supporting_indicators += 1
+            if ind.unemployment > 6:
+                supporting_indicators += 1
+        elif self._current_regime == MacroRegime.SLOWDOWN:
+            if yield_spread < 0.5:
+                supporting_indicators += 1
+            if ind.vix > 20:
+                supporting_indicators += 1
+            if ind.pmi < 52:
+                supporting_indicators += 1
+        else:  # RECOVERY
+            if yield_spread > 0:
+                supporting_indicators += 1
+            if ind.vix < 20:
+                supporting_indicators += 1
+            if ind.pmi > 48:
+                supporting_indicators += 1
+
+        return supporting_indicators / total_indicators
+
+    def detect_regime_transition(self) -> tuple[bool, str | None]:
+        """
+        RISK-004: Detect if regime is transitioning (unstable).
+
+        Returns:
+            (is_transitioning, warning_message)
+        """
+        # Check recent regime history for instability
+        if len(self._regime_history) < 3:
+            return False, None
+
+        recent_regimes = self._regime_history[-3:]
+        unique_regimes = len(set(recent_regimes))
+
+        if unique_regimes >= 2:
+            return True, f"Regime instability: {unique_regimes} regimes in last 3 observations"
+
+        # Check for VIX spike indicating potential regime change
+        if self._current_indicators.vix > self._vix_crisis_threshold:
+            return True, f"VIX at {self._current_indicators.vix:.1f} - potential crisis"
+
+        # Check yield curve inversion
+        yield_spread = self._current_indicators.yield_10y - self._current_indicators.yield_2y
+        if yield_spread < self._yield_curve_inversion_threshold:
+            return True, f"Yield curve inverted ({yield_spread:.2f}) - recession warning"
+
+        return False, None
+
+    def check_exit_conditions(
+        self,
+        current_pnl_pct: float,
+        days_held: int,
+        entry_regime: MacroRegime
+    ) -> tuple[bool, str | None]:
+        """
+        RISK-005: Check if exit conditions are met for macro position.
+
+        Args:
+            current_pnl_pct: Current P&L as percentage
+            days_held: Number of days position held
+            entry_regime: Regime when position was entered
+
+        Returns:
+            (should_exit, reason)
+        """
+        # Check max loss
+        if current_pnl_pct <= -self._stop_loss_pct:
+            return True, "stop_loss_triggered"
+
+        # Check take profit
+        if current_pnl_pct >= self._take_profit_pct:
+            return True, "take_profit_triggered"
+
+        # Check max holding period
+        if days_held >= self._max_holding_days:
+            return True, "max_holding_period_reached"
+
+        # Check regime change - exit if regime changed significantly
+        if entry_regime != self._current_regime:
+            # Allow certain transitions without exit
+            allowed_transitions = {
+                (MacroRegime.EXPANSION, MacroRegime.SLOWDOWN): True,  # Expected
+                (MacroRegime.RECOVERY, MacroRegime.EXPANSION): True,  # Positive
+                (MacroRegime.RECESSION, MacroRegime.RECOVERY): True,  # Positive
+            }
+            if (entry_regime, self._current_regime) not in allowed_transitions:
+                return True, f"regime_changed_from_{entry_regime.value}_to_{self._current_regime.value}"
+
+        return False, None
+
+    def calculate_position_stops(
+        self,
+        current_price: float,
+        direction: str,
+        custom_sl_pct: float | None = None,
+        custom_tp_pct: float | None = None,
+    ) -> tuple[float | None, float | None, float, bool]:
+        """
+        Calculate position-level stop-loss and take-profit prices.
+
+        Args:
+            current_price: Current market price (entry price reference)
+            direction: "risk_on" (long), "risk_off" (short), or "neutral"
+            custom_sl_pct: Override stop-loss percentage (optional)
+            custom_tp_pct: Override take-profit percentage (optional)
+
+        Returns:
+            Tuple of (stop_loss_price, take_profit_price, reward_risk_ratio, is_valid_rr)
+            - stop_loss_price: Absolute price for stop-loss
+            - take_profit_price: Absolute price for take-profit
+            - reward_risk_ratio: Actual R:R ratio
+            - is_valid_rr: True if R:R meets minimum requirement
+        """
+        if current_price <= 0 or direction == "neutral":
+            return None, None, 0.0, False
+
+        sl_pct = custom_sl_pct if custom_sl_pct is not None else self._position_stop_loss_pct
+        tp_pct = custom_tp_pct if custom_tp_pct is not None else self._position_take_profit_pct
+
+        # Calculate SL/TP based on direction
+        if direction == "risk_on":  # Long position
+            stop_loss = round(current_price * (1 - sl_pct / 100), 2)
+            take_profit = round(current_price * (1 + tp_pct / 100), 2)
+            sl_distance = current_price - stop_loss
+            tp_distance = take_profit - current_price
+        else:  # risk_off = Short position
+            stop_loss = round(current_price * (1 + sl_pct / 100), 2)
+            take_profit = round(current_price * (1 - tp_pct / 100), 2)
+            sl_distance = stop_loss - current_price
+            tp_distance = current_price - take_profit
+
+        # Calculate reward/risk ratio
+        reward_risk_ratio = tp_distance / sl_distance if sl_distance > 0 else 0.0
+        is_valid_rr = reward_risk_ratio >= self._min_reward_risk_ratio
+
+        return stop_loss, take_profit, reward_risk_ratio, is_valid_rr
+
+    def generate_signal_with_stops(
+        self,
+        current_price: float,
+    ) -> MacroSignal | None:
+        """
+        Generate macro signal with position-level stop-loss and take-profit.
+
+        This method combines regime analysis with individual position risk controls.
+        Rejects trades that don't meet minimum R:R ratio requirements.
+
+        Args:
+            current_price: Current market price for SL/TP calculation
+
+        Returns:
+            MacroSignal with position stops, or None if R:R ratio is insufficient
+        """
+        regime = self.analyze_regime()
+        risk_allocation = self.get_risk_allocation()
+        sector_signals = self.get_sector_signals()
+
+        # Determine direction based on regime
+        if regime in [MacroRegime.EXPANSION, MacroRegime.RECOVERY]:
+            direction = "risk_on"
+            strength = 0.8 if regime == MacroRegime.EXPANSION else 0.6
+        elif regime == MacroRegime.RECESSION:
+            direction = "risk_off"
+            strength = 0.8
+        else:  # SLOWDOWN
+            direction = "neutral"
+            strength = 0.4
+
+        # Calculate regime confidence
+        regime_confidence = self.calculate_regime_confidence()
+        strength *= regime_confidence
+
+        # Check for regime transition
+        is_transitioning, transition_warning = self.detect_regime_transition()
+        if is_transitioning:
+            strength *= 0.5
+
+        # Calculate position-level stops
+        stop_loss, take_profit, rr_ratio, is_valid_rr = self.calculate_position_stops(
+            current_price=current_price,
+            direction=direction,
+        )
+
+        # RISK FILTER: Reject poor R:R trades
+        if direction != "neutral" and not is_valid_rr:
+            logger.info(
+                f"MacroStrategy: Rejecting signal - R:R ratio {rr_ratio:.2f} "
+                f"< minimum {self._min_reward_risk_ratio:.2f}"
+            )
+            return None
+
+        # Calculate macro-specific risk metrics
+        yield_curve_slope = self._current_indicators.yield_10y - self._current_indicators.yield_2y
+
+        return MacroSignal(
+            direction=direction,
+            strength=strength,
+            regime=regime,
+            sector_signals=sector_signals,
+            risk_allocation=risk_allocation,
+            stop_loss_pct=self._stop_loss_pct,
+            take_profit_pct=self._take_profit_pct,
+            position_stop_loss=stop_loss,
+            position_take_profit=take_profit,
+            position_stop_loss_pct=self._position_stop_loss_pct,
+            position_take_profit_pct=self._position_take_profit_pct,
+            entry_price=current_price,
+            reward_risk_ratio=rr_ratio,
+            max_holding_days=self._max_holding_days,
+            strategy_max_loss_pct=self._strategy_max_loss_pct,
+            regime_confidence=regime_confidence,
+            regime_warning=transition_warning,
+            is_exit_signal=False,
+            exit_reason=None,
+            vix_level=self._current_indicators.vix,
+            yield_curve_slope=yield_curve_slope,
+            credit_spread_percentile=50.0,
+        )
+
+    def generate_macro_signal(self, current_price: float | None = None) -> MacroSignal:
+        """
+        Generate comprehensive macro signal with risk controls.
+
+        Args:
+            current_price: Optional current price for position-level SL/TP.
+                          If provided, includes position stops.
+
+        Returns:
+            MacroSignal with direction, strength, and risk parameters
+        """
+        regime = self.analyze_regime()
+        risk_allocation = self.get_risk_allocation()
+        sector_signals = self.get_sector_signals()
+
+        # Determine direction based on regime
+        if regime in [MacroRegime.EXPANSION, MacroRegime.RECOVERY]:
+            direction = "risk_on"
+            strength = 0.8 if regime == MacroRegime.EXPANSION else 0.6
+        elif regime == MacroRegime.RECESSION:
+            direction = "risk_off"
+            strength = 0.8
+        else:  # SLOWDOWN
+            direction = "neutral"
+            strength = 0.4
+
+        # Calculate regime confidence
+        regime_confidence = self.calculate_regime_confidence()
+
+        # Adjust strength based on confidence
+        strength *= regime_confidence
+
+        # Check for regime transition
+        is_transitioning, transition_warning = self.detect_regime_transition()
+        if is_transitioning:
+            strength *= 0.5  # Reduce conviction during transitions
+
+        # Calculate position-level stops if price provided
+        stop_loss = None
+        take_profit = None
+        rr_ratio = self._position_take_profit_pct / self._position_stop_loss_pct
+
+        if current_price is not None and current_price > 0 and direction != "neutral":
+            stop_loss, take_profit, rr_ratio, _ = self.calculate_position_stops(
+                current_price=current_price,
+                direction=direction,
+            )
+
+        # Calculate macro-specific risk metrics
+        yield_curve_slope = self._current_indicators.yield_10y - self._current_indicators.yield_2y
+
+        return MacroSignal(
+            direction=direction,
+            strength=strength,
+            regime=regime,
+            sector_signals=sector_signals,
+            risk_allocation=risk_allocation,
+            stop_loss_pct=self._stop_loss_pct,
+            take_profit_pct=self._take_profit_pct,
+            position_stop_loss=stop_loss,
+            position_take_profit=take_profit,
+            position_stop_loss_pct=self._position_stop_loss_pct,
+            position_take_profit_pct=self._position_take_profit_pct,
+            entry_price=current_price,
+            reward_risk_ratio=rr_ratio,
+            max_holding_days=self._max_holding_days,
+            strategy_max_loss_pct=self._strategy_max_loss_pct,
+            regime_confidence=regime_confidence,
+            regime_warning=transition_warning,
+            is_exit_signal=False,
+            exit_reason=None,
+            vix_level=self._current_indicators.vix,
+            yield_curve_slope=yield_curve_slope,
+            credit_spread_percentile=50.0,  # Placeholder - would need historical data
+        )
+
+    def generate_exit_signal(
+        self,
+        exit_reason: str,
+        entry_price: float | None = None,
+    ) -> MacroSignal:
+        """
+        RISK-005: Generate exit signal for macro position.
+
+        Args:
+            exit_reason: Reason for exit
+            entry_price: Original entry price (for reference)
+
+        Returns:
+            MacroSignal with exit direction
+        """
+        return MacroSignal(
+            direction="exit",
+            strength=1.0,  # High strength for exits
+            regime=self._current_regime,
+            sector_signals={},
+            risk_allocation=0.0,
+            stop_loss_pct=self._stop_loss_pct,
+            take_profit_pct=self._take_profit_pct,
+            position_stop_loss=None,  # No SL/TP for exit signals
+            position_take_profit=None,
+            position_stop_loss_pct=self._position_stop_loss_pct,
+            position_take_profit_pct=self._position_take_profit_pct,
+            entry_price=entry_price,
+            reward_risk_ratio=0.0,
+            max_holding_days=self._max_holding_days,
+            strategy_max_loss_pct=self._strategy_max_loss_pct,
+            regime_confidence=self.calculate_regime_confidence(),
+            regime_warning=None,
+            is_exit_signal=True,
+            exit_reason=exit_reason,
+            vix_level=self._current_indicators.vix,
+            yield_curve_slope=self._current_indicators.yield_10y - self._current_indicators.yield_2y,
+            credit_spread_percentile=50.0,
+        )
 
     def get_sector_signals(self) -> dict[str, float]:
         """

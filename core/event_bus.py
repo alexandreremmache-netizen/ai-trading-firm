@@ -30,9 +30,67 @@ from core.events import Event, EventType, SignalEvent
 
 if TYPE_CHECKING:
     from core.event_persistence import EventPersistence, PersistenceConfig
+    from core.immutable_ledger import ImmutableAuditLedger
 
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Agent Criticality and Quorum Configuration
+# ============================================================================
+
+class AgentCriticality(Enum):
+    """
+    Agent criticality levels for quorum-based barrier.
+
+    CRITICAL agents MUST respond before barrier release.
+    HIGH agents are preferred but not strictly required.
+    NORMAL agents contribute to quorum but can be skipped.
+    """
+    CRITICAL = "critical"  # Must respond: MacroAgent, RiskAgent
+    HIGH = "high"          # MomentumAgent, StatArbAgent, MACDvAgent
+    NORMAL = "normal"      # Rest
+
+
+@dataclass
+class QuorumConfig:
+    """Configuration for quorum-based signal barrier."""
+    threshold: float = 0.8  # 80% of agents must respond for quorum
+    fast_path_timeout_ms: int = 100  # Fast path - release if quorum met
+    full_timeout_seconds: float = 10.0  # Full barrier timeout
+    require_critical: bool = True  # All CRITICAL agents must respond
+    confidence_decay_per_second: float = 0.05  # Decay rate for fallback signals
+
+
+@dataclass
+class AgentTimeoutConfig:
+    """Per-agent timeout configuration."""
+    default_timeout_ms: int = 200
+    agent_timeouts_ms: dict[str, int] = field(default_factory=dict)
+
+    def get_timeout_ms(self, agent_name: str) -> int:
+        """Get timeout for specific agent."""
+        return self.agent_timeouts_ms.get(agent_name, self.default_timeout_ms)
+
+
+# Default agent criticality mappings
+DEFAULT_AGENT_CRITICALITY: dict[str, AgentCriticality] = {
+    "MacroAgent": AgentCriticality.CRITICAL,
+    "RiskAgent": AgentCriticality.CRITICAL,
+    "MomentumAgent": AgentCriticality.HIGH,
+    "StatArbAgent": AgentCriticality.HIGH,
+    "MACDvAgent": AgentCriticality.HIGH,
+    "TTMSqueezeAgent": AgentCriticality.HIGH,
+    "IndexSpreadAgent": AgentCriticality.NORMAL,
+    "SessionAgent": AgentCriticality.NORMAL,
+    "EventDrivenAgent": AgentCriticality.NORMAL,
+    "MeanReversionAgent": AgentCriticality.NORMAL,
+    "MarketMakingAgent": AgentCriticality.NORMAL,
+    "SentimentAgent": AgentCriticality.NORMAL,
+    "ChartAnalysisAgent": AgentCriticality.NORMAL,
+    "ForecastingAgent": AgentCriticality.NORMAL,
+}
 
 
 # ============================================================================
@@ -232,10 +290,16 @@ HIGH_PRIORITY_EVENT_TYPES = {
 @dataclass
 class SignalBarrier:
     """
-    Synchronization barrier for signal aggregation.
+    Synchronization barrier for signal aggregation with quorum support.
 
     Collects signals from all strategy agents before CIO decision.
-    Implements fan-in pattern with timeout.
+    Implements fan-in pattern with timeout and quorum-based early release.
+
+    Features:
+    - Quorum-based fast path (100ms): Release when 80% of agents respond
+    - Agent criticality: CRITICAL agents must always respond
+    - Per-agent timeouts: Different timeouts for different agent types
+    - Fallback signals: Use previous signals with decayed confidence
 
     Thread-safety: Uses internal lock to prevent race conditions during
     rapid signal arrival (fixes #S2).
@@ -245,9 +309,20 @@ class SignalBarrier:
     barrier_id: int = 0  # Unique ID to track barrier versions
     signals: dict[str, SignalEvent] = field(default_factory=dict)
     _event: asyncio.Event = field(default_factory=asyncio.Event)
+    _quorum_event: asyncio.Event = field(default_factory=asyncio.Event)
     _created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _is_closed: bool = False  # Prevent late signals after barrier is consumed
+
+    # Quorum configuration
+    quorum_config: QuorumConfig = field(default_factory=QuorumConfig)
+    agent_criticality: dict[str, AgentCriticality] = field(default_factory=dict)
+
+    # Fallback signals cache (last known good signals)
+    _last_known_signals: dict[str, SignalEvent] = field(default_factory=dict)
+
+    # Track missing critical agents after barrier close
+    _missing_critical_agents: list[str] = field(default_factory=list)
 
     async def add_signal(self, agent_name: str, signal: SignalEvent) -> bool:
         """
@@ -265,10 +340,17 @@ class SignalBarrier:
                 return False
 
             self.signals[agent_name] = signal
+            # Also store as last known for future fallback
+            self._last_known_signals[agent_name] = signal
 
             if self._is_complete_unsafe():
                 self._event.set()
+                self._quorum_event.set()
                 return True
+
+            # Check if quorum is met (triggers fast path)
+            if self._is_quorum_met_unsafe():
+                self._quorum_event.set()
 
         return False
 
@@ -276,10 +358,43 @@ class SignalBarrier:
         """Check if all expected agents have reported (no lock, internal use)."""
         return set(self.signals.keys()) >= self.expected_agents
 
+    def _is_quorum_met_unsafe(self) -> bool:
+        """
+        Check if quorum is met (no lock, internal use).
+
+        Quorum conditions:
+        1. All CRITICAL agents have responded
+        2. At least quorum_threshold (80%) of agents have responded
+        """
+        received = set(self.signals.keys())
+        total_expected = len(self.expected_agents)
+
+        if total_expected == 0:
+            return True
+
+        # Check if all CRITICAL agents have responded
+        if self.quorum_config.require_critical:
+            for agent_name in self.expected_agents:
+                criticality = self.agent_criticality.get(
+                    agent_name,
+                    DEFAULT_AGENT_CRITICALITY.get(agent_name, AgentCriticality.NORMAL)
+                )
+                if criticality == AgentCriticality.CRITICAL and agent_name not in received:
+                    return False
+
+        # Check quorum threshold
+        quorum_count = int(total_expected * self.quorum_config.threshold)
+        return len(received) >= quorum_count
+
     async def is_complete(self) -> bool:
         """Check if all expected agents have reported (thread-safe)."""
         async with self._lock:
             return self._is_complete_unsafe()
+
+    async def is_quorum_met(self) -> bool:
+        """Check if quorum threshold is met (thread-safe)."""
+        async with self._lock:
+            return self._is_quorum_met_unsafe()
 
     async def wait(self) -> dict[str, SignalEvent]:
         """
@@ -307,6 +422,157 @@ class SignalBarrier:
             self._is_closed = True
             return dict(self.signals)  # Return a copy
 
+    async def wait_with_quorum(
+        self,
+        fallback_signals: dict[str, SignalEvent] | None = None,
+    ) -> dict[str, SignalEvent]:
+        """
+        Wait with quorum-based fast path (thread-safe).
+
+        Two-phase waiting:
+        1. Fast path (100ms): Wait for quorum (80% + all CRITICAL)
+        2. Full timeout: Wait for remaining agents or timeout
+
+        Missing agents get fallback signals with decayed confidence.
+
+        Args:
+            fallback_signals: Previous cycle's signals for timeout fallback
+
+        Returns:
+            Complete signal dict (may include fallback signals)
+        """
+        fast_path_timeout = self.quorum_config.fast_path_timeout_ms / 1000.0
+
+        # Phase 1: Fast path - wait for quorum
+        try:
+            await asyncio.wait_for(
+                self._quorum_event.wait(),
+                timeout=fast_path_timeout
+            )
+            # Quorum met on fast path
+            async with self._lock:
+                if self._is_complete_unsafe():
+                    # All agents responded
+                    logger.debug(
+                        f"Barrier {self.barrier_id}: All {len(self.signals)} agents "
+                        f"responded within fast path"
+                    )
+                else:
+                    # Quorum met but not complete - log and continue with partial
+                    missing = self.expected_agents - set(self.signals.keys())
+                    logger.debug(
+                        f"Barrier {self.barrier_id}: Quorum met in fast path "
+                        f"({len(self.signals)}/{len(self.expected_agents)}). "
+                        f"Missing: {missing}"
+                    )
+        except asyncio.TimeoutError:
+            # Fast path failed - continue to full timeout
+            logger.debug(
+                f"Barrier {self.barrier_id}: Fast path timeout, "
+                f"waiting full {self.timeout_seconds}s"
+            )
+
+            # Phase 2: Wait for remaining time
+            remaining_timeout = self.timeout_seconds - fast_path_timeout
+            if remaining_timeout > 0:
+                try:
+                    await asyncio.wait_for(
+                        self._event.wait(),
+                        timeout=remaining_timeout
+                    )
+                except asyncio.TimeoutError:
+                    async with self._lock:
+                        missing = self.expected_agents - set(self.signals.keys())
+                    logger.warning(
+                        f"Signal barrier {self.barrier_id} full timeout. "
+                        f"Received {len(self.signals)}/{len(self.expected_agents)} signals. "
+                        f"Missing: {missing}"
+                    )
+
+        # Close barrier and prepare final signals
+        async with self._lock:
+            self._is_closed = True
+            final_signals = dict(self.signals)
+
+            # Check for missing CRITICAL agents - NO FALLBACK ALLOWED
+            # INVARIANT: If a CRITICAL agent is missing, barrier is INVALID
+            missing_agents = self.expected_agents - set(final_signals.keys())
+            missing_critical = []
+
+            for agent_name in missing_agents:
+                criticality = self.agent_criticality.get(
+                    agent_name,
+                    DEFAULT_AGENT_CRITICALITY.get(agent_name, AgentCriticality.NORMAL)
+                )
+
+                if criticality == AgentCriticality.CRITICAL:
+                    # CRITICAL agent missing - NO FALLBACK, mark as barrier failure
+                    missing_critical.append(agent_name)
+                    logger.error(
+                        f"BARRIER INVALID: CRITICAL agent {agent_name} did not respond. "
+                        f"No fallback allowed for CRITICAL agents."
+                    )
+                else:
+                    # Non-critical agent - fallback allowed with decayed confidence
+                    fallback = self._get_fallback_signal(
+                        agent_name,
+                        fallback_signals or self._last_known_signals
+                    )
+                    if fallback:
+                        final_signals[agent_name] = fallback
+                        logger.debug(
+                            f"Using fallback signal for {agent_name} "
+                            f"(confidence: {fallback.confidence:.2f})"
+                        )
+
+            # Store missing critical for caller to check
+            self._missing_critical_agents = missing_critical
+
+            if missing_critical:
+                logger.critical(
+                    f"BARRIER FAILURE: {len(missing_critical)} CRITICAL agents missing: "
+                    f"{missing_critical}. Decision should NOT proceed."
+                )
+
+            return final_signals
+
+    def _get_fallback_signal(
+        self,
+        agent_name: str,
+        fallback_cache: dict[str, SignalEvent],
+    ) -> SignalEvent | None:
+        """
+        Get a fallback signal for a missing agent.
+
+        Returns the previous signal with decayed confidence based on age.
+        """
+        if agent_name not in fallback_cache:
+            return None
+
+        original = fallback_cache[agent_name]
+        age_seconds = (datetime.now(timezone.utc) - original.timestamp).total_seconds()
+
+        # Decay confidence based on age
+        decay_factor = max(
+            0.1,  # Minimum 10% of original confidence
+            1.0 - (age_seconds * self.quorum_config.confidence_decay_per_second)
+        )
+        decayed_confidence = original.confidence * decay_factor
+
+        # Create a copy with decayed confidence
+        # Note: We create a modified copy rather than modifying the original
+        from dataclasses import replace
+        try:
+            fallback = replace(
+                original,
+                confidence=decayed_confidence,
+                # Mark as fallback in metadata if possible
+            )
+            return fallback
+        except Exception:
+            # If replace fails, return original (shouldn't happen)
+            return original
+
     async def get_signals_copy(self) -> dict[str, SignalEvent]:
         """Get a copy of current signals (thread-safe)."""
         async with self._lock:
@@ -320,6 +586,49 @@ class SignalBarrier:
     def is_closed(self) -> bool:
         """Check if barrier is closed."""
         return self._is_closed
+
+    def is_valid(self) -> bool:
+        """
+        Check if barrier result is valid for decision-making.
+
+        INVARIANT: A barrier is INVALID if any CRITICAL agent is missing.
+        The CIO must NOT make a decision based on an invalid barrier.
+
+        Returns:
+            True if all CRITICAL agents responded, False otherwise
+        """
+        return len(self._missing_critical_agents) == 0
+
+    def get_missing_critical_agents(self) -> list[str]:
+        """Get list of missing CRITICAL agents (empty if barrier is valid)."""
+        return list(self._missing_critical_agents)
+
+    def get_quorum_status(self) -> dict[str, Any]:
+        """Get current quorum status for monitoring."""
+        received = set(self.signals.keys())
+        total = len(self.expected_agents)
+        quorum_count = int(total * self.quorum_config.threshold)
+
+        # Check critical agents
+        missing_critical = []
+        for agent_name in self.expected_agents:
+            criticality = self.agent_criticality.get(
+                agent_name,
+                DEFAULT_AGENT_CRITICALITY.get(agent_name, AgentCriticality.NORMAL)
+            )
+            if criticality == AgentCriticality.CRITICAL and agent_name not in received:
+                missing_critical.append(agent_name)
+
+        return {
+            "barrier_id": self.barrier_id,
+            "received": len(received),
+            "expected": total,
+            "quorum_threshold": self.quorum_config.threshold,
+            "quorum_count_needed": quorum_count,
+            "quorum_met": len(received) >= quorum_count and not missing_critical,
+            "missing_critical": missing_critical,
+            "missing_all": list(self.expected_agents - received),
+        }
 
 
 class EventBus:
@@ -351,8 +660,20 @@ class EventBus:
         dead_letter_config: DeadLetterQueueConfig | None = None,
         compression_config: CompressionConfig | None = None,
         replay_config: ReplayConfig | None = None,
+        quorum_config: QuorumConfig | None = None,
+        agent_timeout_config: AgentTimeoutConfig | None = None,
+        agent_criticality: dict[str, AgentCriticality] | None = None,
+        audit_ledger: "ImmutableAuditLedger | None" = None,
     ):
         self._backpressure = backpressure_config or BackpressureConfig(max_queue_size=max_queue_size)
+
+        # Quorum and per-agent timeout configuration
+        self._quorum_config = quorum_config or QuorumConfig()
+        self._agent_timeout_config = agent_timeout_config or AgentTimeoutConfig()
+        self._agent_criticality = agent_criticality or dict(DEFAULT_AGENT_CRITICALITY)
+
+        # Last known signals for fallback (per agent)
+        self._last_known_signals: dict[str, SignalEvent] = {}
         self._subscribers: dict[EventType, list[Callable[[Event], Coroutine[Any, Any, None]]]] = defaultdict(list)
         self._queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=self._backpressure.max_queue_size)
         self._signal_timeout = signal_timeout
@@ -434,10 +755,29 @@ class EventBus:
         self._replay_in_progress = False
         self._replay_task: asyncio.Task | None = None
 
+        # MiFID II Compliance: Immutable audit ledger integration
+        self._audit_ledger = audit_ledger
+        if audit_ledger:
+            logger.info("Audit ledger connected - all events will be recorded for compliance")
+
     def register_signal_agent(self, agent_name: str) -> None:
         """Register an agent as a signal producer."""
         self._signal_agents.add(agent_name)
         logger.info(f"Registered signal agent: {agent_name}")
+
+    def set_audit_ledger(self, ledger: "ImmutableAuditLedger") -> None:
+        """
+        Set the audit ledger for MiFID II compliance (dependency injection).
+
+        Can be called after construction to wire up the ledger.
+        """
+        self._audit_ledger = ledger
+        if ledger:
+            logger.info("Audit ledger connected - all events will be recorded for compliance")
+
+    def get_audit_ledger(self) -> "ImmutableAuditLedger | None":
+        """Get the audit ledger if configured."""
+        return self._audit_ledger
 
     def _is_duplicate(self, event_id: str) -> bool:
         """
@@ -684,6 +1024,35 @@ class EventBus:
                 self._metrics.max_queue_size_reached = current_size
             self._event_history.append(event)
 
+        # MiFID II Compliance: Log to immutable audit ledger
+        if self._audit_ledger:
+            try:
+                # Convert event to dict for ledger storage
+                event_data = {
+                    "event_id": event.event_id,
+                    "timestamp": event.timestamp.isoformat() if hasattr(event, 'timestamp') else datetime.now(timezone.utc).isoformat(),
+                    "symbol": getattr(event, 'symbol', None),
+                }
+                # Add type-specific fields
+                if hasattr(event, 'direction'):
+                    event_data["direction"] = event.direction.value if hasattr(event.direction, 'value') else str(event.direction)
+                if hasattr(event, 'confidence'):
+                    event_data["confidence"] = event.confidence
+                if hasattr(event, 'quantity'):
+                    event_data["quantity"] = event.quantity
+                if hasattr(event, 'price'):
+                    event_data["price"] = event.price
+
+                source_agent = getattr(event, 'source_agent', 'EventBus')
+                self._audit_ledger.append(
+                    event_type=event.event_type.value,
+                    source_agent=source_agent,
+                    event_data=event_data,
+                )
+            except Exception as e:
+                # Never block event processing for audit logging failure
+                logger.warning(f"Audit ledger logging failed: {e}")
+
         # P2: Record for replay capability
         self._record_for_replay(event)
 
@@ -769,8 +1138,12 @@ class EventBus:
         Publish a signal event with barrier synchronization (race-condition safe).
 
         Signals are collected until barrier is complete or timeout.
+        Now supports quorum-based early release.
         """
         await self.publish(signal)
+
+        # Store as last known signal for fallback
+        self._last_known_signals[signal.source_agent] = signal
 
         async with self._lock:
             # If barrier is closed or doesn't exist, create new one
@@ -781,6 +1154,9 @@ class EventBus:
                     expected_agents=self._signal_agents.copy(),
                     timeout_seconds=self._barrier_timeout,
                     barrier_id=self._barrier_id_counter,
+                    quorum_config=self._quorum_config,
+                    agent_criticality=self._agent_criticality,
+                    _last_known_signals=dict(self._last_known_signals),
                 )
                 logger.debug(f"Created new signal barrier {self._barrier_id_counter}")
 
@@ -789,13 +1165,19 @@ class EventBus:
         # Add signal outside the event bus lock (barrier has its own lock)
         await barrier.add_signal(signal.source_agent, signal)
 
-    async def wait_for_signals(self) -> dict[str, SignalEvent]:
+    async def wait_for_signals(self, use_quorum: bool = True) -> dict[str, SignalEvent]:
         """
         Wait for signal barrier to complete (fan-in, race-condition safe).
 
         Called by CIO agent before making decisions.
         The barrier is atomically consumed and reset to prevent race conditions
         where late signals go to the wrong barrier.
+
+        Args:
+            use_quorum: If True, use quorum-based fast path (default: True)
+
+        Returns:
+            Dict of agent_name -> SignalEvent (may include fallback signals)
         """
         async with self._lock:
             if self._current_barrier is None:
@@ -810,7 +1192,16 @@ class EventBus:
         logger.debug(f"CIO waiting for signal barrier {barrier_id}")
 
         # Wait outside the lock so signals can still be added
-        signals = await barrier.wait()
+        if use_quorum:
+            signals = await barrier.wait_with_quorum(
+                fallback_signals=self._last_known_signals
+            )
+        else:
+            signals = await barrier.wait()
+
+        # Update last known signals cache
+        for agent_name, signal in signals.items():
+            self._last_known_signals[agent_name] = signal
 
         # Now atomically reset the barrier
         async with self._lock:
@@ -820,6 +1211,30 @@ class EventBus:
                 logger.debug(f"Signal barrier {barrier_id} consumed with {len(signals)} signals")
 
         return signals
+
+    def get_quorum_config(self) -> QuorumConfig:
+        """Get current quorum configuration."""
+        return self._quorum_config
+
+    def set_quorum_config(self, config: QuorumConfig) -> None:
+        """Update quorum configuration."""
+        self._quorum_config = config
+        logger.info(
+            f"Quorum config updated: threshold={config.threshold}, "
+            f"fast_path={config.fast_path_timeout_ms}ms"
+        )
+
+    def set_agent_criticality(self, agent_name: str, criticality: AgentCriticality) -> None:
+        """Set criticality level for an agent."""
+        self._agent_criticality[agent_name] = criticality
+        logger.debug(f"Agent {agent_name} criticality set to {criticality.value}")
+
+    def get_agent_criticality(self, agent_name: str) -> AgentCriticality:
+        """Get criticality level for an agent."""
+        return self._agent_criticality.get(
+            agent_name,
+            DEFAULT_AGENT_CRITICALITY.get(agent_name, AgentCriticality.NORMAL)
+        )
 
     async def get_barrier_status(self) -> dict[str, Any]:
         """
@@ -938,7 +1353,7 @@ class EventBus:
                 continue
             except Exception as e:
                 self._consecutive_errors += 1
-                logger.error(f"Error processing event: {e}")
+                logger.exception(f"Error processing event: {e}")  # Full stack trace for debugging
 
     async def stop(self) -> None:
         """Stop the event bus gracefully."""

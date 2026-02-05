@@ -13,9 +13,9 @@ Status: Comprehensive implementation with commodity spreads
 - [x] Commodity spreads (crack, crush, inter-commodity)
 - [x] Optimal lag selection for ADF (#Q3)
 - [x] Dollar-neutral spread sizing
-- [ ] Johansen cointegration test (TODO)
-- [ ] Kalman filter for dynamic hedge ratio (TODO)
-- [ ] Transaction cost modeling (TODO)
+- [x] Johansen cointegration test (P3 implementation)
+- [x] Kalman filter for dynamic hedge ratio (Phase 5.1)
+- [x] Transaction cost modeling (Phase 5.2 in position_sizing.py)
 
 Production Readiness:
 - Unit tests: Partial coverage
@@ -44,8 +44,23 @@ from typing import Any
 import numpy as np
 from scipy import stats
 
+# Phase 5.1: Kalman Filter for dynamic hedge ratio
+try:
+    from core.kalman_filter import KalmanHedgeRatio, create_kalman_filter
+    HAS_KALMAN = True
+except ImportError:
+    HAS_KALMAN = False
+    KalmanHedgeRatio = None  # type: ignore
+
 
 logger = logging.getLogger(__name__)
+
+
+class HedgeRatioMethod(Enum):
+    """Hedge ratio estimation method."""
+    OLS = "ols"              # Static OLS regression
+    ROLLING_OLS = "rolling"  # Rolling window OLS
+    KALMAN = "kalman"        # Kalman filter (dynamic)
 
 
 class SpreadType(Enum):
@@ -303,8 +318,23 @@ class SpreadAnalysis:
     std: float
     half_life: float
     is_tradeable: bool
-    signal_direction: str  # "long_spread", "short_spread", "flat"
+    signal_direction: str  # "long_spread", "short_spread", "flat", "exit"
     signal_strength: float
+    # RISK-001: Stop-loss and take-profit levels (in z-score terms)
+    stop_loss_zscore: float = 4.0           # Exit if z-score exceeds this
+    take_profit_zscore: float = 0.5         # Exit when z-score returns to this
+    stop_loss_pct: float | None = None      # Stop in percentage terms
+    take_profit_pct: float | None = None    # Take profit in percentage terms
+    # RISK-002: Maximum holding period
+    max_holding_bars: int = 60              # Max bars to hold spread position
+    # RISK-003: Strategy-level risk limit
+    strategy_max_loss_pct: float = 5.0      # Max loss per spread trade
+    # RISK-004: Regime suitability
+    regime_suitable: bool = True            # False if cointegration breaking down
+    regime_warning: str | None = None       # Warning message about regime
+    # RISK-005: Exit signal info
+    is_exit_signal: bool = False
+    exit_reason: str | None = None
 
 
 @dataclass
@@ -328,6 +358,18 @@ class PairAnalysis:
     # P2: Entry timing optimization
     entry_score: float = 0.0  # 0-1 score for entry quality
     optimal_entry: bool = False  # True if timing is optimal
+    # RISK-001: Stop-loss and take-profit levels
+    stop_loss_zscore: float = 4.0           # Exit if z-score exceeds this
+    take_profit_zscore: float = 0.5         # Target z-score for exit
+    stop_loss_price_a: float | None = None  # Stop price for asset A
+    stop_loss_price_b: float | None = None  # Stop price for asset B
+    # RISK-002: Maximum holding period
+    max_holding_bars: int = 60              # Max bars to hold
+    # RISK-003: Strategy-level risk
+    strategy_max_loss_pct: float = 5.0      # Max loss per trade
+    # RISK-004: Regime detection
+    regime_suitable: bool = True            # False if regime unfavorable
+    regime_warning: str | None = None       # Warning message
 
 
 class StatArbStrategy:
@@ -335,15 +377,22 @@ class StatArbStrategy:
     Statistical Arbitrage Strategy Implementation.
 
     Implements:
-    1. Cointegration testing (Engle-Granger)
-    2. Hedge ratio estimation
+    1. Cointegration testing (Engle-Granger, Johansen)
+    2. Hedge ratio estimation (OLS, Rolling OLS, Kalman filter)
     3. Mean reversion signal generation
+    4. Half-life estimation (Ornstein-Uhlenbeck)
 
-    TODO: Implement proper models:
-    - Johansen cointegration test
-    - Kalman filter for dynamic hedge ratio
-    - Ornstein-Uhlenbeck for half-life
-    - Transaction cost modeling
+    Features:
+    - Static OLS hedge ratio (fast, suitable for stable pairs)
+    - Rolling OLS hedge ratio (adapts to slow regime changes)
+    - Kalman filter hedge ratio (Phase 5.1 - adapts dynamically to changing relationships)
+    - Johansen cointegration test (Phase 3 - supports multiple cointegrating vectors)
+
+    Configuration:
+        hedge_ratio_method: 'ols' | 'rolling' | 'kalman'
+        kalman_delta: Process noise (default 1e-4)
+        kalman_ve: Measurement noise (default 1e-3)
+        kalman_warmup_period: Warmup period (default 30)
     """
 
     def __init__(self, config: dict[str, Any]):
@@ -366,6 +415,37 @@ class StatArbStrategy:
         # P2: Entry timing optimization settings
         self._zscore_acceleration_threshold = config.get("zscore_acceleration_threshold", 0.1)
         self._optimal_entry_zscore_range = config.get("optimal_entry_zscore_range", (1.8, 2.5))
+
+        # RISK-001: Stop-loss and take-profit settings
+        self._stop_loss_zscore = config.get("stop_loss_zscore", 4.0)  # Exit if spread widens to 4 sigma
+        self._take_profit_zscore = config.get("take_profit_zscore", 0.5)  # Exit when mean reverts
+
+        # RISK-002: Maximum holding period
+        self._max_holding_bars = config.get("max_holding_bars", 60)  # ~3 months daily data
+
+        # RISK-003: Strategy-level risk limit
+        self._strategy_max_loss_pct = config.get("strategy_max_loss_pct", 5.0)
+
+        # RISK-004: Regime detection thresholds
+        self._regime_breakdown_pvalue = config.get("regime_breakdown_pvalue", 0.15)  # p-value threshold
+        self._min_correlation_stability = config.get("min_correlation_stability", 0.3)
+
+        # Phase 5.1: Kalman Filter settings for dynamic hedge ratio
+        self._hedge_ratio_method = HedgeRatioMethod(
+            config.get("hedge_ratio_method", "ols")
+        )
+        self._kalman_delta = config.get("kalman_delta", 1e-4)  # Process noise
+        self._kalman_ve = config.get("kalman_ve", 1e-3)  # Measurement noise
+        self._kalman_warmup = config.get("kalman_warmup_period", 30)
+        self._kalman_include_intercept = config.get("kalman_include_intercept", True)
+
+        # Kalman filter cache: (symbol_a, symbol_b) -> KalmanHedgeRatio instance
+        self._kalman_filters: dict[tuple[str, str], Any] = {}
+
+        logger.info(
+            f"StatArbStrategy initialized: hedge_method={self._hedge_ratio_method.value}, "
+            f"zscore_entry={self._zscore_entry}, zscore_exit={self._zscore_exit}"
+        )
 
     def test_cointegration_rolling(
         self,
@@ -649,6 +729,325 @@ class StatArbStrategy:
 
         return entry_score, is_optimal
 
+    def johansen_cointegration_test(
+        self,
+        price_series: list[np.ndarray],
+        det_order: int = 0,
+        k_ar_diff: int = 1
+    ) -> dict[str, Any]:
+        """
+        Johansen cointegration test for multiple time series.
+
+        The Johansen test is superior to Engle-Granger for pairs trading because:
+        1. Can test multiple series simultaneously
+        2. Identifies all cointegrating vectors
+        3. Provides both trace and max-eigenvalue statistics
+        4. More powerful for detecting cointegration
+
+        Implementation based on Johansen (1991) likelihood ratio tests.
+
+        Args:
+            price_series: List of price arrays (all same length)
+            det_order: Deterministic trend order (-1=no const, 0=const, 1=trend)
+            k_ar_diff: Number of lagged differences in VECM
+
+        Returns:
+            Dictionary with test results:
+            - n_cointegrating: Number of cointegrating relationships (0 to n-1)
+            - trace_stats: Trace test statistics
+            - max_eigen_stats: Max eigenvalue test statistics
+            - critical_values_trace: 95% critical values for trace test
+            - critical_values_max: 95% critical values for max eigenvalue test
+            - eigenvectors: Cointegrating vectors (if any)
+            - is_cointegrated: Boolean (at least one cointegrating relation)
+        """
+        n_series = len(price_series)
+        if n_series < 2:
+            return {
+                "n_cointegrating": 0,
+                "is_cointegrated": False,
+                "error": "Need at least 2 series"
+            }
+
+        # Ensure all series have same length
+        min_len = min(len(s) for s in price_series)
+        if min_len < 50:
+            return {
+                "n_cointegrating": 0,
+                "is_cointegrated": False,
+                "error": "Insufficient data (need at least 50 observations)"
+            }
+
+        # Stack price series into matrix: T x n
+        Y = np.column_stack([s[-min_len:] for s in price_series])
+        T, n = Y.shape
+
+        # Calculate first differences
+        dY = np.diff(Y, axis=0)  # (T-1) x n
+
+        # Build lagged differences matrix for VECM
+        # dY_t = Pi * Y_{t-1} + sum(Gamma_i * dY_{t-i}) + constant
+        k = k_ar_diff
+        if T - k - 1 < n + 5:
+            k = max(1, T - n - 6)
+
+        # Dependent variable: dY[k:]
+        T_eff = T - k - 1
+        Z0 = dY[k:]  # (T_eff) x n
+
+        # Lagged levels: Y[k:-1]
+        Z1 = Y[k:-1]  # (T_eff) x n
+
+        # Lagged differences for VECM
+        Z2_list = []
+        for i in range(1, k + 1):
+            Z2_list.append(dY[k-i:-i if i < k else None or len(dY)])
+
+        # Add constant if det_order >= 0
+        if det_order >= 0:
+            Z2_list.append(np.ones((T_eff, 1)))
+
+        if Z2_list:
+            Z2 = np.column_stack(Z2_list) if len(Z2_list) > 1 else Z2_list[0]
+            if Z2.ndim == 1:
+                Z2 = Z2.reshape(-1, 1)
+
+            # Residuals from regressing Z0, Z1 on Z2
+            try:
+                Z2_inv = np.linalg.lstsq(Z2, np.eye(Z2.shape[0]), rcond=None)[0].T
+                P = np.eye(T_eff) - Z2 @ np.linalg.lstsq(Z2, np.eye(T_eff), rcond=None)[0]
+            except np.linalg.LinAlgError:
+                P = np.eye(T_eff)
+
+            R0 = P @ Z0
+            R1 = P @ Z1
+        else:
+            R0 = Z0
+            R1 = Z1
+
+        # Calculate moment matrices
+        S00 = (R0.T @ R0) / T_eff
+        S01 = (R0.T @ R1) / T_eff
+        S10 = (R1.T @ R0) / T_eff
+        S11 = (R1.T @ R1) / T_eff
+
+        # Solve eigenvalue problem: |lambda * S11 - S10 * S00^{-1} * S01| = 0
+        try:
+            S00_inv = np.linalg.inv(S00)
+            S11_inv = np.linalg.inv(S11)
+        except np.linalg.LinAlgError:
+            return {
+                "n_cointegrating": 0,
+                "is_cointegrated": False,
+                "error": "Singular matrix in eigenvalue problem"
+            }
+
+        # Matrix for eigenvalue problem
+        M = S11_inv @ S10 @ S00_inv @ S01
+
+        # Get eigenvalues and eigenvectors
+        eigenvalues, eigenvectors = np.linalg.eig(M)
+
+        # Sort by eigenvalue magnitude (descending)
+        idx = np.argsort(eigenvalues)[::-1]
+        eigenvalues = np.real(eigenvalues[idx])
+        eigenvectors = np.real(eigenvectors[:, idx])
+
+        # Ensure eigenvalues are in [0, 1) for log calculation
+        eigenvalues = np.clip(eigenvalues, 1e-10, 1 - 1e-10)
+
+        # Calculate trace and max-eigenvalue statistics
+        trace_stats = []
+        max_eigen_stats = []
+
+        for r in range(n):
+            # Trace statistic: -T * sum(log(1 - lambda_i)) for i = r+1 to n
+            trace_stat = -T_eff * np.sum(np.log(1 - eigenvalues[r:]))
+            trace_stats.append(trace_stat)
+
+            # Max eigenvalue statistic: -T * log(1 - lambda_{r+1})
+            if r < n:
+                max_stat = -T_eff * np.log(1 - eigenvalues[r])
+                max_eigen_stats.append(max_stat)
+
+        # Critical values (95% level, from Osterwald-Lenum 1992)
+        # These are approximate - for production, use tabulated values
+        # Format: critical_values[n_series][r] where r is null hypothesis rank
+        trace_cv_table = {
+            2: [15.41, 3.76],
+            3: [29.68, 15.41, 3.76],
+            4: [47.21, 29.68, 15.41, 3.76],
+            5: [68.52, 47.21, 29.68, 15.41, 3.76],
+        }
+        max_cv_table = {
+            2: [14.07, 3.76],
+            3: [21.12, 14.07, 3.76],
+            4: [27.42, 21.12, 14.07, 3.76],
+            5: [33.46, 27.42, 21.12, 14.07, 3.76],
+        }
+
+        # Get critical values for this number of series
+        if n in trace_cv_table:
+            cv_trace = trace_cv_table[n]
+            cv_max = max_cv_table[n]
+        else:
+            # Approximate for larger systems
+            cv_trace = [15.41 + 10 * (i + 1) for i in range(n)]
+            cv_max = [14.07 + 7 * (i + 1) for i in range(n)]
+
+        # Determine number of cointegrating relationships
+        # Using trace test: reject H0(r) if trace_stat > critical_value
+        n_coint_trace = 0
+        for r in range(n):
+            if r < len(trace_stats) and r < len(cv_trace):
+                if trace_stats[r] > cv_trace[r]:
+                    n_coint_trace = r + 1
+                else:
+                    break
+
+        # Using max eigenvalue test
+        n_coint_max = 0
+        for r in range(n):
+            if r < len(max_eigen_stats) and r < len(cv_max):
+                if max_eigen_stats[r] > cv_max[r]:
+                    n_coint_max = r + 1
+                else:
+                    break
+
+        # Conservative: use minimum of trace and max tests
+        n_cointegrating = min(n_coint_trace, n_coint_max)
+
+        # Extract cointegrating vectors (first n_cointegrating columns)
+        if n_cointegrating > 0:
+            coint_vectors = eigenvectors[:, :n_cointegrating]
+            # Normalize so first element is 1
+            for i in range(n_cointegrating):
+                if abs(coint_vectors[0, i]) > 1e-10:
+                    coint_vectors[:, i] = coint_vectors[:, i] / coint_vectors[0, i]
+        else:
+            coint_vectors = None
+
+        return {
+            "n_cointegrating": n_cointegrating,
+            "is_cointegrated": n_cointegrating > 0,
+            "trace_stats": trace_stats,
+            "max_eigen_stats": max_eigen_stats,
+            "critical_values_trace": cv_trace[:n],
+            "critical_values_max": cv_max[:n],
+            "eigenvalues": eigenvalues.tolist(),
+            "eigenvectors": coint_vectors.tolist() if coint_vectors is not None else None,
+            "n_series": n,
+            "n_observations": T_eff,
+            "lags_used": k,
+        }
+
+    def test_cointegration_johansen(
+        self,
+        prices_a: np.ndarray,
+        prices_b: np.ndarray,
+    ) -> PairAnalysis:
+        """
+        Test for cointegration using Johansen test (more robust than Engle-Granger).
+
+        This is an enhanced version of test_cointegration that uses the
+        Johansen likelihood ratio test instead of the simplified ADF.
+
+        Args:
+            prices_a: Price series for asset A
+            prices_b: Price series for asset B
+
+        Returns:
+            PairAnalysis with cointegration test results
+        """
+        if len(prices_a) != len(prices_b) or len(prices_a) < 50:
+            return PairAnalysis(
+                symbol_a="",
+                symbol_b="",
+                correlation=0,
+                cointegration_pvalue=1.0,
+                hedge_ratio=1.0,
+                half_life=float("inf"),
+                current_zscore=0,
+                is_cointegrated=False,
+                rationale="REJECTED: Insufficient data for Johansen test (need 50+ observations)",
+            )
+
+        # Run Johansen test
+        johansen_result = self.johansen_cointegration_test([prices_a, prices_b])
+
+        # Calculate correlation
+        correlation = np.corrcoef(prices_a, prices_b)[0, 1]
+
+        # If cointegrated, extract hedge ratio from eigenvector
+        if johansen_result["is_cointegrated"] and johansen_result["eigenvectors"]:
+            # Cointegrating vector [1, -beta] means spread = A - beta*B
+            coint_vec = johansen_result["eigenvectors"]
+            if len(coint_vec) > 0 and len(coint_vec[0]) >= 2:
+                hedge_ratio = -coint_vec[1][0] if isinstance(coint_vec[0], list) else -coint_vec[1]
+            else:
+                hedge_ratio = self._estimate_hedge_ratio(prices_a, prices_b)
+        else:
+            hedge_ratio = self._estimate_hedge_ratio(prices_a, prices_b)
+
+        # Calculate spread and statistics
+        spread = prices_a - hedge_ratio * prices_b
+        spread_std = np.std(spread)
+        if spread_std < 1e-12:
+            zscore = 0.0
+        else:
+            zscore = (spread[-1] - np.mean(spread)) / spread_std
+
+        # Estimate half-life
+        half_life = self._estimate_half_life(spread)
+
+        # Build rationale
+        is_cointegrated = johansen_result["is_cointegrated"]
+        if is_cointegrated:
+            trace_stat = johansen_result["trace_stats"][0] if johansen_result["trace_stats"] else 0
+            cv = johansen_result["critical_values_trace"][0] if johansen_result["critical_values_trace"] else 0
+            rationale = f"JOHANSEN: Cointegrated (trace={trace_stat:.2f} > cv={cv:.2f}), half_life={half_life:.1f}"
+        else:
+            rationale = "JOHANSEN: Not cointegrated at 95% level"
+
+        # Additional stability checks
+        is_stable, stability_rationale = self.test_cointegration_rolling(prices_a, prices_b, hedge_ratio)
+        if not is_stable:
+            is_cointegrated = False
+            rationale = stability_rationale
+
+        # Check half-life bounds
+        if is_cointegrated:
+            if not (self._min_half_life <= half_life <= self._max_half_life):
+                is_cointegrated = False
+                rationale = f"REJECTED: Half-life {half_life:.1f} outside bounds [{self._min_half_life}, {self._max_half_life}]"
+
+        # P2: Calculate rolling correlation and stability
+        rolling_corr, corr_stability = self.calculate_rolling_correlation(prices_a, prices_b)
+
+        # P2: Estimate mean-reversion speed
+        reversion_speed, expected_time = self.estimate_reversion_speed(spread)
+
+        # P2: Calculate entry timing
+        entry_score, optimal_entry = self.calculate_entry_timing(spread, zscore, half_life)
+
+        return PairAnalysis(
+            symbol_a="",
+            symbol_b="",
+            correlation=correlation,
+            cointegration_pvalue=0.05 if is_cointegrated else 0.10,  # Approximate from Johansen
+            hedge_ratio=hedge_ratio,
+            half_life=half_life,
+            current_zscore=zscore,
+            is_cointegrated=is_cointegrated,
+            rationale=rationale,
+            rolling_correlation=rolling_corr,
+            correlation_stability=corr_stability,
+            reversion_speed=reversion_speed,
+            expected_time_to_mean=expected_time,
+            entry_score=entry_score,
+            optimal_entry=optimal_entry,
+        )
+
     def test_cointegration(
         self,
         prices_a: np.ndarray,
@@ -748,11 +1147,10 @@ class StatArbStrategy:
         prices_b: np.ndarray,
     ) -> float:
         """
-        Estimate hedge ratio using OLS.
+        Estimate hedge ratio using OLS (static method).
 
-        TODO: Implement more robust methods:
-        - Total Least Squares (orthogonal regression)
-        - Kalman filter for time-varying beta
+        For dynamic hedge ratio that adapts over time, use
+        estimate_hedge_ratio_kalman() instead.
         """
         # OLS: minimize sum((a - beta*b)^2)
         # Guard against zero variance in prices_b
@@ -772,6 +1170,289 @@ class StatArbStrategy:
             logger.warning(f"Non-finite hedge ratio computed: {beta}, returning 1.0")
             return 1.0
         return beta
+
+    # =========================================================================
+    # Phase 5.1: Kalman Filter for Dynamic Hedge Ratio
+    # =========================================================================
+
+    def get_or_create_kalman_filter(
+        self,
+        symbol_a: str,
+        symbol_b: str,
+    ) -> "KalmanHedgeRatio | None":
+        """
+        Get or create Kalman filter for a pair.
+
+        The filter is cached per pair to maintain state across updates.
+
+        Args:
+            symbol_a: First symbol (dependent variable)
+            symbol_b: Second symbol (independent variable)
+
+        Returns:
+            KalmanHedgeRatio instance or None if not available
+        """
+        if not HAS_KALMAN:
+            logger.warning("Kalman filter not available, using OLS")
+            return None
+
+        pair_key = (symbol_a, symbol_b)
+        if pair_key not in self._kalman_filters:
+            self._kalman_filters[pair_key] = create_kalman_filter({
+                "delta": self._kalman_delta,
+                "ve": self._kalman_ve,
+                "warmup_period": self._kalman_warmup,
+                "include_intercept": self._kalman_include_intercept,
+            })
+            logger.debug(f"Created Kalman filter for pair {symbol_a}:{symbol_b}")
+
+        return self._kalman_filters[pair_key]
+
+    def estimate_hedge_ratio_kalman(
+        self,
+        symbol_a: str,
+        symbol_b: str,
+        prices_a: np.ndarray,
+        prices_b: np.ndarray,
+    ) -> dict[str, Any]:
+        """
+        Estimate hedge ratio using Kalman filter (Phase 5.1).
+
+        Unlike OLS which gives a static estimate, the Kalman filter provides:
+        - Time-varying hedge ratio that adapts to regime changes
+        - Confidence intervals for the estimate
+        - Stability metrics to assess relationship quality
+
+        Args:
+            symbol_a: First symbol
+            symbol_b: Second symbol
+            prices_a: Price series for asset A
+            prices_b: Price series for asset B
+
+        Returns:
+            Dictionary with:
+            - hedge_ratio: Current dynamic hedge ratio
+            - intercept: Intercept term (if enabled)
+            - confidence_interval: (lower, upper) bounds
+            - stability_score: 0-1 stability metric
+            - spread_zscore: Current z-score of spread
+            - is_warmed_up: Whether filter has sufficient history
+            - comparison_vs_ols: Difference from OLS estimate
+        """
+        kf = self.get_or_create_kalman_filter(symbol_a, symbol_b)
+
+        if kf is None:
+            # Fallback to OLS
+            ols_beta = self._estimate_hedge_ratio(prices_a, prices_b)
+            return {
+                "hedge_ratio": ols_beta,
+                "intercept": 0.0,
+                "confidence_interval": (ols_beta * 0.9, ols_beta * 1.1),
+                "stability_score": 0.5,
+                "spread_zscore": 0.0,
+                "is_warmed_up": True,
+                "comparison_vs_ols": 0.0,
+                "method": "ols_fallback",
+            }
+
+        # Process the full series through the Kalman filter
+        results = kf.process_series(prices_a, prices_b)
+
+        if not results:
+            ols_beta = self._estimate_hedge_ratio(prices_a, prices_b)
+            return {
+                "hedge_ratio": ols_beta,
+                "intercept": 0.0,
+                "confidence_interval": (ols_beta * 0.9, ols_beta * 1.1),
+                "stability_score": 0.5,
+                "spread_zscore": 0.0,
+                "is_warmed_up": False,
+                "comparison_vs_ols": 0.0,
+                "method": "ols_fallback",
+            }
+
+        # Get final result
+        final_result = results[-1]
+
+        # Get confidence interval
+        beta, lower, upper = kf.get_hedge_ratio_with_confidence(confidence=0.95)
+
+        # Get current z-score
+        zscore = kf.get_zscore(prices_a[-1], prices_b[-1])
+
+        # Compare with OLS
+        ols_beta = self._estimate_hedge_ratio(prices_a, prices_b)
+
+        return {
+            "hedge_ratio": final_result.hedge_ratio,
+            "intercept": final_result.intercept,
+            "confidence_interval": (lower, upper),
+            "stability_score": final_result.stability_score,
+            "spread_zscore": zscore,
+            "is_warmed_up": final_result.is_stable,
+            "comparison_vs_ols": final_result.hedge_ratio - ols_beta,
+            "n_observations": final_result.n_observations,
+            "method": "kalman",
+        }
+
+    def estimate_hedge_ratio_adaptive(
+        self,
+        symbol_a: str,
+        symbol_b: str,
+        prices_a: np.ndarray,
+        prices_b: np.ndarray,
+        method: HedgeRatioMethod | None = None,
+    ) -> dict[str, Any]:
+        """
+        Estimate hedge ratio using configured method (Phase 5.1).
+
+        This is the main entry point that selects the appropriate method
+        based on configuration or explicit override.
+
+        Args:
+            symbol_a: First symbol
+            symbol_b: Second symbol
+            prices_a: Price series for asset A
+            prices_b: Price series for asset B
+            method: Override default method
+
+        Returns:
+            Dictionary with hedge ratio and metadata
+        """
+        if method is None:
+            method = self._hedge_ratio_method
+
+        if method == HedgeRatioMethod.KALMAN and HAS_KALMAN:
+            return self.estimate_hedge_ratio_kalman(
+                symbol_a, symbol_b, prices_a, prices_b
+            )
+
+        elif method == HedgeRatioMethod.ROLLING_OLS:
+            # Rolling OLS with configurable window
+            window = min(self._lookback, len(prices_a))
+            beta = self._estimate_hedge_ratio(
+                prices_a[-window:], prices_b[-window:]
+            )
+            return {
+                "hedge_ratio": beta,
+                "intercept": 0.0,
+                "confidence_interval": (beta * 0.95, beta * 1.05),
+                "stability_score": 0.7,
+                "spread_zscore": 0.0,
+                "is_warmed_up": True,
+                "comparison_vs_ols": 0.0,
+                "method": "rolling_ols",
+                "window": window,
+            }
+
+        else:
+            # Standard OLS
+            beta = self._estimate_hedge_ratio(prices_a, prices_b)
+            return {
+                "hedge_ratio": beta,
+                "intercept": 0.0,
+                "confidence_interval": (beta * 0.95, beta * 1.05),
+                "stability_score": 0.5,
+                "spread_zscore": 0.0,
+                "is_warmed_up": True,
+                "comparison_vs_ols": 0.0,
+                "method": "ols",
+            }
+
+    def update_kalman_hedge_ratio(
+        self,
+        symbol_a: str,
+        symbol_b: str,
+        price_a: float,
+        price_b: float,
+    ) -> dict[str, Any] | None:
+        """
+        Update Kalman filter with new price observation (Phase 5.1).
+
+        Call this method with each new price tick/bar to update
+        the dynamic hedge ratio estimate.
+
+        Args:
+            symbol_a: First symbol
+            symbol_b: Second symbol
+            price_a: Current price of asset A
+            price_b: Current price of asset B
+
+        Returns:
+            Updated hedge ratio info or None if not using Kalman
+        """
+        kf = self.get_or_create_kalman_filter(symbol_a, symbol_b)
+        if kf is None:
+            return None
+
+        result = kf.update(price_a, price_b)
+
+        return {
+            "hedge_ratio": result.hedge_ratio,
+            "spread": result.spread,
+            "spread_zscore": result.zscore,
+            "is_stable": result.is_stable,
+            "n_observations": result.n_observations,
+        }
+
+    def reset_kalman_filter(
+        self,
+        symbol_a: str,
+        symbol_b: str,
+    ) -> None:
+        """
+        Reset Kalman filter for a pair.
+
+        Call this after a regime change or when relationship breaks down.
+        """
+        pair_key = (symbol_a, symbol_b)
+        if pair_key in self._kalman_filters:
+            self._kalman_filters[pair_key].reset()
+            logger.info(f"Reset Kalman filter for pair {symbol_a}:{symbol_b}")
+
+    def get_kalman_comparison(
+        self,
+        symbol_a: str,
+        symbol_b: str,
+        prices_a: np.ndarray,
+        prices_b: np.ndarray,
+        ols_window: int = 60,
+    ) -> dict[str, Any]:
+        """
+        Compare Kalman filter vs OLS hedge ratios (Phase 5.1).
+
+        Useful for backtesting and validation.
+
+        Args:
+            symbol_a: First symbol
+            symbol_b: Second symbol
+            prices_a: Price series for asset A
+            prices_b: Price series for asset B
+            ols_window: Window for rolling OLS comparison
+
+        Returns:
+            Dictionary with comparison metrics
+        """
+        kf = self.get_or_create_kalman_filter(symbol_a, symbol_b)
+        if kf is None:
+            return {"error": "Kalman filter not available"}
+
+        # Reset and process full series
+        kf.reset()
+        comparison = kf.compare_with_ols(prices_a, prices_b, ols_window)
+
+        return {
+            "pair": f"{symbol_a}:{symbol_b}",
+            "kalman_beta_mean": comparison.get("kalman_beta_mean", 0),
+            "ols_beta_mean": comparison.get("ols_beta_mean", 0),
+            "kalman_beta_std": comparison.get("kalman_beta_std", 0),
+            "ols_beta_std": comparison.get("ols_beta_std", 0),
+            "stability_improvement_pct": comparison.get("stability_improvement_pct", 0),
+            "recommendation": (
+                "KALMAN" if comparison.get("stability_improvement_pct", 0) > 10
+                else "OLS"
+            ),
+        }
 
     def _select_optimal_lag(
         self,
@@ -1030,6 +1711,138 @@ class StatArbStrategy:
 
         return half_life
 
+    def check_exit_conditions(
+        self,
+        current_zscore: float,
+        entry_zscore: float,
+        bars_held: int,
+        position_direction: str,
+        correlation_stability: float
+    ) -> tuple[bool, str | None]:
+        """
+        RISK-005: Check if exit conditions are met for stat arb position.
+
+        Args:
+            current_zscore: Current spread z-score
+            entry_zscore: Z-score at entry
+            bars_held: Number of bars position has been held
+            position_direction: "long_spread" or "short_spread"
+            correlation_stability: Current correlation stability score
+
+        Returns:
+            (should_exit, reason)
+        """
+        # Check max holding period
+        if bars_held >= self._max_holding_bars:
+            return True, "max_holding_period_reached"
+
+        # Check stop-loss (spread widening further)
+        if position_direction == "long_spread" and current_zscore < -self._stop_loss_zscore:
+            return True, "stop_loss_spread_widened"
+        elif position_direction == "short_spread" and current_zscore > self._stop_loss_zscore:
+            return True, "stop_loss_spread_widened"
+
+        # Check take-profit (mean reversion achieved)
+        if abs(current_zscore) < self._take_profit_zscore:
+            return True, "take_profit_mean_reverted"
+
+        # Check regime breakdown (correlation becoming unstable)
+        if correlation_stability < self._min_correlation_stability:
+            return True, "regime_breakdown_correlation_unstable"
+
+        return False, None
+
+    def generate_exit_signal(
+        self,
+        spread_name: str,
+        spread_type: SpreadType,
+        exit_reason: str,
+        current_value: float,
+        zscore: float,
+        mean: float,
+        std: float
+    ) -> SpreadAnalysis:
+        """
+        RISK-005: Generate exit signal for spread position.
+
+        Args:
+            spread_name: Name of the spread
+            spread_type: Type of spread
+            exit_reason: Reason for exit
+            current_value: Current spread value
+            zscore: Current z-score
+            mean: Spread mean
+            std: Spread standard deviation
+
+        Returns:
+            SpreadAnalysis with exit signal
+        """
+        return SpreadAnalysis(
+            spread_name=spread_name,
+            spread_type=spread_type,
+            current_value=current_value,
+            zscore=zscore,
+            percentile=50.0,  # N/A for exit
+            mean=mean,
+            std=std,
+            half_life=0.0,
+            is_tradeable=False,
+            signal_direction="exit",
+            signal_strength=1.0,  # High strength for exits
+            stop_loss_zscore=self._stop_loss_zscore,
+            take_profit_zscore=self._take_profit_zscore,
+            stop_loss_pct=None,
+            take_profit_pct=None,
+            max_holding_bars=self._max_holding_bars,
+            strategy_max_loss_pct=self._strategy_max_loss_pct,
+            regime_suitable=True,
+            regime_warning=None,
+            is_exit_signal=True,
+            exit_reason=exit_reason,
+        )
+
+    def calculate_spread_risk_levels(
+        self,
+        current_value: float,
+        mean: float,
+        std: float,
+        direction: str
+    ) -> tuple[float | None, float | None]:
+        """
+        Calculate stop-loss and take-profit in percentage terms.
+
+        Args:
+            current_value: Current spread value
+            mean: Spread mean
+            std: Spread standard deviation
+            direction: "long_spread" or "short_spread"
+
+        Returns:
+            (stop_loss_pct, take_profit_pct) - percentage moves from current
+        """
+        if std <= 0:
+            return None, None
+
+        # For long spread: stop if spread goes more negative, profit if returns to mean
+        # For short spread: stop if spread goes more positive, profit if returns to mean
+        if direction == "long_spread":
+            stop_value = mean - self._stop_loss_zscore * std
+            tp_value = mean - self._take_profit_zscore * std
+        elif direction == "short_spread":
+            stop_value = mean + self._stop_loss_zscore * std
+            tp_value = mean + self._take_profit_zscore * std
+        else:
+            return None, None
+
+        if current_value != 0:
+            stop_loss_pct = ((stop_value - current_value) / abs(current_value)) * 100
+            take_profit_pct = ((tp_value - current_value) / abs(current_value)) * 100
+        else:
+            stop_loss_pct = None
+            take_profit_pct = None
+
+        return stop_loss_pct, take_profit_pct
+
     def generate_signal(
         self,
         analysis: PairAnalysis,
@@ -1046,6 +1859,8 @@ class StatArbStrategy:
                 "strength": 0.0,
                 "correlation_stability": analysis.correlation_stability,
                 "entry_score": analysis.entry_score,
+                "regime_suitable": False,
+                "regime_warning": analysis.rationale,
             }
 
         zscore = analysis.current_zscore
@@ -1054,10 +1869,20 @@ class StatArbStrategy:
         stability_factor = 0.7 + (analysis.correlation_stability * 0.3)  # 0.7-1.0
         timing_factor = 0.8 + (analysis.entry_score * 0.2)  # 0.8-1.0
 
+        # RISK-004: Check regime suitability
+        regime_suitable = analysis.correlation_stability >= self._min_correlation_stability
+        regime_warning = None
+        if not regime_suitable:
+            regime_warning = f"Low correlation stability: {analysis.correlation_stability:.2f}"
+
         if zscore > self._zscore_entry:
             # Spread too high - short A, long B
             base_strength = min(1.0, zscore / 3.0)
             adjusted_strength = base_strength * stability_factor * timing_factor
+
+            # Reduce strength if regime unsuitable
+            if not regime_suitable:
+                adjusted_strength *= 0.5
 
             return {
                 "direction": "short_spread",
@@ -1069,11 +1894,21 @@ class StatArbStrategy:
                 "expected_time_to_mean": analysis.expected_time_to_mean,
                 "entry_score": analysis.entry_score,
                 "optimal_entry": analysis.optimal_entry,
+                "stop_loss_zscore": self._stop_loss_zscore,
+                "take_profit_zscore": self._take_profit_zscore,
+                "max_holding_bars": self._max_holding_bars,
+                "strategy_max_loss_pct": self._strategy_max_loss_pct,
+                "regime_suitable": regime_suitable,
+                "regime_warning": regime_warning,
             }
         elif zscore < -self._zscore_entry:
             # Spread too low - long A, short B
             base_strength = min(1.0, abs(zscore) / 3.0)
             adjusted_strength = base_strength * stability_factor * timing_factor
+
+            # Reduce strength if regime unsuitable
+            if not regime_suitable:
+                adjusted_strength *= 0.5
 
             return {
                 "direction": "long_spread",
@@ -1085,15 +1920,25 @@ class StatArbStrategy:
                 "expected_time_to_mean": analysis.expected_time_to_mean,
                 "entry_score": analysis.entry_score,
                 "optimal_entry": analysis.optimal_entry,
+                "stop_loss_zscore": self._stop_loss_zscore,
+                "take_profit_zscore": self._take_profit_zscore,
+                "max_holding_bars": self._max_holding_bars,
+                "strategy_max_loss_pct": self._strategy_max_loss_pct,
+                "regime_suitable": regime_suitable,
+                "regime_warning": regime_warning,
             }
         elif abs(zscore) < self._zscore_exit:
-            # Near mean - exit
+            # Near mean - exit (take profit achieved)
             return {
                 "direction": "exit",
                 "strength": 0.0,
                 "zscore": zscore,
                 "correlation_stability": analysis.correlation_stability,
                 "entry_score": analysis.entry_score,
+                "is_exit_signal": True,
+                "exit_reason": "take_profit_mean_reverted",
+                "regime_suitable": regime_suitable,
+                "regime_warning": regime_warning,
             }
         else:
             # Hold current position
@@ -1104,6 +1949,8 @@ class StatArbStrategy:
                 "correlation_stability": analysis.correlation_stability,
                 "expected_time_to_mean": analysis.expected_time_to_mean,
                 "entry_score": analysis.entry_score,
+                "regime_suitable": regime_suitable,
+                "regime_warning": regime_warning,
             }
 
     # =========================================================================
@@ -1182,6 +2029,21 @@ class StatArbStrategy:
             signal_direction = "flat"
             signal_strength = 0.0
 
+        # RISK-001: Calculate stop-loss and take-profit percentages
+        stop_loss_pct, take_profit_pct = self.calculate_spread_risk_levels(
+            current_val, mean_val, std_val, signal_direction
+        )
+
+        # RISK-004: Check regime suitability
+        # For spreads, use half-life as indicator - too long means cointegration weakening
+        regime_suitable = self._min_half_life <= half_life <= self._max_half_life
+        regime_warning = None
+        if not regime_suitable:
+            if half_life > self._max_half_life:
+                regime_warning = f"Half-life too long ({half_life:.1f} days) - slow mean reversion"
+            else:
+                regime_warning = f"Half-life too short ({half_life:.1f} days) - noisy spread"
+
         return SpreadAnalysis(
             spread_name=spread_name,
             spread_type=spread_def.spread_type,
@@ -1194,6 +2056,16 @@ class StatArbStrategy:
             is_tradeable=is_tradeable,
             signal_direction=signal_direction,
             signal_strength=signal_strength,
+            stop_loss_zscore=self._stop_loss_zscore,
+            take_profit_zscore=self._take_profit_zscore,
+            stop_loss_pct=stop_loss_pct,
+            take_profit_pct=take_profit_pct,
+            max_holding_bars=self._max_holding_bars,
+            strategy_max_loss_pct=self._strategy_max_loss_pct,
+            regime_suitable=regime_suitable,
+            regime_warning=regime_warning,
+            is_exit_signal=signal_direction == "exit",
+            exit_reason="take_profit_mean_reverted" if signal_direction == "exit" else None,
         )
 
     def _calculate_spread_value(

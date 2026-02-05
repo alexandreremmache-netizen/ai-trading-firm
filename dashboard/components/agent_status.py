@@ -8,7 +8,7 @@ Monitors all trading agents including:
 - Decision Agent: CIO
 - Validation Agents: Risk, Compliance
 - Execution Agent
-- Signal Agents: Macro, StatArb, Momentum, MarketMaking, OptionsVol, Sentiment, Forecasting
+- Signal Agents: Macro, StatArb, Momentum, MarketMaking, MACDv, Sentiment, Forecasting
 
 Features:
 - Real-time status tracking (active/idle/error)
@@ -77,12 +77,12 @@ AGENT_TYPE_MAPPING: dict[str, AgentType] = {
     "Momentum": AgentType.SIGNAL,
     "MarketMakingAgent": AgentType.SIGNAL,
     "MarketMaking": AgentType.SIGNAL,
-    "OptionsVolAgent": AgentType.SIGNAL,
-    "OptionsVol": AgentType.SIGNAL,
     "SentimentAgent": AgentType.SIGNAL,
     "Sentiment": AgentType.SIGNAL,
     "ForecastingAgent": AgentType.SIGNAL,
     "Forecasting": AgentType.SIGNAL,
+    "MACDvAgent": AgentType.SIGNAL,
+    "MACDv": AgentType.SIGNAL,
     # Surveillance Agents
     "SurveillanceAgent": AgentType.SURVEILLANCE,
     "Surveillance": AgentType.SURVEILLANCE,
@@ -255,19 +255,31 @@ class AgentStatusTracker:
         self._agents: dict[str, AgentStatusRecord] = {}
         self._lock = asyncio.Lock()
 
-        # Predefined agent list based on CLAUDE.md architecture
+        # Predefined agent list based on CLAUDE.md architecture (17 signal + 6 core = 23 total)
         self._expected_agents = [
+            # Core decision/validation/execution agents
             ("CIOAgent", AgentType.DECISION),
             ("RiskAgent", AgentType.VALIDATION),
             ("ComplianceAgent", AgentType.VALIDATION),
             ("ExecutionAgent", AgentType.EXECUTION),
+            # Signal agents - Core (always enabled)
             ("MacroAgent", AgentType.SIGNAL),
             ("StatArbAgent", AgentType.SIGNAL),
             ("MomentumAgent", AgentType.SIGNAL),
             ("MarketMakingAgent", AgentType.SIGNAL),
-            ("OptionsVolAgent", AgentType.SIGNAL),
+            # Signal agents - LLM (may be disabled to save tokens)
             ("SentimentAgent", AgentType.SIGNAL),
+            ("ChartAnalysisAgent", AgentType.SIGNAL),
             ("ForecastingAgent", AgentType.SIGNAL),
+            # Signal agents - Phase 6 (new strategies)
+            ("SessionAgent", AgentType.SIGNAL),
+            ("IndexSpreadAgent", AgentType.SIGNAL),
+            ("TTMSqueezeAgent", AgentType.SIGNAL),
+            ("EventDrivenAgent", AgentType.SIGNAL),
+            ("MeanReversionAgent", AgentType.SIGNAL),
+            # Signal agents - Award-winning indicators
+            ("MACDvAgent", AgentType.SIGNAL),  # MACD-v (Charles H. Dow Award 2022)
+            # Compliance agents
             ("SurveillanceAgent", AgentType.SURVEILLANCE),
             ("TransactionReportingAgent", AgentType.REPORTING),
         ]

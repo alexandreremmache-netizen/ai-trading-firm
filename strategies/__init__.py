@@ -12,12 +12,12 @@ from strategies.macro_strategy import MacroStrategy
 from strategies.stat_arb_strategy import StatArbStrategy
 from strategies.momentum_strategy import MomentumStrategy
 from strategies.market_making_strategy import MarketMakingStrategy
-from strategies.options_vol_strategy import OptionsVolStrategy
+from strategies.macdv_strategy import MACDvStrategy
 
 __all__ = [
     "MacroStrategy",
     "StatArbStrategy",
     "MomentumStrategy",
     "MarketMakingStrategy",
-    "OptionsVolStrategy",
+    "MACDvStrategy",
 ]

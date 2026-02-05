@@ -407,9 +407,9 @@ class BrokerMetricsSync:
             "position_count": self._current_pnl.position_count,
         })
 
-        # Update equity curve
+        # Update equity curve with full ISO timestamp for proper filtering
         state.update_equity_curve(
-            self._current_pnl.timestamp.strftime("%H:%M:%S"),
+            self._current_pnl.timestamp.isoformat(),
             self._current_pnl.net_liquidation,
         )
 

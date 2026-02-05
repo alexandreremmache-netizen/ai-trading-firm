@@ -9,7 +9,7 @@ Aggregates signals from all signal agents:
 - StatArbAgent: Statistical arbitrage signals
 - MomentumAgent: Momentum/trend signals
 - MarketMakingAgent: Market making signals
-- OptionsVolAgent: Options volatility signals
+- MACDvAgent: MACD-v volatility-normalized signals
 - SentimentAgent: Market sentiment signals
 - ForecastingAgent: Price forecasting signals
 
@@ -41,13 +41,22 @@ logger = logging.getLogger(__name__)
 
 # Known signal agents in the system
 SIGNAL_AGENTS = [
+    # Core signal agents
     "MacroAgent",
     "StatArbAgent",
     "MomentumAgent",
     "MarketMakingAgent",
-    "OptionsVolAgent",
+    # LLM agents (may be disabled)
     "SentimentAgent",
+    "ChartAnalysisAgent",
     "ForecastingAgent",
+    # Phase 6 agents
+    "SessionAgent",
+    "IndexSpreadAgent",
+    "TTMSqueezeAgent",
+    "EventDrivenAgent",
+    "MeanReversionAgent",
+    "MACDvAgent",
 ]
 
 

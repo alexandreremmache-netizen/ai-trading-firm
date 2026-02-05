@@ -52,6 +52,38 @@ class OrderSide(Enum):
     SELL = "sell"
 
 
+class DecisionAction(Enum):
+    """
+    CIO decision action types.
+
+    Extends beyond simple BUY/SELL to include position management actions.
+    This enables the CIO to make autonomous decisions about:
+    - Opening new positions (BUY/SELL)
+    - Closing losing positions (CLOSE_LOSER)
+    - Taking profits on winners (TAKE_PROFIT)
+    - Reducing position size (REDUCE_POSITION)
+    - Increasing position size (INCREASE_POSITION)
+    - Holding current position (HOLD)
+    """
+    BUY = "buy"                          # Open or increase long position
+    SELL = "sell"                        # Open or increase short position
+    CLOSE_LOSER = "close_loser"          # Close losing position (full exit)
+    TAKE_PROFIT = "take_profit"          # Close profitable position (full or partial)
+    REDUCE_POSITION = "reduce_position"  # Reduce position size (conviction dropped)
+    INCREASE_POSITION = "increase_position"  # Increase position size
+    HOLD = "hold"                        # No action needed
+
+    @classmethod
+    def is_closing_action(cls, action: "DecisionAction") -> bool:
+        """Check if this action closes or reduces a position."""
+        return action in (cls.CLOSE_LOSER, cls.TAKE_PROFIT, cls.REDUCE_POSITION)
+
+    @classmethod
+    def is_opening_action(cls, action: "DecisionAction") -> bool:
+        """Check if this action opens or increases a position."""
+        return action in (cls.BUY, cls.SELL, cls.INCREASE_POSITION)
+
+
 class OrderType(Enum):
     """Order type."""
     MARKET = "market"
@@ -230,6 +262,12 @@ class DecisionEvent(Event):
 
     This is the ONLY event that can lead to order creation.
     Must include full rationale and data sources for compliance.
+
+    Enhanced to support position management decisions:
+    - Opening new positions (BUY/SELL)
+    - Closing losing positions
+    - Taking profits
+    - Reducing/increasing position size
     """
     event_type: EventType = field(default=EventType.DECISION, init=False)
     symbol: str = ""
@@ -242,6 +280,13 @@ class DecisionEvent(Event):
     contributing_signals: tuple[str, ...] = ()  # Signal IDs that contributed
     data_sources: tuple[str, ...] = ()  # All data sources used
     conviction_score: float = 0.0  # 0.0 to 1.0
+
+    # Position management fields (optional - for enhanced CIO)
+    decision_action: DecisionAction | None = None  # High-level action type
+    position_pnl_pct: float | None = None  # Current position P&L % if closing
+    holding_duration_hours: float | None = None  # How long position has been held
+    stop_loss_override: bool = False  # True if CIO is overriding individual stop-loss
+    regime_context: str | None = None  # Market regime when decision was made
 
     def to_audit_dict(self) -> dict[str, Any]:
         """Convert to audit dictionary with full compliance data."""
@@ -257,6 +302,12 @@ class DecisionEvent(Event):
             "contributing_signals": list(self.contributing_signals),
             "data_sources": list(self.data_sources),
             "conviction_score": self.conviction_score,
+            # Position management fields
+            "decision_action": self.decision_action.value if self.decision_action else None,
+            "position_pnl_pct": self.position_pnl_pct,
+            "holding_duration_hours": self.holding_duration_hours,
+            "stop_loss_override": self.stop_loss_override,
+            "regime_context": self.regime_context,
         })
         return base
 

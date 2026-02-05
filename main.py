@@ -67,6 +67,7 @@ from core.notifications import (
     AlertCategory,
 )
 from core.infrastructure_ops import AuditLogBackupManager
+from core.immutable_ledger import ImmutableAuditLedger, create_audit_ledger
 
 # New Infrastructure Components
 from core.contract_specs import ContractSpecsManager
@@ -77,13 +78,13 @@ from core.stress_tester import StressTester
 from core.position_sizing import PositionSizer
 from core.attribution import PerformanceAttribution
 from core.best_execution import BestExecutionAnalyzer
+from core.stop_loss_manager import StopLossManager, StopLossConfig
 
 # Signal Agents (parallel - fan-out)
 from agents.macro_agent import MacroAgent
 from agents.stat_arb_agent import StatArbAgent
 from agents.momentum_agent import MomentumAgent
 from agents.market_making_agent import MarketMakingAgent
-from agents.options_vol_agent import OptionsVolAgent
 
 # Decision Agent (single authority)
 from agents.cio_agent import CIOAgent
@@ -100,6 +101,12 @@ from agents.surveillance_agent import SurveillanceAgent
 from agents.transaction_reporting_agent import TransactionReportingAgent
 
 from data.market_data import MarketDataManager, SymbolConfig
+
+# Economic Calendar for EventDrivenAgent
+from core.economic_calendar import EconomicCalendar, create_economic_calendar
+
+# Historical Data Warmup for instant agent readiness
+from core.historical_warmup import HistoricalWarmup, create_historical_warmup
 
 # Dashboard integration for real-time monitoring
 from dashboard.server import DashboardServer, create_dashboard_server
@@ -130,7 +137,7 @@ class TradingFirmOrchestrator:
                               ▼
     ┌─────────────────────────────────────────────────────────────┐
     │              SIGNAL AGENTS (parallel fan-out)               │
-    │  [Macro] [StatArb] [Momentum] [MarketMaking] [OptionsVol]   │
+    │  [Macro] [StatArb] [Momentum] [MarketMaking] [MACDv]        │
     └─────────────────────────┬───────────────────────────────────┘
                               │ SignalEvent (barrier sync)
                               ▼
@@ -188,6 +195,9 @@ class TradingFirmOrchestrator:
         # Audit log backup manager
         self._backup_manager: AuditLogBackupManager | None = None
 
+        # Immutable audit ledger for MiFID II compliance
+        self._audit_ledger: ImmutableAuditLedger | None = None
+
         # Dashboard server for real-time monitoring
         self._dashboard_server: DashboardServer | None = None
         self._broker_sync: BrokerMetricsSync | None = None
@@ -201,6 +211,9 @@ class TradingFirmOrchestrator:
         self._position_sizer: PositionSizer | None = None
         self._attribution: PerformanceAttribution | None = None
         self._best_execution: BestExecutionAnalyzer | None = None
+        self._stop_loss_manager: StopLossManager | None = None
+        self._economic_calendar: EconomicCalendar | None = None
+        self._historical_warmup: HistoricalWarmup | None = None
 
         # Agents
         self._signal_agents: list[Any] = []
@@ -373,6 +386,14 @@ class TradingFirmOrchestrator:
             signal_timeout=event_bus_config.get("signal_timeout_seconds", 5.0),
             barrier_timeout=event_bus_config.get("sync_barrier_timeout_seconds", 10.0),
         )
+
+        # CRITICAL: Initialize and connect immutable audit ledger for MiFID II compliance
+        # This ensures ALL trading decisions, orders, and kill switch activations are recorded
+        audit_ledger_config = self._config.get("audit_ledger", {})
+        ledger_path = audit_ledger_config.get("storage_path", "logs/audit_ledger")
+        self._audit_ledger = create_audit_ledger(storage_path=ledger_path)
+        self._event_bus.set_audit_ledger(self._audit_ledger)
+        logger.info(f"Immutable audit ledger connected for MiFID II compliance (path: {ledger_path})")
 
         # Initialize dashboard server (must be after event bus creation)
         await self._initialize_dashboard()
@@ -730,6 +751,92 @@ class TradingFirmOrchestrator:
         logger.info(f"  Futures: {len(universe.get('futures', []))}")
         logger.info(f"  Forex: {len(universe.get('forex', []))}")
 
+    async def _run_historical_warmup(self) -> None:
+        """
+        Run historical data warmup to immediately prepare agents.
+
+        Fetches the last 100 bars for each symbol from IB so agents
+        can generate signals immediately without waiting for live data.
+        """
+        warmup_config = self._config.get("warmup", {})
+
+        if not warmup_config.get("enabled", True):
+            logger.info("Historical warmup disabled in config")
+            return
+
+        # Get all symbols from universe
+        universe = self._config.get("universe", {})
+        symbols = []
+
+        for equity in universe.get("equities", []):
+            symbols.append(equity["symbol"])
+        for etf in universe.get("etfs", []):
+            symbols.append(etf["symbol"])
+        for future in universe.get("futures", []):
+            symbols.append(future["symbol"])
+        # Skip forex for warmup (different contract type)
+
+        if not symbols:
+            logger.info("No symbols to warm up")
+            return
+
+        # Create warmup instance
+        self._historical_warmup = create_historical_warmup(
+            broker=self._broker,
+            event_bus=self._event_bus,
+            config={
+                "bars_to_fetch": warmup_config.get("bars_to_fetch", 100),
+                "bar_size": warmup_config.get("bar_size", "1 min"),
+                "max_concurrent": warmup_config.get("max_concurrent", 5),
+                "timeout_seconds": warmup_config.get("timeout_seconds", 30.0),
+            },
+        )
+
+        # Run warmup
+        logger.info(f"Running historical warmup for {len(symbols)} symbols...")
+        results = await self._historical_warmup.warmup_symbols(symbols)
+
+        successful = sum(1 for v in results.values() if v > 0)
+        total_bars = sum(results.values())
+
+        if successful > 0:
+            logger.info(
+                f"Warmup complete: {successful}/{len(symbols)} symbols, "
+                f"{total_bars} bars - Agents ready for immediate signals"
+            )
+        else:
+            logger.warning(
+                "Warmup failed - agents will need to wait for live data to accumulate"
+            )
+
+    async def _init_economic_calendar(self, event_driven_agent) -> None:
+        """Initialize economic calendar and register events with EventDrivenAgent."""
+        if not self._economic_calendar:
+            return
+
+        try:
+            await self._economic_calendar.initialize()
+            count = self._economic_calendar.register_with_agent(event_driven_agent)
+
+            # Log next upcoming events
+            next_event = self._economic_calendar.get_next_event()
+            if next_event:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                hours_until = (next_event.timestamp - now).total_seconds() / 3600
+                logger.info(
+                    f"Economic Calendar: {count} events loaded. "
+                    f"Next: {next_event.event_type.value} in {hours_until:.1f}h"
+                )
+            else:
+                logger.info(f"Economic Calendar: {count} events loaded")
+
+            # Start auto-update for fresh API data
+            await self._economic_calendar.start_auto_update()
+
+        except Exception as e:
+            logger.warning(f"Failed to initialize economic calendar: {e}")
+
     async def _initialize_infrastructure(self) -> None:
         """Initialize infrastructure components (contract specs, risk calculators, etc.)."""
         logger.info("Initializing infrastructure components...")
@@ -776,6 +883,33 @@ class TradingFirmOrchestrator:
         self._best_execution = BestExecutionAnalyzer(config=best_execution_config)
         logger.info(f"Best execution analyzer initialized (benchmark: {best_execution_config.get('benchmark', 'vwap')})")
 
+        # Stop-Loss Manager for automatic position protection
+        exit_rules_config = self._config.get("agents", {}).get("exit_rules", {})
+        stop_loss_config = StopLossConfig(
+            use_atr_stops=exit_rules_config.get("use_atr_stops", True),
+            atr_multiplier=exit_rules_config.get("stop_loss_atr_multiplier", 2.5),
+            fixed_stop_loss_pct=exit_rules_config.get("default_stop_loss_pct", 5.0),
+            trailing_stop_enabled=exit_rules_config.get("trailing_enabled", True),
+            trailing_activation_pct=exit_rules_config.get("trailing_activation_pct", 2.0),
+            trailing_distance_pct=exit_rules_config.get("trailing_distance_pct", 3.0),
+            take_profit_enabled=exit_rules_config.get("enabled", True),
+            take_profit_pct=exit_rules_config.get("default_take_profit_pct", 10.0),
+            trailing_take_profit=exit_rules_config.get("trailing_take_profit", True),
+            max_holding_hours=exit_rules_config.get("time_exit_hours", 0),
+            drawdown_close_threshold_pct=self._config.get("risk", {}).get("drawdown", {}).get("close_threshold_pct", 15.0),
+            close_worst_n_positions=self._config.get("risk", {}).get("drawdown", {}).get("close_worst_n", 2),
+        )
+        self._stop_loss_manager = StopLossManager(
+            config=stop_loss_config,
+            event_bus=self._event_bus,
+            audit_logger=self._audit_logger,
+            broker=self._broker,
+        )
+        logger.info(
+            f"Stop-loss manager initialized: ATR={stop_loss_config.use_atr_stops} "
+            f"(mult={stop_loss_config.atr_multiplier}), trailing={stop_loss_config.trailing_stop_enabled}"
+        )
+
         logger.info("Infrastructure components initialized")
 
     def _wire_components(self) -> None:
@@ -821,6 +955,11 @@ class TradingFirmOrchestrator:
         if self._execution_agent and self._best_execution:
             self._execution_agent.set_best_execution_analyzer(self._best_execution)
             logger.info("  BestExecutionAnalyzer -> ExecutionAgent")
+
+        # Wire Stop-Loss Manager to Execution Agent
+        if self._execution_agent and self._stop_loss_manager:
+            self._execution_agent.set_stop_loss_manager(self._stop_loss_manager)
+            logger.info("  StopLossManager -> ExecutionAgent")
 
         # Wire Contract Specs to Broker
         if self._broker and self._contract_specs:
@@ -910,18 +1049,160 @@ class TradingFirmOrchestrator:
             self._signal_agents.append(mm_agent)
             self._event_bus.register_signal_agent("MarketMakingAgent")
 
-        if agents_config.get("options_vol", {}).get("enabled", True):
-            options_agent = OptionsVolAgent(
+        # Sentiment Agent (LLM-powered news analysis)
+        if agents_config.get("sentiment", {}).get("enabled", True):
+            from agents.sentiment_agent import SentimentAgent
+            from core.llm_client import LLMClient
+
+            sentiment_config = agents_config.get("sentiment", {})
+            llm_client = LLMClient(config=sentiment_config)
+
+            sentiment_agent = SentimentAgent(
                 config=AgentConfig(
-                    name="OptionsVolAgent",
+                    name="SentimentAgent",
                     enabled=True,
-                    parameters=agents_config.get("options_vol", {}),
+                    parameters=sentiment_config,
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+                llm_client=llm_client,
+            )
+            self._signal_agents.append(sentiment_agent)
+            self._event_bus.register_signal_agent("SentimentAgent")
+
+        # Chart Analysis Agent (Claude Vision pattern recognition)
+        if agents_config.get("chart_analysis", {}).get("enabled", True):
+            from agents.chart_analysis_agent import ChartAnalysisAgent
+
+            chart_config = agents_config.get("chart_analysis", {})
+            chart_agent = ChartAnalysisAgent(
+                config=AgentConfig(
+                    name="ChartAnalysisAgent",
+                    enabled=True,
+                    parameters=chart_config,
                 ),
                 event_bus=self._event_bus,
                 audit_logger=self._audit_logger,
             )
-            self._signal_agents.append(options_agent)
-            self._event_bus.register_signal_agent("OptionsVolAgent")
+            self._signal_agents.append(chart_agent)
+            self._event_bus.register_signal_agent("ChartAnalysisAgent")
+
+        # Forecasting Agent (LLM-powered price prediction)
+        if agents_config.get("forecasting", {}).get("enabled", True):
+            from agents.forecasting_agent import ForecastingAgent
+            from core.llm_client import LLMClient
+
+            forecasting_config = agents_config.get("forecasting", {})
+            forecasting_llm_client = LLMClient(config=forecasting_config.get("llm", {}))
+
+            forecasting_agent = ForecastingAgent(
+                config=AgentConfig(
+                    name="ForecastingAgent",
+                    enabled=True,
+                    parameters=forecasting_config,
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+                llm_client=forecasting_llm_client,
+            )
+            self._signal_agents.append(forecasting_agent)
+            self._event_bus.register_signal_agent("ForecastingAgent")
+
+        # ========== NEW PHASE 6 AGENTS ==========
+        # Session Agent (Opening Range Breakout)
+        if agents_config.get("session", {}).get("enabled", True):
+            from agents.session_agent import SessionAgent
+            session_agent = SessionAgent(
+                config=AgentConfig(
+                    name="SessionAgent",
+                    enabled=True,
+                    parameters=agents_config.get("session", {}),
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+            )
+            self._signal_agents.append(session_agent)
+            self._event_bus.register_signal_agent("SessionAgent")
+
+        # Index Spread Agent (MES/MNQ spread trading)
+        if agents_config.get("index_spread", {}).get("enabled", True):
+            from agents.index_spread_agent import IndexSpreadAgent
+            index_spread_agent = IndexSpreadAgent(
+                config=AgentConfig(
+                    name="IndexSpreadAgent",
+                    enabled=True,
+                    parameters=agents_config.get("index_spread", {}),
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+            )
+            self._signal_agents.append(index_spread_agent)
+            self._event_bus.register_signal_agent("IndexSpreadAgent")
+
+        # TTM Squeeze Agent (BB inside KC volatility breakout)
+        if agents_config.get("ttm_squeeze", {}).get("enabled", True):
+            from agents.ttm_squeeze_agent import TTMSqueezeAgent
+            ttm_squeeze_agent = TTMSqueezeAgent(
+                config=AgentConfig(
+                    name="TTMSqueezeAgent",
+                    enabled=True,
+                    parameters=agents_config.get("ttm_squeeze", {}),
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+            )
+            self._signal_agents.append(ttm_squeeze_agent)
+            self._event_bus.register_signal_agent("TTMSqueezeAgent")
+
+        # Event-Driven Agent (FOMC, NFP, CPI)
+        if agents_config.get("event_driven", {}).get("enabled", True):
+            from agents.event_driven_agent import EventDrivenAgent
+            event_driven_agent = EventDrivenAgent(
+                config=AgentConfig(
+                    name="EventDrivenAgent",
+                    enabled=True,
+                    parameters=agents_config.get("event_driven", {}),
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+            )
+            self._signal_agents.append(event_driven_agent)
+            self._event_bus.register_signal_agent("EventDrivenAgent")
+
+            # Initialize Economic Calendar and register events
+            calendar_config = agents_config.get("event_driven", {}).get("calendar", {})
+            self._economic_calendar = create_economic_calendar(calendar_config)
+            asyncio.create_task(self._init_economic_calendar(event_driven_agent))
+
+        # Mean Reversion Agent (RSI extremes, BB touches, z-score)
+        if agents_config.get("mean_reversion", {}).get("enabled", True):
+            from agents.mean_reversion_agent import MeanReversionAgent
+            mean_reversion_agent = MeanReversionAgent(
+                config=AgentConfig(
+                    name="MeanReversionAgent",
+                    enabled=True,
+                    parameters=agents_config.get("mean_reversion", {}),
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+            )
+            self._signal_agents.append(mean_reversion_agent)
+            self._event_bus.register_signal_agent("MeanReversionAgent")
+
+        # MACD-v Agent (Volatility-Normalized MACD - Charles H. Dow Award 2022)
+        if agents_config.get("macdv", {}).get("enabled", True):
+            from agents.macdv_agent import MACDvAgent
+            macdv_agent = MACDvAgent(
+                config=AgentConfig(
+                    name="MACDvAgent",
+                    enabled=True,
+                    parameters=agents_config.get("macdv", {}),
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+            )
+            self._signal_agents.append(macdv_agent)
+            self._event_bus.register_signal_agent("MACDvAgent")
 
         logger.info(f"Initialized {len(self._signal_agents)} signal agents")
 
@@ -939,6 +1220,8 @@ class TradingFirmOrchestrator:
 
         # ========== RISK AGENT (separate from compliance) ==========
         logger.info("Initializing Risk agent...")
+        drawdown_config = risk_config.get("drawdown", {})
+        max_drawdown_pct = risk_config.get("max_drawdown_pct", 10.0)
         risk_params = {
             "limits": {
                 "max_position_size_pct": risk_config.get("max_position_size_pct", 5.0),
@@ -946,13 +1229,20 @@ class TradingFirmOrchestrator:
                 "max_leverage": risk_config.get("max_leverage", 2.0),
                 "max_portfolio_var_pct": risk_config.get("max_portfolio_var_pct", 2.0),
                 "max_daily_loss_pct": risk_config.get("max_daily_loss_pct", 3.0),
-                "max_drawdown_pct": risk_config.get("max_drawdown_pct", 10.0),
+                "max_drawdown_pct": max_drawdown_pct,
             },
             "rate_limits": {
                 "max_orders_per_minute": risk_config.get("max_orders_per_minute", 10),
                 "min_order_interval_ms": risk_config.get("min_order_interval_ms", 100),
             },
             "sector_map": self._config.get("sector_map", {}),
+            # Tiered drawdown thresholds
+            "drawdown": {
+                "warning_pct": drawdown_config.get("warning_pct", 5.0),
+                "reduce_pct": drawdown_config.get("reduce_pct", 7.5),
+                "halt_pct": drawdown_config.get("halt_pct", max_drawdown_pct),
+                "position_reduction_factor": drawdown_config.get("position_reduction_factor", 0.5),
+            },
         }
 
         self._risk_agent = RiskAgent(
@@ -1122,6 +1412,14 @@ class TradingFirmOrchestrator:
         if self._transaction_reporting_agent:
             await self._transaction_reporting_agent.start()
 
+        # Start stop-loss manager
+        if self._stop_loss_manager:
+            await self._stop_loss_manager.start()
+
+        # Historical warmup - fetch past bars to immediately warm up agents
+        if self._broker.is_connected:
+            await self._run_historical_warmup()
+
         # Start market data
         await self._market_data.start()
 
@@ -1284,6 +1582,10 @@ class TradingFirmOrchestrator:
         if self._dashboard_server:
             logger.info("  [OK] Dashboard server stopping (task will be cancelled)")
 
+        # Stop economic calendar auto-update
+        if self._economic_calendar:
+            await _stop_with_timeout(self._economic_calendar.stop_auto_update(), "EconomicCalendar")
+
         # Stop market data first
         if self._market_data:
             await _stop_with_timeout(self._market_data.stop(), "MarketDataManager")
@@ -1295,6 +1597,10 @@ class TradingFirmOrchestrator:
             )
         if self._surveillance_agent:
             await _stop_with_timeout(self._surveillance_agent.stop(), "SurveillanceAgent")
+
+        # Stop stop-loss manager before execution agent
+        if self._stop_loss_manager:
+            await _stop_with_timeout(self._stop_loss_manager.stop(), "StopLossManager")
 
         # Stop agents in reverse order (execution -> compliance -> risk -> cio -> signals)
         if self._execution_agent:
@@ -1311,6 +1617,14 @@ class TradingFirmOrchestrator:
 
         for agent in self._signal_agents:
             await _stop_with_timeout(agent.stop(), agent.name)
+
+        # CRITICAL: Flush audit ledger before stopping event bus to ensure all entries are persisted
+        if self._audit_ledger:
+            try:
+                entries_flushed = self._audit_ledger.flush_to_disk()
+                logger.info(f"  [OK] Flushed {entries_flushed} audit ledger entries to disk (MiFID II compliance)")
+            except Exception as e:
+                logger.error(f"  [ERROR] Failed to flush audit ledger: {e}")
 
         # Stop event bus
         if self._event_bus:
@@ -1333,13 +1647,27 @@ class TradingFirmOrchestrator:
         logger.info("=" * 60)
 
     async def _handle_risk_alert(self, event: RiskAlertEvent) -> None:
-        """Handle risk alerts - may trigger emergency shutdown."""
+        """
+        Handle risk alerts - AUTONOMOUS MODE: Never triggers shutdown.
+
+        The system manages risk autonomously through:
+        - Progressive position reduction
+        - Defensive mode (exits only)
+        - Position closure based on drawdown levels
+
+        The system NEVER shuts down automatically.
+        """
         if event.halt_trading:
+            # Log the alert but DO NOT shutdown - autonomous risk management instead
             logger.critical("=" * 60)
-            logger.critical("EMERGENCY SHUTDOWN TRIGGERED")
-            logger.critical(f"Reason: {event.message}")
+            logger.critical("CRITICAL RISK ALERT - AUTONOMOUS MODE ACTIVE")
+            logger.critical(f"Alert: {event.message}")
+            logger.critical("System continues running with autonomous risk management")
             logger.critical("=" * 60)
-            self._shutdown_event.set()
+            # NOTE: We do NOT call self._shutdown_event.set()
+            # The system stays running and manages risk autonomously
+        else:
+            logger.warning(f"Risk Alert: {event.message}")
 
     def _on_fill(self, fill: FillEvent) -> None:
         """Handle fill notifications for monitoring."""

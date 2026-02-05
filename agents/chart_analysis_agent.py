@@ -15,6 +15,7 @@ import asyncio
 import base64
 import io
 import logging
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING, Any
@@ -136,8 +137,8 @@ Confidence Guidelines:
         self._model = config.parameters.get("model", "claude-sonnet-4-20250514")
         self._timeout = config.parameters.get("timeout_seconds", 30)
 
-        # State
-        self._price_history: dict[str, list[CandleData]] = {}
+        # State (bounded deque to prevent memory leak)
+        self._price_history: dict[str, deque[CandleData]] = {}
         self._last_analysis: dict[str, datetime] = {}
         self._http_session: aiohttp.ClientSession | None = None
 
@@ -200,8 +201,9 @@ Confidence Guidelines:
 
     def _update_price_history(self, symbol: str, event: MarketDataEvent) -> None:
         """Update candle history for symbol."""
+        max_candles = self._candle_count * 2
         if symbol not in self._price_history:
-            self._price_history[symbol] = []
+            self._price_history[symbol] = deque(maxlen=max_candles)
 
         # Create candle from tick (simplified - in production would aggregate properly)
         price = event.last or event.mid
@@ -218,11 +220,6 @@ Confidence Guidelines:
         )
 
         self._price_history[symbol].append(candle)
-
-        # Keep limited history
-        max_candles = self._candle_count * 2
-        if len(self._price_history[symbol]) > max_candles:
-            self._price_history[symbol] = self._price_history[symbol][-max_candles:]
 
     def _should_analyze(self, symbol: str) -> bool:
         """Check if analysis interval has passed."""
@@ -245,6 +242,8 @@ Confidence Guidelines:
             confidence=0.2,
             rationale=f"Chart: Monitoring {symbol}, candles={candle_count}",
             data_sources=("chart_analysis", "ib_market_data"),
+            target_price=None,
+            stop_loss=None,
         )
         await self._event_bus.publish_signal(signal)
 
@@ -281,7 +280,22 @@ Confidence Guidelines:
                 confidence=result.confidence,
                 rationale=f"Chart confidence too low: {result.confidence:.2f}",
                 data_sources=("chart_analysis", "claude_vision"),
+                target_price=None,
+                stop_loss=None,
             )
+
+        # Calculate stop_loss and target_price based on direction
+        # 2% stop_loss distance, 4% target_price distance (2:1 reward/risk ratio)
+        current_price = candles[-1].close
+        if result.direction == SignalDirection.LONG:
+            stop_loss = current_price * 0.98  # 2% below current price
+            target_price = current_price * 1.04  # 4% above current price
+        elif result.direction == SignalDirection.SHORT:
+            stop_loss = current_price * 1.02  # 2% above current price
+            target_price = current_price * 0.96  # 4% below current price
+        else:
+            stop_loss = None
+            target_price = None
 
         return SignalEvent(
             source_agent=self.name,
@@ -292,6 +306,8 @@ Confidence Guidelines:
             confidence=result.confidence,
             rationale=self._build_rationale(result),
             data_sources=("chart_analysis", "claude_vision", "pattern_recognition"),
+            target_price=target_price,
+            stop_loss=stop_loss,
         )
 
     def _generate_chart_image(

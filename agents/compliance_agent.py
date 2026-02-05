@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta, time
 from typing import TYPE_CHECKING, Optional, Set, Callable, Any
@@ -337,7 +337,9 @@ class ComplianceAgent(ValidationAgent):
         "order_book", "market_making_indicator", "inventory",
         "macro_indicator", "vix_indicator",
         # Emergency deleveraging source (internal risk management)
-        "leverage_monitor",
+        "leverage_monitor", "position_management",
+        # CIO Agent sources
+        "portfolio_state", "signal_analysis",
         # LLM sentiment analysis sources (SentimentAgent)
         "llm_sentiment", "news_sentiment", "financial_news",
         "sentiment_indicator",
@@ -347,11 +349,32 @@ class ComplianceAgent(ValidationAgent):
         # Demand zone analysis
         "demand_zone", "supply_zone", "price_level",
         # LLM forecasting sources (ForecastingAgent)
-        "llm_forecast", "price_history", "price_forecast",
+        "llm_forecast", "price_history", "price_forecast", "technical_analysis",
         # FinBERT local sentiment analysis
         "finbert_sentiment", "finbert_analysis", "local_nlp",
         # DRL CIO sources
         "drl_decision", "rl_policy", "learned_weights",
+        # ===== PHASE 6 AGENTS DATA SOURCES =====
+        # EventDrivenAgent
+        "economic_calendar", "event_surprise",
+        "fomc", "nfp", "cpi", "ppi", "gdp", "retail_sales", "ism_pmi",
+        # IndexSpreadAgent
+        "index_spread_strategy", "zscore", "cointegration",
+        # MeanReversionAgent
+        "rsi", "bollinger_bands", "regime_detection",
+        # TTMSqueezeAgent
+        "ttm_squeeze", "bollinger", "keltner", "momentum",
+        # SessionAgent
+        "session_strategy", "volume",
+        "opening_range_breakout", "session_momentum",
+        # MacroAgent (new indicators)
+        "yield_curve_indicator", "dxy_indicator",
+        "hmm_regime_detector", "safe_haven_indicator",
+        # MACDvAgent
+        "macdv_indicator", "macdv", "atr", "signal_line", "histogram",
+        "overbought_zone", "oversold_zone",
+        # MomentumAgent dynamic sources
+        "ma_cross", "macd", "stochastic", "adx", "session_filter", "trend_indicator",
     }
 
     # Suspicious patterns in data content
@@ -414,9 +437,9 @@ class ComplianceAgent(ValidationAgent):
         # ISIN mappings (symbol -> ISIN)
         self._isin_mappings: dict[str, str] = config.parameters.get("isin_mappings", {})
 
-        # Monitoring
-        self._check_latencies: list[float] = []
-        self._rejections_today: list[tuple[datetime, RejectionCode, str]] = []
+        # Monitoring (bounded to prevent memory leak)
+        self._check_latencies: deque[float] = deque(maxlen=1000)
+        self._rejections_today: deque[tuple[datetime, RejectionCode, str]] = deque(maxlen=500)
 
         # Pre-trade compliance checks caching (P2)
         pretrade_cache_config = config.parameters.get("pretrade_cache", {})
@@ -429,14 +452,14 @@ class ComplianceAgent(ValidationAgent):
         # Regulatory calendar integration (P2)
         reg_calendar_config = config.parameters.get("regulatory_calendar", {})
         self._regulatory_calendar_enabled = reg_calendar_config.get("enabled", True)
-        self._regulatory_events: list[dict] = []  # List of upcoming regulatory events
-        self._regulatory_deadlines: list[dict] = []  # List of upcoming deadlines
+        self._regulatory_events: deque[dict] = deque(maxlen=200)  # List of upcoming regulatory events
+        self._regulatory_deadlines: deque[dict] = deque(maxlen=200)  # List of upcoming deadlines
         self._regulatory_holidays: set[str] = set()  # YYYY-MM-DD format
 
         # Audit report scheduling (P2)
         audit_schedule_config = config.parameters.get("audit_schedule", {})
         self._audit_schedule_enabled = audit_schedule_config.get("enabled", True)
-        self._scheduled_reports: list[dict] = []  # List of scheduled reports
+        self._scheduled_reports: deque[dict] = deque(maxlen=100)  # List of scheduled reports
         self._last_report_times: dict[str, datetime] = {}  # report_type -> last run time
         self._report_retention_days = audit_schedule_config.get("retention_days", 365)
 
@@ -540,7 +563,14 @@ class ComplianceAgent(ValidationAgent):
         if not isinstance(event, ValidatedDecisionEvent):
             return
 
-        # Only process approved decisions from risk agent
+        # Only process approved decisions from risk agent (NOT from ourselves!)
+        # This prevents infinite loop where compliance processes its own output
+        if event.source_agent == self.name:
+            return  # Skip our own emitted events
+
+        if event.source_agent != "RiskAgent":
+            return  # Only process events from RiskAgent
+
         if not event.approved:
             return
 

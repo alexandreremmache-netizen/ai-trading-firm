@@ -24,6 +24,9 @@ The AI Trading Firm is a comprehensive algorithmic trading platform that emulate
 | Options Volatility | IV percentile trading, delta-targeted strategies |
 | Market Making | Spread capture with inventory management |
 | Macro | Yield curve, VIX, and dollar index indicators |
+| Sentiment (LLM) | News sentiment analysis via Claude/GPT |
+| Chart Analysis (Vision) | Visual pattern recognition via Claude Vision |
+| Forecasting (LLM) | Multi-horizon price prediction via LLM |
 
 ## Risk Management
 
@@ -102,6 +105,21 @@ vi config.yaml
 python main.py
 ```
 
+### Real-Time Dashboard
+
+The system includes a real-time monitoring dashboard accessible at:
+
+- **Dashboard URL**: `http://localhost:8081`
+- **Health Check**: `http://localhost:8080/health`
+
+Dashboard features:
+- Real-time P&L and performance metrics
+- Live position monitoring with unrealized P&L
+- Signal stream from all strategy agents
+- CIO decision history with APPROVED/REJECTED status
+- Risk limits visualization
+- WebSocket-based updates (no polling)
+
 ## Documentation
 
 | Document | Description |
@@ -112,6 +130,7 @@ python main.py
 | [docs/STRATEGIES.md](docs/STRATEGIES.md) | Trading strategies |
 | [docs/RISK_MANAGEMENT.md](docs/RISK_MANAGEMENT.md) | Risk management |
 | [docs/COMPLIANCE.md](docs/COMPLIANCE.md) | EU/AMF compliance |
+| [docs/DASHBOARD.md](docs/DASHBOARD.md) | Real-time dashboard |
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | API reference |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Deployment guide |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Troubleshooting |
@@ -122,10 +141,11 @@ python main.py
                     MARKET DATA (Interactive Brokers)
                               |
                               v
-    +--------------------------------------------------+
-    |         SIGNAL AGENTS (Parallel Fan-Out)         |
-    |  [Macro] [StatArb] [Momentum] [MM] [OptionsVol]  |
-    +--------------------------------------------------+
+    +----------------------------------------------------------+
+    |              SIGNAL AGENTS (Parallel Fan-Out)            |
+    |  [Macro] [StatArb] [Momentum] [MM] [OptionsVol]          |
+    |  [Sentiment] [ChartAnalysis] [Forecasting]               |
+    +----------------------------------------------------------+
                               |
                     SignalEvent (Barrier Sync)
                               v
@@ -171,11 +191,12 @@ python main.py
 
 ```
 ai-trading-firm/
-|-- agents/          # Agent implementations
-|-- core/            # Core infrastructure
+|-- agents/          # Agent implementations (8 signal + CIO + risk + compliance + execution)
+|-- core/            # Core infrastructure (event bus, broker, VaR, etc.)
+|-- dashboard/       # Real-time monitoring dashboard (FastAPI + WebSocket)
 |-- data/            # Market data handling
 |-- strategies/      # Strategy implementations
-|-- tests/           # Test suite
+|-- tests/           # Test suite (299+ tests)
 |-- docs/            # Documentation
 |-- config.yaml      # Configuration
 |-- main.py          # Entry point
@@ -196,7 +217,14 @@ risk:
   max_portfolio_var_pct: 2.0
   max_position_size_pct: 5.0
   max_daily_loss_pct: 3.0
-  max_drawdown_pct: 10.0
+  max_drawdown_pct: 15.0
+  drawdown:
+    halt_pct: 15.0           # Halt trading when drawdown exceeds this %
+
+dashboard:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8081                 # Dashboard on 8081, health check on 8080
 ```
 
 ## Contributing

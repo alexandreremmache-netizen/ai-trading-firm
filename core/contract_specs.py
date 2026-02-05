@@ -191,6 +191,81 @@ CONTRACT_SPECS: dict[str, ContractSpec] = {
     ),
 
     # =========================================================================
+    # MICRO INDEX FUTURES (1/10th of E-mini contracts)
+    # =========================================================================
+    "MES": ContractSpec(
+        symbol="MES",
+        name="Micro E-mini S&P 500",
+        asset_class=AssetClass.INDEX,
+        exchange=Exchange.CME,
+        currency="USD",
+        multiplier=5.0,  # 1/10th of ES
+        tick_size=0.25,
+        tick_value=1.25,
+        initial_margin=1_265.0,
+        maintenance_margin=1_150.0,
+        trading_hours="Sun-Fri 6:00pm-5:00pm ET",
+        contract_months=("H", "M", "U", "Z"),
+        last_trading_day="3rd Friday of contract month",
+        settlement_type="cash",
+        avg_daily_volume=2_000_000,
+    ),
+
+    "MNQ": ContractSpec(
+        symbol="MNQ",
+        name="Micro E-mini NASDAQ 100",
+        asset_class=AssetClass.INDEX,
+        exchange=Exchange.CME,
+        currency="USD",
+        multiplier=2.0,  # 1/10th of NQ
+        tick_size=0.25,
+        tick_value=0.50,
+        initial_margin=1_760.0,
+        maintenance_margin=1_600.0,
+        trading_hours="Sun-Fri 6:00pm-5:00pm ET",
+        contract_months=("H", "M", "U", "Z"),
+        last_trading_day="3rd Friday of contract month",
+        settlement_type="cash",
+        avg_daily_volume=1_500_000,
+    ),
+
+    "MYM": ContractSpec(
+        symbol="MYM",
+        name="Micro E-mini Dow",
+        asset_class=AssetClass.INDEX,
+        exchange=Exchange.CBOT,
+        currency="USD",
+        multiplier=0.5,  # 1/10th of YM
+        tick_size=1.0,
+        tick_value=0.50,
+        initial_margin=935.0,
+        maintenance_margin=850.0,
+        trading_hours="Sun-Fri 6:00pm-5:00pm ET",
+        contract_months=("H", "M", "U", "Z"),
+        last_trading_day="3rd Friday of contract month",
+        settlement_type="cash",
+        avg_daily_volume=500_000,
+    ),
+
+    "M2K": ContractSpec(
+        symbol="M2K",
+        name="Micro E-mini Russell 2000",
+        asset_class=AssetClass.INDEX,
+        exchange=Exchange.CME,
+        currency="USD",
+        multiplier=5.0,  # 1/10th of RTY
+        tick_size=0.1,
+        tick_value=0.50,
+        initial_margin=715.0,
+        maintenance_margin=650.0,
+        trading_hours="Sun-Fri 6:00pm-5:00pm ET",
+        contract_months=("H", "M", "U", "Z"),
+        last_trading_day="3rd Friday of contract month",
+        settlement_type="cash",
+        avg_daily_volume=400_000,
+    ),
+
+    # =========================================================================
     # ENERGY FUTURES
     # =========================================================================
     "CL": ContractSpec(

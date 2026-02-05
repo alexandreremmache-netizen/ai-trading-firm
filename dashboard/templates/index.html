@@ -12,12 +12,16 @@
             --bg-dark: #1a1a2e;
             --bg-card: #16213e;
             --bg-card-hover: #1f3460;
+            --bg-primary: #1a1a2e;
             --accent-green: #00d4aa;
             --accent-red: #ff6b6b;
             --accent-yellow: #ffd93d;
             --accent-blue: #4dabf7;
+            --accent-cyan: #00d4ff;
+            --accent-purple: #a855f7;
             --text-primary: #e8e8e8;
             --text-secondary: #a0a0a0;
+            --border-color: rgba(255, 255, 255, 0.2);
         }
 
         body {
@@ -92,6 +96,67 @@
         .status-idle { background: var(--accent-yellow); }
         .status-error { background: var(--accent-red); box-shadow: 0 0 10px var(--accent-red); }
 
+        /* Loading skeleton animation */
+        @keyframes skeleton-pulse {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 0.7; }
+        }
+
+        .loading-skeleton {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 12px;
+        }
+
+        .skeleton-row {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .skeleton-circle {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: var(--surface-2);
+            animation: skeleton-pulse 1.5s ease-in-out infinite;
+        }
+
+        .skeleton-text {
+            height: 14px;
+            background: var(--surface-2);
+            border-radius: 4px;
+            animation: skeleton-pulse 1.5s ease-in-out infinite;
+        }
+
+        .skeleton-text.short { width: 60px; }
+        .skeleton-text.medium { width: 120px; }
+        .skeleton-text.long { width: 180px; }
+        .skeleton-text.full { flex: 1; }
+
+        .loading-message {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid var(--surface-2);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
         .metric-card {
             text-align: center;
             padding: 1rem;
@@ -126,6 +191,26 @@
 
         .agent-row:hover {
             background: rgba(255,255,255,0.08);
+        }
+
+        .agent-row.agent-disabled {
+            opacity: 0.5;
+            background: rgba(255,0,0,0.05);
+        }
+
+        .agent-row.agent-disabled .agent-name {
+            text-decoration: line-through;
+        }
+
+        .agent-toggle {
+            cursor: pointer;
+            width: 2.5em;
+            height: 1.25em;
+        }
+
+        .agent-toggle:checked {
+            background-color: #28a745;
+            border-color: #28a745;
         }
 
         .agent-name {
@@ -231,8 +316,54 @@
             color: var(--text-secondary);
         }
 
+        /* Decision Status Badges */
+        .decision-status {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-left: 0.5rem;
+        }
+        .decision-status.status-approved {
+            background: rgba(0, 212, 170, 0.2);
+            color: var(--accent-green);
+            border: 1px solid var(--accent-green);
+        }
+        .decision-status.status-rejected {
+            background: rgba(255, 107, 107, 0.2);
+            color: var(--accent-red);
+            border: 1px solid var(--accent-red);
+        }
+        .decision-status.status-pending {
+            background: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+            border: 1px solid #ffc107;
+        }
+        .decision-status i {
+            margin-right: 0.25rem;
+            font-size: 0.65rem;
+        }
+
         .decision-card-body {
             padding: 0 1rem 0.75rem 1rem;
+        }
+
+        .rejection-reason {
+            background: rgba(255, 107, 107, 0.15);
+            border: 1px solid var(--accent-red);
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            margin-bottom: 0.75rem;
+            font-size: 0.85rem;
+            color: var(--accent-red);
+        }
+
+        .rejection-reason i {
+            margin-right: 0.5rem;
         }
 
         .decision-rationale {
@@ -286,6 +417,20 @@
         .signal-short { background: rgba(255, 107, 107, 0.2); border: 1px solid var(--accent-red); }
         .signal-flat { background: rgba(255, 217, 61, 0.1); border: 1px solid var(--accent-yellow); }
 
+        /* Open positions with colored left border */
+        .open-position {
+            border-left: 4px solid transparent;
+            padding-left: 0.5rem;
+        }
+        .open-long {
+            border-left-color: var(--accent-green);
+            background: rgba(0, 212, 170, 0.08);
+        }
+        .open-short {
+            border-left-color: var(--accent-red);
+            background: rgba(255, 107, 107, 0.08);
+        }
+
         /* Closed positions with colored left border */
         .closed-position {
             border-left: 4px solid transparent;
@@ -300,6 +445,59 @@
             background: rgba(255, 107, 107, 0.05);
         }
 
+        /* Sortable columns */
+        .sortable-header .sortable {
+            cursor: pointer;
+            user-select: none;
+            transition: all 0.2s ease;
+        }
+        .sortable-header .sortable:hover {
+            color: var(--accent-cyan);
+        }
+        .sortable-header .sortable i {
+            margin-left: 0.3rem;
+            font-size: 0.7rem;
+            opacity: 0.5;
+        }
+        .sortable-header .sortable.sort-asc i:before {
+            content: "\f0de"; /* fa-sort-up */
+        }
+        .sortable-header .sortable.sort-desc i:before {
+            content: "\f0dd"; /* fa-sort-down */
+        }
+        .sortable-header .sortable.sort-asc i,
+        .sortable-header .sortable.sort-desc i {
+            opacity: 1;
+            color: var(--accent-cyan);
+        }
+
+        /* Time filter buttons */
+        .time-filter-group {
+            display: flex;
+            gap: 0.25rem;
+            flex-wrap: wrap;
+        }
+        .time-filter-btn {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.7rem;
+            border: 1px solid var(--border-color);
+            background: transparent;
+            color: var(--text-secondary);
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .time-filter-btn:hover {
+            border-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+        }
+        .time-filter-btn.active {
+            background: var(--accent-cyan);
+            border-color: var(--accent-cyan);
+            color: var(--bg-primary);
+            font-weight: 600;
+        }
+
         .position-row {
             display: grid;
             grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
@@ -307,6 +505,27 @@
             border-bottom: 1px solid rgba(255,255,255,0.05);
             align-items: center;
             color: var(--text-primary);
+        }
+
+        /* Extended position row for more columns (with TP/SL) */
+        .position-row-extended {
+            display: grid;
+            grid-template-columns: 1.1fr 1.3fr 0.7fr 0.8fr 0.8fr 0.7fr 0.7fr 0.7fr 0.7fr 0.9fr;
+            padding: 0.5rem;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            align-items: center;
+            color: var(--text-primary);
+            font-size: 0.82rem;
+            min-width: 900px;
+        }
+
+        /* Closed positions need one more column (closed_at) */
+        #closedTab .position-row-extended {
+            grid-template-columns: 1fr 1.1fr 1.1fr 0.6fr 0.7fr 0.7fr 0.6fr 0.6fr 0.6fr 0.6fr 0.8fr;
+        }
+
+        .position-row-extended:hover {
+            background: rgba(255,255,255,0.05);
         }
 
         .position-row:hover {
@@ -390,6 +609,588 @@
             background: var(--bg-card-hover);
             border-radius: 4px;
         }
+
+        /* Flow Visualization Styles */
+        .flow-container {
+            position: relative;
+            width: 100%;
+            min-height: 950px;
+            height: auto;
+            background: linear-gradient(135deg, rgba(13, 17, 23, 0.95) 0%, rgba(22, 27, 34, 0.95) 100%);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        .flow-svg {
+            width: 100%;
+            height: 100%;
+        }
+        .flow-node {
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .flow-node:hover {
+            filter: brightness(1.2);
+        }
+        .flow-node-rect {
+            fill: rgba(30, 35, 42, 0.9);
+            stroke: var(--accent-cyan);
+            stroke-width: 2;
+            rx: 8;
+        }
+        .flow-node-rect.signal {
+            stroke: var(--accent-green);
+        }
+        .flow-node-rect.signal-llm {
+            stroke: #e879f9;
+            fill: rgba(232, 121, 249, 0.1);
+        }
+        .flow-node-rect.signal-quant {
+            stroke: #22d3ee;
+            fill: rgba(34, 211, 238, 0.1);
+        }
+        .flow-node-rect.signal-macro {
+            stroke: #facc15;
+            fill: rgba(250, 204, 21, 0.1);
+        }
+        .flow-node-rect.decision {
+            stroke: var(--accent-blue);
+        }
+        .flow-node-rect.validation {
+            stroke: var(--accent-yellow);
+        }
+        .flow-node-rect.execution {
+            stroke: var(--accent-purple);
+        }
+        .flow-node-rect.broker {
+            stroke: #ff6b6b;
+        }
+        .flow-node-text {
+            fill: var(--text-primary);
+            font-size: 11px;
+            font-weight: 600;
+            text-anchor: middle;
+            dominant-baseline: middle;
+        }
+        .flow-node-subtext {
+            fill: var(--text-secondary);
+            font-size: 9px;
+            text-anchor: middle;
+        }
+        .flow-arrow {
+            fill: none;
+            stroke: var(--accent-cyan);
+            stroke-width: 2;
+            opacity: 0.4;
+            marker-end: url(#arrowhead);
+        }
+        .flow-arrow.active {
+            opacity: 1;
+            stroke-width: 3;
+        }
+        .flow-event {
+            fill: var(--accent-cyan);
+            filter: drop-shadow(0 0 6px var(--accent-cyan));
+        }
+        .flow-event.signal {
+            fill: var(--accent-green);
+            filter: drop-shadow(0 0 6px var(--accent-green));
+        }
+        .flow-event.decision {
+            fill: var(--accent-blue);
+            filter: drop-shadow(0 0 6px var(--accent-blue));
+        }
+        .flow-event.validated {
+            fill: var(--accent-yellow);
+            filter: drop-shadow(0 0 6px var(--accent-yellow));
+        }
+        .flow-event.order {
+            fill: var(--accent-purple);
+            filter: drop-shadow(0 0 6px var(--accent-purple));
+        }
+        .flow-event.fill {
+            fill: #ff6b6b;
+            filter: drop-shadow(0 0 6px #ff6b6b);
+        }
+        .flow-label {
+            fill: var(--text-secondary);
+            font-size: 10px;
+            font-style: italic;
+        }
+        .flow-title {
+            fill: var(--accent-cyan);
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 2px;
+        }
+        .flow-legend {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+        }
+        .flow-legend-item {
+            display: flex;
+            align-items: center;
+            margin: 4px 0;
+        }
+        .flow-legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .flow-stats {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+        }
+        .flow-stat {
+            display: flex;
+            justify-content: space-between;
+            margin: 4px 0;
+        }
+        .flow-stat-value {
+            color: var(--accent-cyan);
+            font-weight: 600;
+            margin-left: 15px;
+        }
+        @keyframes flowPulse {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 1; }
+        }
+        @keyframes eventMove {
+            0% { offset-distance: 0%; opacity: 1; }
+            100% { offset-distance: 100%; opacity: 0; }
+        }
+        .flow-event-log {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            width: 280px;
+            max-height: 150px;
+            overflow-y: auto;
+            background: rgba(0,0,0,0.8);
+            border-radius: 8px;
+            padding: 8px;
+            font-size: 0.7rem;
+        }
+        .flow-event-item {
+            padding: 4px 8px;
+            margin: 2px 0;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.05);
+            border-left: 3px solid var(--accent-cyan);
+            animation: fadeIn 0.3s ease;
+        }
+        .flow-event-item.signal { border-left-color: var(--accent-green); }
+        .flow-event-item.decision { border-left-color: var(--accent-blue); }
+        .flow-event-item.validated { border-left-color: var(--accent-yellow); }
+        .flow-event-item.order { border-left-color: var(--accent-purple); }
+        .flow-event-item.fill { border-left-color: #ff6b6b; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        /* =========================================
+           ADVANCED ANALYTICS STYLES (Phase 8)
+           ========================================= */
+
+        /* Collapsible Panel Styles */
+        .panel-collapsible .card-header {
+            cursor: pointer;
+            user-select: none;
+        }
+        .panel-collapsible .card-header:hover {
+            background: rgba(255,255,255,0.05);
+        }
+        .panel-collapsible .collapse-icon {
+            transition: transform 0.3s ease;
+        }
+        .panel-collapsible .collapsed .collapse-icon {
+            transform: rotate(-90deg);
+        }
+
+        /* Rolling Metrics Panel */
+        .rolling-metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+            gap: 0.75rem;
+        }
+        .rolling-metric-card {
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 0.75rem;
+            text-align: center;
+            border-left: 3px solid var(--accent-cyan);
+        }
+        .rolling-metric-card.metric-good { border-left-color: var(--accent-green); }
+        .rolling-metric-card.metric-warning { border-left-color: var(--accent-yellow); }
+        .rolling-metric-card.metric-bad { border-left-color: var(--accent-red); }
+        .rolling-metric-period {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .rolling-metric-value {
+            font-size: 1.4rem;
+            font-weight: 700;
+            margin: 0.25rem 0;
+        }
+        .rolling-metric-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+        .rolling-metrics-sparkline {
+            height: 30px;
+            margin-top: 0.5rem;
+        }
+
+        /* Correlation Heatmap */
+        .correlation-heatmap {
+            display: grid;
+            gap: 2px;
+            padding: 0.5rem;
+        }
+        .correlation-cell {
+            width: 100%;
+            aspect-ratio: 1;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.65rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s ease;
+        }
+        .correlation-cell:hover {
+            transform: scale(1.1);
+            z-index: 10;
+        }
+        .correlation-cell.corr-high-pos { background: rgba(255, 82, 82, 0.8); color: white; }
+        .correlation-cell.corr-med-pos { background: rgba(255, 138, 101, 0.7); color: white; }
+        .correlation-cell.corr-low-pos { background: rgba(255, 183, 77, 0.5); color: var(--text-primary); }
+        .correlation-cell.corr-neutral { background: rgba(255, 255, 255, 0.1); color: var(--text-secondary); }
+        .correlation-cell.corr-low-neg { background: rgba(100, 181, 246, 0.5); color: var(--text-primary); }
+        .correlation-cell.corr-med-neg { background: rgba(66, 165, 245, 0.7); color: white; }
+        .correlation-cell.corr-high-neg { background: rgba(25, 118, 210, 0.8); color: white; }
+        .correlation-cell.corr-self { background: var(--accent-cyan); color: var(--bg-primary); }
+        .correlation-header {
+            font-size: 0.65rem;
+            color: var(--text-secondary);
+            text-align: center;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .correlation-legend {
+            display: flex;
+            justify-content: center;
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+            flex-wrap: wrap;
+        }
+        .correlation-legend-item {
+            display: flex;
+            align-items: center;
+            font-size: 0.65rem;
+            color: var(--text-secondary);
+        }
+        .correlation-legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+            margin-right: 4px;
+        }
+        .correlation-alert {
+            background: rgba(255, 107, 107, 0.15);
+            border: 1px solid var(--accent-red);
+            border-radius: 6px;
+            padding: 0.5rem;
+            margin-top: 0.5rem;
+            font-size: 0.8rem;
+            color: var(--accent-red);
+        }
+
+        /* Session Performance Panel */
+        .session-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 0.75rem;
+        }
+        .session-card {
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 0.75rem;
+            border-left: 3px solid var(--accent-blue);
+        }
+        .session-card.session-best {
+            border-left-color: var(--accent-green);
+            background: rgba(0, 212, 170, 0.1);
+        }
+        .session-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+        .session-name {
+            font-weight: 600;
+            font-size: 0.9rem;
+            text-transform: capitalize;
+        }
+        .session-win-rate {
+            font-size: 1.1rem;
+            font-weight: 700;
+        }
+        .session-stats {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.5rem;
+            font-size: 0.75rem;
+        }
+        .session-stat {
+            display: flex;
+            justify-content: space-between;
+        }
+        .session-stat-label { color: var(--text-secondary); }
+        .session-bar-chart {
+            display: flex;
+            align-items: flex-end;
+            height: 80px;
+            gap: 0.5rem;
+            padding: 0.5rem 0;
+        }
+        .session-bar {
+            flex: 1;
+            background: var(--accent-blue);
+            border-radius: 4px 4px 0 0;
+            transition: height 0.3s ease;
+            min-height: 4px;
+            position: relative;
+        }
+        .session-bar.session-best-bar { background: var(--accent-green); }
+        .session-bar-label {
+            position: absolute;
+            bottom: -20px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.6rem;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        /* Strategy Comparison Panel */
+        .strategy-table {
+            width: 100%;
+            font-size: 0.8rem;
+        }
+        .strategy-table th {
+            color: var(--text-secondary);
+            font-weight: 600;
+            padding: 0.5rem;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            text-align: left;
+        }
+        .strategy-table td {
+            padding: 0.5rem;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .strategy-table tr:hover {
+            background: rgba(255,255,255,0.03);
+        }
+        .strategy-rank {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            font-size: 0.7rem;
+            font-weight: 700;
+        }
+        .strategy-rank.rank-1 { background: gold; color: #333; }
+        .strategy-rank.rank-2 { background: silver; color: #333; }
+        .strategy-rank.rank-3 { background: #cd7f32; color: white; }
+        .strategy-rank.rank-other { background: rgba(255,255,255,0.1); color: var(--text-secondary); }
+        .strategy-toggle {
+            width: 36px;
+            height: 20px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 10px;
+            cursor: pointer;
+            position: relative;
+            transition: background 0.3s ease;
+        }
+        .strategy-toggle.active { background: var(--accent-green); }
+        .strategy-toggle::after {
+            content: '';
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: white;
+            top: 2px;
+            left: 2px;
+            transition: transform 0.3s ease;
+        }
+        .strategy-toggle.active::after { transform: translateX(16px); }
+        .strategy-pie-container {
+            height: 200px;
+            margin-top: 1rem;
+        }
+
+        /* Signal Consensus Panel */
+        .consensus-gauge-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 1rem;
+        }
+        .consensus-gauge {
+            width: 200px;
+            height: 100px;
+            position: relative;
+        }
+        .consensus-gauge-bg {
+            fill: rgba(255,255,255,0.05);
+        }
+        .consensus-gauge-fill {
+            transition: stroke-dashoffset 0.5s ease;
+        }
+        .consensus-gauge-value {
+            font-size: 1.8rem;
+            font-weight: 700;
+            fill: var(--text-primary);
+        }
+        .consensus-gauge-label {
+            font-size: 0.75rem;
+            fill: var(--text-secondary);
+        }
+        .consensus-agents-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+        .consensus-agent-badge {
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 600;
+        }
+        .consensus-agent-badge.bullish {
+            background: rgba(0, 212, 170, 0.2);
+            color: var(--accent-green);
+            border: 1px solid var(--accent-green);
+        }
+        .consensus-agent-badge.bearish {
+            background: rgba(255, 107, 107, 0.2);
+            color: var(--accent-red);
+            border: 1px solid var(--accent-red);
+        }
+        .consensus-agent-badge.neutral {
+            background: rgba(255, 217, 61, 0.2);
+            color: var(--accent-yellow);
+            border: 1px solid var(--accent-yellow);
+        }
+        .consensus-disagreement-alert {
+            background: rgba(255, 107, 107, 0.15);
+            border: 1px solid var(--accent-red);
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            margin-top: 0.75rem;
+            font-size: 0.8rem;
+        }
+        .consensus-symbol-pills {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        .consensus-symbol-pill {
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            cursor: pointer;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            transition: all 0.2s ease;
+        }
+        .consensus-symbol-pill:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        .consensus-symbol-pill.active {
+            background: var(--accent-cyan);
+            color: var(--bg-primary);
+            border-color: var(--accent-cyan);
+        }
+        .consensus-history-chart {
+            height: 60px;
+            margin-top: 0.5rem;
+        }
+
+        /* Risk Heatmap */
+        .risk-heatmap-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+            gap: 0.5rem;
+        }
+        .risk-heatmap-cell {
+            padding: 0.75rem;
+            border-radius: 8px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .risk-heatmap-cell:hover {
+            transform: scale(1.05);
+        }
+        .risk-heatmap-cell.risk-low { background: rgba(0, 212, 170, 0.3); border: 1px solid var(--accent-green); }
+        .risk-heatmap-cell.risk-medium { background: rgba(255, 217, 61, 0.3); border: 1px solid var(--accent-yellow); }
+        .risk-heatmap-cell.risk-high { background: rgba(255, 107, 107, 0.3); border: 1px solid var(--accent-red); }
+        .risk-heatmap-cell.risk-critical { background: rgba(255, 0, 0, 0.4); border: 2px solid var(--accent-red); animation: pulse 1.5s infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        .risk-symbol { font-weight: 700; font-size: 0.9rem; }
+        .risk-score { font-size: 1.2rem; font-weight: 700; margin: 0.25rem 0; }
+        .risk-factors { font-size: 0.65rem; color: var(--text-secondary); }
+
+        /* Analytics Tab Styling */
+        .analytics-section {
+            margin-bottom: 1.5rem;
+        }
+        .analytics-section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.75rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .analytics-section-title {
+            font-size: 1rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .analytics-section-subtitle {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
     </style>
 </head>
 <body>
@@ -399,8 +1200,16 @@
             <span class="navbar-brand">
                 <i class="fas fa-chart-line me-2"></i>AI Trading Firm
             </span>
+            <!-- Center: Alert Message -->
+            <div class="d-flex align-items-center flex-grow-1 justify-content-center">
+                <span id="headerAlertMessage" class="text-secondary small" style="max-width: 400px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"></span>
+            </div>
             <div class="d-flex align-items-center gap-3">
                 <span class="text-secondary" id="currentTime"></span>
+                <!-- Kill Switch Button -->
+                <button id="killSwitchBtnNav" class="btn btn-outline-danger btn-sm" onclick="toggleKillSwitch()" title="Emergency Kill Switch">
+                    <i class="fas fa-power-off me-1"></i>Kill Switch
+                </button>
                 <div class="d-flex align-items-center gap-2">
                     <div id="connectionStatus"></div>
                     <span class="text-secondary" id="connectionText">Disconnected</span>
@@ -422,12 +1231,14 @@
                 <div class="card metric-card">
                     <div class="metric-value" id="totalPnl">$0</div>
                     <div class="metric-label">Total P&L</div>
+                    <div class="metric-sublabel" id="pnlBreakdown" style="font-size: 0.65rem; color: var(--text-secondary);"></div>
                 </div>
             </div>
             <div class="col-md-2">
                 <div class="card metric-card">
                     <div class="metric-value" id="todayPnl">$0</div>
                     <div class="metric-label">Today's P&L</div>
+                    <div class="metric-sublabel" id="todayPnlBreakdown" style="font-size: 0.65rem; color: var(--text-secondary);"></div>
                 </div>
             </div>
             <div class="col-md-2">
@@ -466,7 +1277,13 @@
                         <span class="badge bg-success" id="activeAgentCount">0 active</span>
                     </div>
                     <div class="card-body" id="agentList">
-                        <!-- Populated by JS -->
+                        <!-- Loading skeleton shown until data arrives -->
+                        <div class="loading-skeleton">
+                            <div class="loading-message"><span class="loading-spinner"></span>Loading agents...</div>
+                            <div class="skeleton-row"><div class="skeleton-circle"></div><div class="skeleton-text long"></div></div>
+                            <div class="skeleton-row"><div class="skeleton-circle"></div><div class="skeleton-text medium"></div></div>
+                            <div class="skeleton-row"><div class="skeleton-circle"></div><div class="skeleton-text long"></div></div>
+                        </div>
                     </div>
                 </div>
 
@@ -477,17 +1294,25 @@
                         <span class="badge bg-info" id="eventCount">0</span>
                     </div>
                     <div class="card-body event-stream" id="eventStream">
-                        <!-- Populated by JS -->
+                        <!-- Loading skeleton shown until data arrives -->
+                        <div class="loading-skeleton">
+                            <div class="loading-message"><span class="loading-spinner"></span>Loading events...</div>
+                            <div class="skeleton-row"><div class="skeleton-text short"></div><div class="skeleton-text full"></div></div>
+                            <div class="skeleton-row"><div class="skeleton-text short"></div><div class="skeleton-text full"></div></div>
+                        </div>
                     </div>
                 </div>
             </div>
 
-            <!-- Center Column - Charts & Positions -->
-            <div class="col-lg-6">
+            <!-- Center Column - Charts & Positions (expanded since Risk/Decisions moved to Performance tab) -->
+            <div class="col-lg-9">
                 <!-- Tabs -->
                 <ul class="nav nav-pills mb-3">
                     <li class="nav-item">
                         <a class="nav-link active" data-bs-toggle="pill" href="#performanceTab">Performance</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-bs-toggle="pill" href="#analyticsTab"><i class="fas fa-chart-bar me-1"></i>Analytics</a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link" data-bs-toggle="pill" href="#positionsTab">Positions</a>
@@ -496,23 +1321,253 @@
                         <a class="nav-link" data-bs-toggle="pill" href="#closedTab">Closed</a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" data-bs-toggle="pill" href="#signalsTab">Signals</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" data-bs-toggle="pill" href="#decisionsTab">Decisions</a>
+                        <a class="nav-link" data-bs-toggle="pill" href="#flowTab"><i class="fas fa-project-diagram me-1"></i>Flow</a>
                     </li>
                 </ul>
 
                 <div class="tab-content">
                     <!-- Performance Tab -->
                     <div class="tab-pane fade show active" id="performanceTab">
-                        <div class="card">
-                            <div class="card-header">
-                                <span><i class="fas fa-chart-area me-2"></i>Equity Curve</span>
+                        <div class="row g-3">
+                            <!-- Left Column: Equity Curve, Signal Matrix, Rolling Metrics -->
+                            <div class="col-lg-7">
+                                <!-- Equity Curve Card -->
+                                <div class="card mb-3">
+                                    <div class="card-header d-flex justify-content-between align-items-center">
+                                        <span><i class="fas fa-chart-area me-2"></i>Equity Curve</span>
+                                        <div class="time-filter-group">
+                                            <button type="button" class="time-filter-btn" data-period="1h">1H</button>
+                                            <button type="button" class="time-filter-btn" data-period="4h">4H</button>
+                                            <button type="button" class="time-filter-btn" data-period="1d">1D</button>
+                                            <button type="button" class="time-filter-btn" data-period="1w">1W</button>
+                                            <button type="button" class="time-filter-btn" data-period="1m">1M</button>
+                                            <button type="button" class="time-filter-btn active" data-period="all">ALL</button>
+                                        </div>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="chart-container">
+                                            <canvas id="equityChart"></canvas>
+                                        </div>
+                                    </div>
+                                </div>
+                                <!-- Signal Matrix Card (moved here from Signals tab) -->
+                                <div class="card mb-3">
+                                    <div class="card-header">
+                                        <span><i class="fas fa-signal me-2"></i>Signal Matrix</span>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="signal-matrix" id="signalMatrix">
+                                            <!-- Populated by JS -->
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Rolling Sharpe/Sortino Panel -->
+                                <div class="card">
+                                    <div class="card-header">
+                                        <span><i class="fas fa-chart-line me-2"></i>Rolling Metrics</span>
+                                        <span class="badge bg-info" id="rollingMetricsStatus">Loading...</span>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="rolling-metrics-grid" id="rollingMetricsGrid">
+                                            <!-- Populated by JS -->
+                                            <div class="text-secondary text-center py-3">Loading rolling metrics...</div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
-                            <div class="card-body">
-                                <div class="chart-container">
-                                    <canvas id="equityChart"></canvas>
+
+                            <!-- Right Column: Risk Monitor, CIO Decisions -->
+                            <div class="col-lg-5">
+                                <!-- Risk Monitor (inline in Performance tab) -->
+                                <div class="card mb-3">
+                                    <div class="card-header">
+                                        <span><i class="fas fa-shield-alt me-2"></i>Risk Monitor</span>
+                                        <span class="badge" id="riskStatusPerf">OK</span>
+                                    </div>
+                                    <div class="card-body" id="riskPanelPerf">
+                                        <!-- Populated by JS -->
+                                    </div>
+                                </div>
+
+                                <!-- CIO Decisions (inline in Performance tab) -->
+                                <div class="card mb-3">
+                                    <div class="card-header">
+                                        <span><i class="fas fa-gavel me-2"></i>CIO Decisions</span>
+                                        <span class="badge bg-info ms-2" id="decisionsCountPerf">0</span>
+                                    </div>
+                                    <div class="card-body" style="max-height: 400px; overflow-y: auto;">
+                                        <div id="decisionsListPerf">
+                                            <!-- Populated by JS -->
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Analytics Tab (Advanced Analytics) -->
+                    <div class="tab-pane fade" id="analyticsTab">
+                        <div class="row g-3">
+                            <!-- Left Column: Session Performance + Strategy Comparison -->
+                            <div class="col-lg-6">
+                                <!-- Session Performance Panel -->
+                                <div class="card mb-3 panel-collapsible">
+                                    <div class="card-header" data-bs-toggle="collapse" data-bs-target="#sessionPerformanceBody">
+                                        <span><i class="fas fa-clock me-2"></i>Win Rate by Session</span>
+                                        <i class="fas fa-chevron-down collapse-icon"></i>
+                                    </div>
+                                    <div class="collapse show" id="sessionPerformanceBody">
+                                        <div class="card-body">
+                                            <!-- Session Bar Chart -->
+                                            <div class="session-bar-chart" id="sessionBarChart">
+                                                <div class="session-bar" style="height: 20%;" data-session="asian">
+                                                    <span class="session-bar-label">Asian</span>
+                                                </div>
+                                                <div class="session-bar" style="height: 50%;" data-session="european">
+                                                    <span class="session-bar-label">London</span>
+                                                </div>
+                                                <div class="session-bar session-best-bar" style="height: 80%;" data-session="overlap">
+                                                    <span class="session-bar-label">Overlap</span>
+                                                </div>
+                                                <div class="session-bar" style="height: 60%;" data-session="us">
+                                                    <span class="session-bar-label">NY</span>
+                                                </div>
+                                            </div>
+                                            <!-- Session Cards Grid -->
+                                            <div class="session-grid mt-3" id="sessionGrid">
+                                                <!-- Populated by JS -->
+                                                <div class="text-secondary text-center py-3">Loading session data...</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Strategy Comparison Panel -->
+                                <div class="card panel-collapsible">
+                                    <div class="card-header" data-bs-toggle="collapse" data-bs-target="#strategyComparisonBody">
+                                        <span><i class="fas fa-trophy me-2"></i>Strategy Performance</span>
+                                        <i class="fas fa-chevron-down collapse-icon"></i>
+                                    </div>
+                                    <div class="collapse show" id="strategyComparisonBody">
+                                        <div class="card-body">
+                                            <div class="table-responsive">
+                                                <table class="strategy-table" id="strategyTable">
+                                                    <thead>
+                                                        <tr>
+                                                            <th>#</th>
+                                                            <th>Strategy</th>
+                                                            <th>Signals</th>
+                                                            <th>Accuracy</th>
+                                                            <th>Avg Conv.</th>
+                                                            <th>P&L</th>
+                                                            <th>Enable</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody id="strategyTableBody">
+                                                        <!-- Populated by JS -->
+                                                        <tr><td colspan="7" class="text-secondary text-center">Loading strategies...</td></tr>
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                            <!-- P&L Attribution Pie Chart -->
+                                            <div class="strategy-pie-container">
+                                                <canvas id="strategyPieChart"></canvas>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Right Column: Signal Consensus + Risk Heatmap -->
+                            <div class="col-lg-6">
+                                <!-- Signal Consensus Panel -->
+                                <div class="card mb-3 panel-collapsible">
+                                    <div class="card-header" data-bs-toggle="collapse" data-bs-target="#signalConsensusBody">
+                                        <span><i class="fas fa-users me-2"></i>Signal Consensus</span>
+                                        <span class="badge" id="consensusStrengthBadge">--</span>
+                                    </div>
+                                    <div class="collapse show" id="signalConsensusBody">
+                                        <div class="card-body">
+                                            <!-- Symbol Pills -->
+                                            <div class="consensus-symbol-pills" id="consensusSymbolPills">
+                                                <!-- Populated by JS -->
+                                            </div>
+
+                                            <!-- Consensus Gauge -->
+                                            <div class="consensus-gauge-container">
+                                                <svg class="consensus-gauge" viewBox="0 0 200 120">
+                                                    <path class="consensus-gauge-bg" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="16" stroke-linecap="round"/>
+                                                    <path id="consensusGaugeFill" class="consensus-gauge-fill" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="var(--accent-cyan)" stroke-width="16" stroke-linecap="round" stroke-dasharray="251.2" stroke-dashoffset="125.6"/>
+                                                    <text class="consensus-gauge-value" x="100" y="90" text-anchor="middle" id="consensusGaugeValue">0%</text>
+                                                    <text class="consensus-gauge-label" x="100" y="110" text-anchor="middle">Consensus Strength</text>
+                                                    <text x="15" y="115" font-size="10" fill="var(--accent-red)">Bearish</text>
+                                                    <text x="155" y="115" font-size="10" fill="var(--accent-green)">Bullish</text>
+                                                </svg>
+                                            </div>
+
+                                            <!-- Agent Signals List -->
+                                            <div class="consensus-agents-list" id="consensusAgentsList">
+                                                <!-- Populated by JS -->
+                                            </div>
+
+                                            <!-- High Disagreement Alert -->
+                                            <div class="consensus-disagreement-alert" id="consensusDisagreementAlert" style="display: none;">
+                                                <i class="fas fa-exclamation-triangle me-2"></i>
+                                                <strong>High Disagreement:</strong> <span id="consensusDisagreementText"></span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Correlation Heatmap Panel -->
+                                <div class="card mb-3 panel-collapsible">
+                                    <div class="card-header" data-bs-toggle="collapse" data-bs-target="#correlationHeatmapBody">
+                                        <span><i class="fas fa-th me-2"></i>Position Correlations</span>
+                                        <span class="badge bg-secondary" id="avgCorrelationBadge">Avg: --</span>
+                                    </div>
+                                    <div class="collapse show" id="correlationHeatmapBody">
+                                        <div class="card-body">
+                                            <div class="correlation-heatmap" id="correlationHeatmap">
+                                                <!-- Populated by JS -->
+                                                <div class="text-secondary text-center py-3">Loading correlations...</div>
+                                            </div>
+                                            <div class="correlation-legend">
+                                                <div class="correlation-legend-item">
+                                                    <div class="correlation-legend-color" style="background: rgba(25, 118, 210, 0.8);"></div>
+                                                    <span>-1.0</span>
+                                                </div>
+                                                <div class="correlation-legend-item">
+                                                    <div class="correlation-legend-color" style="background: rgba(255, 255, 255, 0.1);"></div>
+                                                    <span>0.0</span>
+                                                </div>
+                                                <div class="correlation-legend-item">
+                                                    <div class="correlation-legend-color" style="background: rgba(255, 82, 82, 0.8);"></div>
+                                                    <span>+1.0</span>
+                                                </div>
+                                            </div>
+                                            <div class="correlation-alert" id="correlationAlert" style="display: none;">
+                                                <i class="fas fa-exclamation-triangle me-2"></i>
+                                                <strong>High Correlation Alert:</strong> Average correlation > 0.7
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Risk Heatmap Panel -->
+                                <div class="card panel-collapsible">
+                                    <div class="card-header" data-bs-toggle="collapse" data-bs-target="#riskHeatmapBody">
+                                        <span><i class="fas fa-fire me-2"></i>Position Risk Heatmap</span>
+                                        <span class="badge" id="highRiskCountBadge">0 high risk</span>
+                                    </div>
+                                    <div class="collapse show" id="riskHeatmapBody">
+                                        <div class="card-body">
+                                            <div class="risk-heatmap-grid" id="riskHeatmapGrid">
+                                                <!-- Populated by JS -->
+                                                <div class="text-secondary text-center py-3">Loading risk data...</div>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -525,16 +1580,26 @@
                                 <span><i class="fas fa-wallet me-2"></i>Open Positions</span>
                                 <span class="badge bg-primary ms-2" id="openPositionsCount">0</span>
                             </div>
-                            <div class="card-body">
-                                <div class="position-row fw-bold text-secondary">
-                                    <div>Symbol</div>
-                                    <div>Qty</div>
-                                    <div>Entry</div>
-                                    <div>Current</div>
-                                    <div>P&L</div>
+                            <div class="card-body" style="overflow-x: auto;">
+                                <div class="position-row-extended fw-bold text-secondary sortable-header">
+                                    <div class="sortable" data-sort="symbol" data-table="positions">Symbol <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="entry_time" data-table="positions">Date/Heure <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="quantity" data-table="positions">Qty <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="entry_price" data-table="positions">Entry <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="current_price" data-table="positions">Current <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="target_price" data-table="positions">TP <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="stop_loss" data-table="positions">SL <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="conviction" data-table="positions">Conv <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="signal" data-table="positions">Signal <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="pnl" data-table="positions">P&L <i class="fas fa-sort"></i></div>
                                 </div>
                                 <div id="positionsList">
-                                    <!-- Populated by JS -->
+                                    <!-- Loading skeleton shown until data arrives -->
+                                    <div class="loading-skeleton">
+                                        <div class="loading-message"><span class="loading-spinner"></span>Loading positions...</div>
+                                        <div class="skeleton-row"><div class="skeleton-text short"></div><div class="skeleton-text medium"></div><div class="skeleton-text short"></div><div class="skeleton-text medium"></div></div>
+                                        <div class="skeleton-row"><div class="skeleton-text short"></div><div class="skeleton-text medium"></div><div class="skeleton-text short"></div><div class="skeleton-text medium"></div></div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -547,45 +1612,322 @@
                                 <span><i class="fas fa-history me-2"></i>Closed Positions</span>
                                 <span class="badge bg-secondary ms-2" id="closedPositionsCount">0</span>
                             </div>
-                            <div class="card-body">
-                                <div class="position-row fw-bold text-secondary">
-                                    <div>Symbol</div>
-                                    <div>Qty</div>
-                                    <div>Entry</div>
-                                    <div>Exit</div>
-                                    <div>P&L</div>
+                            <div class="card-body" style="overflow-x: auto;">
+                                <div class="position-row-extended fw-bold text-secondary sortable-header">
+                                    <div class="sortable" data-sort="symbol" data-table="closed">Symbol <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="entry_time" data-table="closed">Ouverture <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="closed_at" data-table="closed">Fermeture <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="quantity" data-table="closed">Qty <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="entry_price" data-table="closed">Entry <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="exit_price" data-table="closed">Exit <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="target_price" data-table="closed">TP <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="stop_loss" data-table="closed">SL <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="conviction" data-table="closed">Conv <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="signal" data-table="closed">Signal <i class="fas fa-sort"></i></div>
+                                    <div class="sortable" data-sort="pnl" data-table="closed">P&L <i class="fas fa-sort"></i></div>
                                 </div>
                                 <div id="closedPositionsList">
-                                    <!-- Populated by JS -->
+                                    <!-- Loading skeleton shown until data arrives -->
+                                    <div class="loading-skeleton">
+                                        <div class="loading-message"><span class="loading-spinner"></span>Loading closed positions...</div>
+                                        <div class="skeleton-row"><div class="skeleton-text short"></div><div class="skeleton-text medium"></div><div class="skeleton-text short"></div><div class="skeleton-text medium"></div></div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     </div>
 
-                    <!-- Signals Tab -->
-                    <div class="tab-pane fade" id="signalsTab">
+                    <!-- Flow Monitor Tab -->
+                    <div class="tab-pane fade" id="flowTab">
                         <div class="card">
                             <div class="card-header">
-                                <span><i class="fas fa-signal me-2"></i>Signal Matrix</span>
+                                <span><i class="fas fa-project-diagram me-2"></i>Event Flow Monitor</span>
+                                <span class="badge bg-success ms-2" id="flowEventsCount">0</span>
                             </div>
-                            <div class="card-body">
-                                <div class="signal-matrix" id="signalMatrix">
-                                    <!-- Populated by JS -->
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                            <div class="card-body p-0">
+                                <div class="flow-container" id="flowContainer">
+                                    <svg class="flow-svg" id="flowSvg" viewBox="0 0 1000 900" preserveAspectRatio="xMidYMid meet">
+                                        <!-- Definitions -->
+                                        <defs>
+                                            <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                                                <polygon points="0 0, 10 3.5, 0 7" fill="var(--accent-cyan)"/>
+                                            </marker>
+                                            <marker id="arrowhead-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                                                <polygon points="0 0, 10 3.5, 0 7" fill="var(--accent-green)"/>
+                                            </marker>
+                                            <marker id="arrowhead-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                                                <polygon points="0 0, 10 3.5, 0 7" fill="var(--accent-blue)"/>
+                                            </marker>
+                                            <marker id="arrowhead-yellow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                                                <polygon points="0 0, 10 3.5, 0 7" fill="var(--accent-yellow)"/>
+                                            </marker>
+                                            <marker id="arrowhead-purple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                                                <polygon points="0 0, 10 3.5, 0 7" fill="var(--accent-purple)"/>
+                                            </marker>
+                                            <marker id="arrowhead-pink" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                                                <polygon points="0 0, 10 3.5, 0 7" fill="#e879f9"/>
+                                            </marker>
+                                            <linearGradient id="flowGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                                <stop offset="0%" style="stop-color:rgba(0,212,170,0.1)"/>
+                                                <stop offset="100%" style="stop-color:rgba(0,0,0,0)"/>
+                                            </linearGradient>
+                                        </defs>
 
-                    <!-- Decisions Tab -->
-                    <div class="tab-pane fade" id="decisionsTab">
-                        <div class="card">
-                            <div class="card-header">
-                                <span><i class="fas fa-gavel me-2"></i>CIO Decisions</span>
-                                <span class="badge bg-info ms-2" id="decisionsCount">0</span>
-                            </div>
-                            <div class="card-body" style="max-height: 500px; overflow-y: auto;">
-                                <div id="decisionsList">
-                                    <!-- Populated by JS -->
+                                        <!-- Background -->
+                                        <rect width="1000" height="900" fill="url(#flowGradient)"/>
+
+                                        <!-- Title -->
+                                        <text x="500" y="30" class="flow-title" text-anchor="middle">AI TRADING FIRM - REAL-TIME EVENT FLOW</text>
+
+                                        <!-- Interactive Brokers Node -->
+                                        <g class="flow-node" id="node-ib">
+                                            <rect class="flow-node-rect broker" x="30" y="60" width="160" height="55"/>
+                                            <text class="flow-node-text" x="110" y="85">Interactive Brokers</text>
+                                            <text class="flow-node-subtext" x="110" y="100">Market Data + Execution</text>
+                                        </g>
+
+                                        <!-- Event Bus Node -->
+                                        <g class="flow-node" id="node-eventbus">
+                                            <rect class="flow-node-rect" x="780" y="60" width="160" height="55"/>
+                                            <text class="flow-node-text" x="860" y="80">EVENT BUS</text>
+                                            <text class="flow-node-subtext" x="860" y="95">(Pub/Sub Async)</text>
+                                        </g>
+
+                                        <!-- MarketDataEvent Arrow -->
+                                        <path class="flow-arrow" id="arrow-market" d="M 190 87 L 780 87" marker-end="url(#arrowhead)"/>
+                                        <text class="flow-label" x="480" y="78">MarketDataEvent</text>
+
+                                        <!-- ============================================= -->
+                                        <!-- SIGNAL AGENTS CONTAINER - 13 Agents, 3 Rows -->
+                                        <!-- ============================================= -->
+                                        <g id="signal-agents-group">
+                                            <rect x="50" y="140" width="900" height="280" fill="rgba(0,212,170,0.03)" stroke="var(--accent-green)" stroke-width="2" stroke-dasharray="8,4" rx="12"/>
+                                            <text class="flow-node-text" x="500" y="165" fill="var(--accent-green)" style="font-size: 13px;">SIGNAL AGENTS - 13 Parallel Strategies (Fan-out)</text>
+
+                                            <!-- Row 1: Market/Quant Agents (Cyan) -->
+                                            <text class="flow-node-subtext" x="70" y="195" fill="#22d3ee" style="text-anchor: start; font-size: 10px;">QUANT</text>
+
+                                            <g class="flow-node" id="node-macro">
+                                                <rect class="flow-node-rect signal-macro" x="70" y="205" width="105" height="45" rx="6"/>
+                                                <text class="flow-node-text" x="122" y="223" fill="#facc15">Macro</text>
+                                                <text class="flow-node-subtext" x="122" y="240">Economic</text>
+                                            </g>
+                                            <g class="flow-node" id="node-statarb">
+                                                <rect class="flow-node-rect signal-quant" x="185" y="205" width="105" height="45" rx="6"/>
+                                                <text class="flow-node-text" x="237" y="223" fill="#22d3ee">StatArb</text>
+                                                <text class="flow-node-subtext" x="237" y="240">Pairs/Spread</text>
+                                            </g>
+                                            <g class="flow-node" id="node-momentum">
+                                                <rect class="flow-node-rect signal-quant" x="300" y="205" width="105" height="45" rx="6"/>
+                                                <text class="flow-node-text" x="352" y="223" fill="#22d3ee">Momentum</text>
+                                                <text class="flow-node-subtext" x="352" y="240">MA/RSI/MACD</text>
+                                            </g>
+                                            <g class="flow-node" id="node-mm">
+                                                <rect class="flow-node-rect signal-quant" x="415" y="205" width="105" height="45" rx="6"/>
+                                                <text class="flow-node-text" x="467" y="223" fill="#22d3ee">MarketMaking</text>
+                                                <text class="flow-node-subtext" x="467" y="240">Spread/Inv</text>
+                                            </g>
+
+                                            <!-- Row 2: MACDv + LLM Agents (Pink/Purple) -->
+                                            <text class="flow-node-subtext" x="70" y="270" fill="#e879f9" style="text-anchor: start; font-size: 10px;">LLM/AI</text>
+
+                                            <g class="flow-node" id="node-macdv">
+                                                <rect class="flow-node-rect signal-quant" x="70" y="280" width="105" height="45" rx="6"/>
+                                                <text class="flow-node-text" x="122" y="298" fill="#22d3ee">MACDv</text>
+                                                <text class="flow-node-subtext" x="122" y="315">Dow Award</text>
+                                            </g>
+                                            <g class="flow-node" id="node-sentiment">
+                                                <rect class="flow-node-rect signal-llm" x="185" y="280" width="105" height="45" rx="6"/>
+                                                <text class="flow-node-text" x="237" y="298" fill="#e879f9">Sentiment</text>
+                                                <text class="flow-node-subtext" x="237" y="315">🔴 LLM News</text>
+                                            </g>
+                                            <g class="flow-node" id="node-chart">
+                                                <rect class="flow-node-rect signal-llm" x="300" y="280" width="105" height="45" rx="6"/>
+                                                <text class="flow-node-text" x="352" y="298" fill="#e879f9">ChartAnalysis</text>
+                                                <text class="flow-node-subtext" x="352" y="315">🔴 Vision AI</text>
+                                            </g>
+                                            <g class="flow-node" id="node-forecast">
+                                                <rect class="flow-node-rect signal-llm" x="415" y="280" width="105" height="45" rx="6"/>
+                                                <text class="flow-node-text" x="467" y="298" fill="#e879f9">Forecasting</text>
+                                                <text class="flow-node-subtext" x="467" y="315">🔴 LLM Predict</text>
+                                            </g>
+
+                                            <!-- Row 3: Additional Strategy Agents (Green) -->
+                                            <text class="flow-node-subtext" x="70" y="345" fill="var(--accent-green)" style="text-anchor: start; font-size: 10px;">STRATEGY</text>
+
+                                            <g class="flow-node" id="node-meanrev">
+                                                <rect class="flow-node-rect signal" x="70" y="355" width="105" height="45" rx="6"/>
+                                                <text class="flow-node-text" x="122" y="373" fill="var(--accent-green)">MeanReversion</text>
+                                                <text class="flow-node-subtext" x="122" y="390">Z-Score</text>
+                                            </g>
+                                            <g class="flow-node" id="node-ttm">
+                                                <rect class="flow-node-rect signal" x="185" y="355" width="105" height="45" rx="6"/>
+                                                <text class="flow-node-text" x="237" y="373" fill="var(--accent-green)">TTMSqueeze</text>
+                                                <text class="flow-node-subtext" x="237" y="390">Volatility</text>
+                                            </g>
+                                            <g class="flow-node" id="node-index">
+                                                <rect class="flow-node-rect signal" x="300" y="355" width="105" height="45" rx="6"/>
+                                                <text class="flow-node-text" x="352" y="373" fill="var(--accent-green)">IndexSpread</text>
+                                                <text class="flow-node-subtext" x="352" y="390">ES/NQ Arb</text>
+                                            </g>
+                                            <g class="flow-node" id="node-event">
+                                                <rect class="flow-node-rect signal" x="415" y="355" width="105" height="45" rx="6"/>
+                                                <text class="flow-node-text" x="467" y="373" fill="var(--accent-green)">EventDriven</text>
+                                                <text class="flow-node-subtext" x="467" y="390">News/Earnings</text>
+                                            </g>
+                                            <g class="flow-node" id="node-session">
+                                                <rect class="flow-node-rect signal" x="530" y="355" width="105" height="45" rx="6"/>
+                                                <text class="flow-node-text" x="582" y="373" fill="var(--accent-green)">Session</text>
+                                                <text class="flow-node-subtext" x="582" y="390">Time-Based</text>
+                                            </g>
+
+                                            <!-- Vertical connector from agents to bottom -->
+                                            <line x1="500" y1="405" x2="500" y2="425" stroke="var(--accent-green)" stroke-width="2" stroke-dasharray="4,2"/>
+                                        </g>
+
+                                        <!-- Agent Type Legend inside container -->
+                                        <g transform="translate(660, 200)">
+                                            <rect x="0" y="0" width="270" height="185" fill="rgba(0,0,0,0.5)" rx="8" stroke="var(--text-secondary)" stroke-width="1"/>
+                                            <text x="135" y="22" class="flow-node-text" fill="var(--text-primary)" style="font-size: 11px;">AGENT TYPES</text>
+
+                                            <rect x="15" y="38" width="14" height="14" rx="3" fill="rgba(250, 204, 21, 0.3)" stroke="#facc15" stroke-width="1.5"/>
+                                            <text x="38" y="50" fill="#facc15" style="font-size: 10px; text-anchor: start;">Macro</text>
+                                            <text x="90" y="50" fill="var(--text-secondary)" style="font-size: 9px; text-anchor: start;">Economic indicators</text>
+
+                                            <rect x="15" y="60" width="14" height="14" rx="3" fill="rgba(34, 211, 238, 0.3)" stroke="#22d3ee" stroke-width="1.5"/>
+                                            <text x="38" y="72" fill="#22d3ee" style="font-size: 10px; text-anchor: start;">Quant</text>
+                                            <text x="90" y="72" fill="var(--text-secondary)" style="font-size: 9px; text-anchor: start;">Statistical/mathematical</text>
+
+                                            <rect x="15" y="82" width="14" height="14" rx="3" fill="rgba(232, 121, 249, 0.3)" stroke="#e879f9" stroke-width="1.5"/>
+                                            <text x="38" y="94" fill="#e879f9" style="font-size: 10px; text-anchor: start;">LLM/AI</text>
+                                            <text x="90" y="94" fill="var(--text-secondary)" style="font-size: 9px; text-anchor: start;">Claude/GPT powered</text>
+
+                                            <rect x="15" y="104" width="14" height="14" rx="3" fill="rgba(0, 212, 170, 0.3)" stroke="var(--accent-green)" stroke-width="1.5"/>
+                                            <text x="38" y="116" fill="var(--accent-green)" style="font-size: 10px; text-anchor: start;">Strategy</text>
+                                            <text x="90" y="116" fill="var(--text-secondary)" style="font-size: 9px; text-anchor: start;">Pattern-based</text>
+
+                                            <line x1="15" y1="130" x2="255" y2="130" stroke="var(--text-secondary)" stroke-width="0.5"/>
+                                            <text x="135" y="148" fill="var(--text-secondary)" style="font-size: 9px; text-anchor: middle;">10 agents actifs en PARALLÈLE</text>
+                                            <text x="135" y="162" fill="#e879f9" style="font-size: 9px; text-anchor: middle;">🔴 = LLM désactivé (tokens)</text>
+                                            <text x="135" y="176" fill="var(--accent-yellow)" style="font-size: 9px; text-anchor: middle;">Barrier waits for ALL signals</text>
+                                        </g>
+
+                                        <!-- Signal arrows to barrier -->
+                                        <path class="flow-arrow" id="arrow-signal" d="M 500 425 L 500 455" stroke="var(--accent-green)" stroke-width="3" marker-end="url(#arrowhead-green)"/>
+                                        <text class="flow-label" x="540" y="445" style="font-size: 11px;">SignalEvent (10 actifs + 3 LLM off)</text>
+
+                                        <!-- Synchronization Barrier -->
+                                        <g class="flow-node" id="node-barrier">
+                                            <rect x="120" y="460" width="760" height="40" fill="rgba(255,193,7,0.15)" stroke="var(--accent-yellow)" stroke-width="2" stroke-dasharray="12,6" rx="6"/>
+                                            <text class="flow-node-text" x="500" y="485" fill="var(--accent-yellow)" style="font-size: 12px;">SYNCHRONIZATION BARRIER (Fan-in, timeout: 10s)</text>
+                                        </g>
+
+                                        <!-- Arrow to CIO -->
+                                        <path class="flow-arrow" id="arrow-to-cio" d="M 500 500 L 500 530" stroke="var(--accent-yellow)" stroke-width="3" marker-end="url(#arrowhead-yellow)"/>
+
+                                        <!-- CIO Agent Node -->
+                                        <g class="flow-node" id="node-cio">
+                                            <rect class="flow-node-rect decision" x="200" y="535" width="600" height="80" rx="10"/>
+                                            <text class="flow-node-text" x="500" y="558" fill="var(--accent-blue)" style="font-size: 14px;">CIO AGENT (SOLE DECISION MAKER)</text>
+                                            <text class="flow-node-subtext" x="300" y="580" style="text-anchor: start;">• Aggregates 10 signal weights</text>
+                                            <text class="flow-node-subtext" x="300" y="595" style="text-anchor: start;">• Kelly criterion position sizing</text>
+                                            <text class="flow-node-subtext" x="550" y="580" style="text-anchor: start;">• Calculates conviction score</text>
+                                            <text class="flow-node-subtext" x="550" y="595" style="text-anchor: start;">• Creates DecisionEvent + audit</text>
+                                        </g>
+
+                                        <!-- Arrow to Risk/Compliance -->
+                                        <path class="flow-arrow" id="arrow-decision" d="M 500 615 L 500 650" stroke="var(--accent-blue)" stroke-width="3" marker-end="url(#arrowhead-blue)"/>
+                                        <text class="flow-label" x="540" y="640" style="font-size: 11px;">DecisionEvent</text>
+
+                                        <!-- Risk Agent Node -->
+                                        <g class="flow-node" id="node-risk">
+                                            <rect class="flow-node-rect validation" x="200" y="655" width="290" height="55" rx="8"/>
+                                            <text class="flow-node-text" x="345" y="675" fill="var(--accent-yellow)">RISK AGENT</text>
+                                            <text class="flow-node-subtext" x="345" y="695">VaR | Position 5% | Loss 3%/day</text>
+                                        </g>
+
+                                        <!-- Compliance Agent Node -->
+                                        <g class="flow-node" id="node-compliance">
+                                            <rect class="flow-node-rect validation" x="510" y="655" width="290" height="55" rx="8"/>
+                                            <text class="flow-node-text" x="655" y="675" fill="var(--accent-yellow)">COMPLIANCE AGENT</text>
+                                            <text class="flow-node-subtext" x="655" y="695">EU/AMF | Leverage 5x | Anti-HFT</text>
+                                        </g>
+
+                                        <!-- Arrow between Risk and Compliance -->
+                                        <path class="flow-arrow" d="M 490 682 L 510 682" stroke="var(--accent-yellow)" stroke-width="2" marker-end="url(#arrowhead-yellow)"/>
+
+                                        <!-- Arrow to Execution -->
+                                        <path class="flow-arrow" id="arrow-validated" d="M 500 710 L 500 745" stroke="var(--accent-yellow)" stroke-width="3" marker-end="url(#arrowhead-yellow)"/>
+                                        <text class="flow-label" x="540" y="735" style="font-size: 11px;">ValidatedDecisionEvent</text>
+
+                                        <!-- Execution Agent Node -->
+                                        <g class="flow-node" id="node-execution">
+                                            <rect class="flow-node-rect execution" x="200" y="750" width="600" height="55" rx="10"/>
+                                            <text class="flow-node-text" x="500" y="773" fill="var(--accent-purple)" style="font-size: 13px;">EXECUTION AGENT (ONLY sends orders)</text>
+                                            <text class="flow-node-subtext" x="500" y="793">TWAP | VWAP | MARKET | Pre-trade checks | Slippage control</text>
+                                        </g>
+
+                                        <!-- Arrow to IB (Order) -->
+                                        <path class="flow-arrow" id="arrow-order" d="M 200 777 L 110 777 L 110 115" stroke="var(--accent-purple)" stroke-width="2" marker-end="url(#arrowhead-purple)"/>
+                                        <text class="flow-label" x="130" y="770" fill="var(--accent-purple)">OrderEvent</text>
+
+                                        <!-- Fill Event back (dashed loop) -->
+                                        <path class="flow-arrow" id="arrow-fill" d="M 30 115 L 30 860 L 970 860 L 970 115 L 940 115" stroke="#ff6b6b" stroke-width="2" stroke-dasharray="8,4"/>
+                                        <text class="flow-label" x="500" y="878" fill="#ff6b6b" style="font-size: 11px;">FillEvent → AUDIT LOG (EU/AMF Compliance)</text>
+
+                                        <!-- Connection to EventBus from signals -->
+                                        <path class="flow-arrow" d="M 860 115 L 860 140" stroke="var(--accent-cyan)" stroke-width="1.5" stroke-dasharray="4,2"/>
+                                    </svg>
+
+                                    <!-- Flow Stats -->
+                                    <div class="flow-stats">
+                                        <div class="flow-stat">
+                                            <span>Events/sec:</span>
+                                            <span class="flow-stat-value" id="flowRate">0</span>
+                                        </div>
+                                        <div class="flow-stat">
+                                            <span>Signals:</span>
+                                            <span class="flow-stat-value" id="flowSignals">0</span>
+                                        </div>
+                                        <div class="flow-stat">
+                                            <span>Decisions:</span>
+                                            <span class="flow-stat-value" id="flowDecisions">0</span>
+                                        </div>
+                                        <div class="flow-stat">
+                                            <span>Fills:</span>
+                                            <span class="flow-stat-value" id="flowFills">0</span>
+                                        </div>
+                                    </div>
+
+                                    <!-- Event Log -->
+                                    <div class="flow-event-log" id="flowEventLog">
+                                        <div class="text-secondary text-center">Waiting for events...</div>
+                                    </div>
+
+                                    <!-- Legend -->
+                                    <div class="flow-legend" style="max-width: 200px;">
+                                        <div style="font-weight: 600; margin-bottom: 6px; color: var(--text-primary); font-size: 0.8rem;">Event Types</div>
+                                        <div class="flow-legend-item">
+                                            <div class="flow-legend-dot" style="background: var(--accent-green);"></div>
+                                            <span>Signal (10 actifs)</span>
+                                        </div>
+                                        <div class="flow-legend-item">
+                                            <div class="flow-legend-dot" style="background: var(--accent-blue);"></div>
+                                            <span>Decision (CIO)</span>
+                                        </div>
+                                        <div class="flow-legend-item">
+                                            <div class="flow-legend-dot" style="background: var(--accent-yellow);"></div>
+                                            <span>Validated</span>
+                                        </div>
+                                        <div class="flow-legend-item">
+                                            <div class="flow-legend-dot" style="background: var(--accent-purple);"></div>
+                                            <span>Order</span>
+                                        </div>
+                                        <div class="flow-legend-item">
+                                            <div class="flow-legend-dot" style="background: #ff6b6b;"></div>
+                                            <span>Fill/Audit</span>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -593,42 +1935,17 @@
                 </div>
             </div>
 
-            <!-- Right Column - Risk & Alerts -->
-            <div class="col-lg-3">
-                <!-- Risk Monitor -->
-                <div class="card mb-3">
-                    <div class="card-header">
-                        <span><i class="fas fa-shield-alt me-2"></i>Risk Monitor</span>
-                        <span class="badge" id="riskStatus">OK</span>
-                    </div>
-                    <div class="card-body" id="riskPanel">
-                        <!-- Populated by JS -->
-                    </div>
-                </div>
-
-                <!-- Kill Switch -->
-                <div class="card mb-3">
-                    <div class="card-header">
-                        <span><i class="fas fa-power-off me-2"></i>Kill Switch</span>
-                    </div>
-                    <div class="card-body text-center">
-                        <button class="btn btn-lg" id="killSwitchBtn" onclick="toggleKillSwitch()">
-                            <i class="fas fa-power-off fa-2x"></i>
-                        </button>
-                        <div class="mt-2" id="killSwitchStatus">Inactive</div>
-                    </div>
-                </div>
-
-                <!-- Recent Alerts -->
-                <div class="card">
-                    <div class="card-header">
-                        <span><i class="fas fa-bell me-2"></i>Alerts</span>
-                        <span class="badge bg-danger" id="alertCount">0</span>
-                    </div>
-                    <div class="card-body" style="max-height: 300px; overflow-y: auto;" id="alertsList">
-                        <!-- Populated by JS -->
-                    </div>
-                </div>
+            <!-- Hidden alerts storage (Kill Switch and Alerts UI moved to navbar) -->
+            <div style="display: none;">
+                <div id="alertsList"></div>
+                <span id="alertCount">0</span>
+                <button id="killSwitchBtn"></button>
+                <div id="killSwitchStatus">Inactive</div>
+                <!-- Hidden sidebar elements for JS compatibility -->
+                <span id="riskStatus">OK</span>
+                <div id="riskPanel"></div>
+                <span id="decisionsCount">0</span>
+                <div id="decisionsList"></div>
             </div>
         </div>
     </div>
@@ -641,13 +1958,76 @@
         let reconnectAttempts = 0;
         const maxReconnectAttempts = 10;
 
+        // Equity data storage for time filtering
+        let fullEquityData = { labels: [], values: [], timestamps: [] };
+        let currentTimePeriod = 'all';
+
+        // Positions data storage for sorting
+        let openPositionsData = [];
+        let closedPositionsData = [];
+        let sortState = {
+            positions: { column: null, direction: 'asc' },
+            closed: { column: null, direction: 'asc' }
+        };
+
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
-            initWebSocket();
-            initCharts();
+            initCharts();         // Initialize charts first
+            initTimeFilters();    // Set up time filter click handlers
+            initSortableColumns(); // Set up column sorting
+            initWebSocket();      // Connect WebSocket after charts are ready
             updateTime();
             setInterval(updateTime, 1000);
         });
+
+        // Initialize sortable column click handlers
+        function initSortableColumns() {
+            document.querySelectorAll('.sortable').forEach(header => {
+                header.addEventListener('click', () => {
+                    const sortKey = header.dataset.sort;
+                    const table = header.dataset.table;
+
+                    // Toggle direction if same column, else default to asc
+                    if (sortState[table].column === sortKey) {
+                        sortState[table].direction = sortState[table].direction === 'asc' ? 'desc' : 'asc';
+                    } else {
+                        sortState[table].column = sortKey;
+                        sortState[table].direction = 'asc';
+                    }
+
+                    // Update UI classes
+                    document.querySelectorAll(`.sortable[data-table="${table}"]`).forEach(h => {
+                        h.classList.remove('sort-asc', 'sort-desc');
+                    });
+                    header.classList.add(sortState[table].direction === 'asc' ? 'sort-asc' : 'sort-desc');
+
+                    // Re-render with sorting
+                    if (table === 'positions') {
+                        renderPositions();
+                    } else if (table === 'closed') {
+                        renderClosedPositions();
+                    }
+                });
+            });
+        }
+
+        // Generic sort function
+        function sortData(data, column, direction) {
+            return [...data].sort((a, b) => {
+                let valA = a[column];
+                let valB = b[column];
+
+                // Handle string comparison
+                if (typeof valA === 'string') {
+                    valA = valA.toLowerCase();
+                    valB = valB.toLowerCase();
+                }
+
+                if (valA < valB) return direction === 'asc' ? -1 : 1;
+                if (valA > valB) return direction === 'asc' ? 1 : -1;
+                return 0;
+            });
+        }
 
         function initWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -667,17 +2047,33 @@
 
                 if (reconnectAttempts < maxReconnectAttempts) {
                     reconnectAttempts++;
-                    setTimeout(initWebSocket, 2000 * reconnectAttempts);
+                    // Exponential backoff with jitter to avoid reconnection storms
+                    const baseDelay = 1000 * Math.pow(2, Math.min(reconnectAttempts, 5));  // Cap at 32s
+                    const jitter = Math.random() * baseDelay * 0.5;  // Add 0-50% jitter
+                    const reconnectDelay = Math.round(baseDelay + jitter);
+                    console.log(`Reconnecting in ${reconnectDelay}ms (attempt ${reconnectAttempts}/${maxReconnectAttempts})`);
+                    setTimeout(initWebSocket, reconnectDelay);
                 }
             };
 
             ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                handleUpdate(data);
+                // CRITICAL FIX: Add error handling for JSON parse errors
+                try {
+                    const data = JSON.parse(event.data);
+                    handleUpdate(data);
+                } catch (parseError) {
+                    console.error('WebSocket message parse error:', parseError, 'Raw data:', event.data?.substring?.(0, 200));
+                    // Don't break the connection - continue processing future messages
+                }
             };
 
             ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
+                // CRITICAL FIX: Trigger reconnection on error (error may not always trigger onclose)
+                if (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING) {
+                    console.log('WebSocket error triggered reconnection');
+                    ws.close(); // This will trigger onclose which handles reconnection
+                }
             };
         }
 
@@ -694,6 +2090,12 @@
                     if (data.payload.alerts) loadAlerts(data.payload.alerts);
                     if (data.payload.risk) updateRisk(data.payload.risk);
                     if (data.payload.equity) updateEquityChart(data.payload.equity);
+                    // Advanced analytics data (Phase 8)
+                    if (data.payload.rolling_metrics) updateRollingMetrics(data.payload.rolling_metrics);
+                    if (data.payload.session_performance) updateSessionPerformance(data.payload.session_performance);
+                    if (data.payload.strategy_comparison) updateStrategyComparison(data.payload.strategy_comparison);
+                    if (data.payload.strategy_ranking) updateStrategyRanking(data.payload.strategy_ranking);
+                    if (data.payload.signal_consensus) updateSignalConsensus(data.payload.signal_consensus);
                     console.log('Initial state loaded');
                     break;
                 case 'metrics':
@@ -704,15 +2106,41 @@
                     break;
                 case 'event':
                     addEvent(data.payload);
+                    // Process for flow visualization
+                    if (typeof processEventForFlow === 'function') {
+                        processEventForFlow(data.payload);
+                    }
                     break;
                 case 'positions':
                     updatePositions(data.payload);
                     break;
                 case 'signals':
                     updateSignals(data.payload);
+                    // Process signals for flow visualization
+                    if (typeof processEventForFlow === 'function' && Array.isArray(data.payload)) {
+                        data.payload.slice(0, 3).forEach(sig => {
+                            processEventForFlow({
+                                type: 'signal',
+                                agent: sig.agent,
+                                symbol: sig.symbol,
+                                direction: sig.direction
+                            });
+                        });
+                    }
                     break;
                 case 'decisions':
                     updateDecisions(data.payload);
+                    // Process decisions for flow visualization
+                    if (typeof processEventForFlow === 'function' && Array.isArray(data.payload)) {
+                        data.payload.slice(0, 3).forEach(dec => {
+                            processEventForFlow({
+                                type: 'decision',
+                                symbol: dec.symbol,
+                                action: dec.direction,
+                                quantity: dec.quantity
+                            });
+                        });
+                    }
                     break;
                 case 'risk':
                     updateRisk(data.payload);
@@ -726,25 +2154,70 @@
                 case 'closed_positions':
                     updateClosedPositions(data.payload);
                     break;
+                case 'agent_toggle':
+                    handleAgentToggle(data.payload);
+                    break;
             }
+        }
+
+        function handleAgentToggle(payload) {
+            // Update the toggle state without full refresh
+            const agentName = payload.agent_name;
+            const enabled = payload.enabled;
+            const toggle = document.getElementById(`toggle-${agentName}`);
+            const row = document.querySelector(`.agent-row[data-agent="${agentName}"]`);
+
+            if (toggle) {
+                toggle.checked = enabled;
+            }
+
+            if (row) {
+                if (enabled) {
+                    row.classList.remove('agent-disabled');
+                } else {
+                    row.classList.add('agent-disabled');
+                }
+            }
+
+            console.log(`Agent ${agentName} toggled to ${enabled ? 'enabled' : 'disabled'}`);
         }
 
         function updateMetrics(metrics) {
             document.getElementById('totalPnl').textContent = formatCurrency(metrics.total_pnl);
             document.getElementById('totalPnl').className = `metric-value ${metrics.total_pnl >= 0 ? 'positive' : 'negative'}`;
 
+            // Show P&L breakdown (unrealized + realized)
+            const unrealized = metrics.unrealized_pnl || 0;
+            const realized = metrics.realized_pnl || 0;
+            const breakdownEl = document.getElementById('pnlBreakdown');
+            if (breakdownEl) {
+                const unrealizedColor = unrealized >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+                const realizedColor = realized >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+                breakdownEl.innerHTML = `Open: <span style="color:${unrealizedColor}">${formatCurrency(unrealized)}</span> | Closed: <span style="color:${realizedColor}">${formatCurrency(realized)}</span>`;
+            }
+
             document.getElementById('todayPnl').textContent = formatCurrency(metrics.today_pnl);
             document.getElementById('todayPnl').className = `metric-value ${metrics.today_pnl >= 0 ? 'positive' : 'negative'}`;
 
-            document.getElementById('sharpeRatio').textContent = metrics.sharpe_ratio.toFixed(2);
-            document.getElementById('winRate').textContent = `${(metrics.win_rate * 100).toFixed(0)}%`;
-            document.getElementById('drawdown').textContent = `${(metrics.drawdown * 100).toFixed(1)}%`;
-            document.getElementById('activePositions').textContent = metrics.position_count;
+            // Show Today's P&L breakdown (unrealized + today's realized)
+            const todayRealized = metrics.today_realized_pnl || 0;
+            const todayBreakdownEl = document.getElementById('todayPnlBreakdown');
+            if (todayBreakdownEl) {
+                const unrealizedColor = unrealized >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+                const todayRealizedColor = todayRealized >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+                todayBreakdownEl.innerHTML = `Open: <span style="color:${unrealizedColor}">${formatCurrency(unrealized)}</span> | Closed today: <span style="color:${todayRealizedColor}">${formatCurrency(todayRealized)}</span>`;
+            }
+
+            document.getElementById('sharpeRatio').textContent = (metrics.sharpe_ratio || 0).toFixed(2);
+            document.getElementById('winRate').textContent = `${((metrics.win_rate || 0) * 100).toFixed(0)}%`;
+            document.getElementById('drawdown').textContent = `${((metrics.drawdown || 0) * 100).toFixed(1)}%`;
+            document.getElementById('activePositions').textContent = metrics.position_count || 0;
         }
 
         function updateAgents(agents) {
             const container = document.getElementById('agentList');
             let activeCount = 0;
+            let enabledCount = 0;
 
             if (!agents || agents.length === 0) {
                 container.innerHTML = '<div class="text-secondary">No agents registered</div>';
@@ -754,31 +2227,134 @@
 
             container.innerHTML = agents.map(agent => {
                 if (agent.status === 'active') activeCount++;
+                if (agent.enabled !== false) enabledCount++;
+                const latency = agent.latency_ms != null ? Number(agent.latency_ms).toFixed(1) : '0.0';
+                const isEnabled = agent.enabled !== false;
+                const usesLLM = agent.uses_llm === true;
+                const isEssential = agent.is_essential === true;
+                const llmBadge = usesLLM ? '<span class="badge bg-warning text-dark ms-1" title="Uses Claude API tokens">LLM</span>' : '';
+                const essentialBadge = isEssential ? '<span class="badge bg-secondary ms-1" title="Essential agent - cannot be disabled"><i class="fas fa-lock"></i></span>' : '';
+                const disabledClass = !isEnabled ? 'agent-disabled' : '';
+
+                // For essential agents: show locked toggle (checked and disabled)
+                // For non-essential: show normal toggle
+                const toggleHtml = isEssential
+                    ? `<div class="form-check form-switch mb-0">
+                           <input class="form-check-input agent-toggle" type="checkbox" role="switch"
+                                  id="toggle-${agent.name}" data-agent="${agent.name}"
+                                  checked disabled
+                                  title="Essential agent - cannot be disabled">
+                       </div>`
+                    : `<div class="form-check form-switch mb-0">
+                           <input class="form-check-input agent-toggle" type="checkbox" role="switch"
+                                  id="toggle-${agent.name}" data-agent="${agent.name}"
+                                  ${isEnabled ? 'checked' : ''}
+                                  title="${isEnabled ? 'Disable' : 'Enable'} ${agent.name}${usesLLM ? ' (uses API tokens)' : ''}">
+                       </div>`;
+
                 return `
-                    <div class="agent-row">
-                        <span class="status-dot status-${agent.status}"></span>
-                        <span class="agent-name">${agent.name}<span class="agent-type">${agent.type}</span></span>
-                        <span class="text-secondary">${agent.latency_ms}ms</span>
+                    <div class="agent-row ${disabledClass}" data-agent="${agent.name}">
+                        <div class="d-flex align-items-center flex-grow-1">
+                            <span class="status-dot status-${isEnabled ? (agent.status || 'idle') : 'stopped'}"></span>
+                            <span class="agent-name">${agent.name || 'Unknown'}${llmBadge}${essentialBadge}<span class="agent-type">${agent.type || ''}</span></span>
+                        </div>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="text-secondary me-2">${latency}ms</span>
+                            ${toggleHtml}
+                        </div>
                     </div>
                 `;
             }).join('');
 
-            document.getElementById('activeAgentCount').textContent = `${activeCount} active`;
+            // Add event listeners to toggle switches (skip disabled/essential agents)
+            document.querySelectorAll('.agent-toggle:not(:disabled)').forEach(toggle => {
+                toggle.addEventListener('change', function() {
+                    const agentName = this.dataset.agent;
+                    const enabled = this.checked;
+                    toggleAgent(agentName, enabled);
+                });
+            });
+
+            document.getElementById('activeAgentCount').textContent = `${enabledCount}/${agents.length} enabled`;
+        }
+
+        // CRITICAL FIX: Debounce map to prevent rapid toggle race conditions
+        const toggleDebounceMap = {};
+        const TOGGLE_DEBOUNCE_MS = 300;
+
+        function toggleAgent(agentName, enabled) {
+            // Debounce: prevent rapid clicking from causing race conditions
+            if (toggleDebounceMap[agentName]) {
+                console.log(`Toggle for ${agentName} debounced`);
+                return;
+            }
+            toggleDebounceMap[agentName] = true;
+            setTimeout(() => { delete toggleDebounceMap[agentName]; }, TOGGLE_DEBOUNCE_MS);
+
+            // Send via WebSocket
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    action: 'toggle_agent',
+                    agent_name: agentName,
+                    enabled: enabled
+                }));
+            } else {
+                // Fallback to REST API with loading state
+                const toggle = document.getElementById(`toggle-${agentName}`);
+                if (toggle) toggle.disabled = true;  // Show loading state
+
+                fetch(`/api/agent/toggle?agent_name=${encodeURIComponent(agentName)}&enabled=${enabled}`, {
+                    method: 'POST'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Agent toggle result:', data);
+                    if (toggle) toggle.disabled = false;
+                })
+                .catch(error => {
+                    console.error('Error toggling agent:', error);
+                    // Revert the toggle on error
+                    if (toggle) {
+                        toggle.checked = !enabled;
+                        toggle.disabled = false;
+                    }
+                });
+            }
+        }
+
+        // Convert UTC time (HH:MM:SS) to local time
+        function utcToLocal(utcTimeStr) {
+            if (!utcTimeStr) return '';
+            try {
+                // Get today's date in UTC and parse time
+                const now = new Date();
+                const [hours, minutes, seconds] = utcTimeStr.split(':').map(Number);
+                const utcDate = new Date(Date.UTC(
+                    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+                    hours, minutes, seconds || 0
+                ));
+                return utcDate.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            } catch (e) {
+                return utcTimeStr;
+            }
         }
 
         function addEvent(event) {
             const container = document.getElementById('eventStream');
-            const eventClass = event.type.includes('SIGNAL') ? 'signal' :
-                              event.type.includes('DECISION') ? 'decision' :
-                              event.type.includes('RISK') ? 'risk' : '';
+            if (!container || !event) return;
+            const eventType = event.type || 'EVENT';
+            const eventClass = eventType.includes('SIGNAL') ? 'signal' :
+                              eventType.includes('DECISION') ? 'decision' :
+                              eventType.includes('RISK') ? 'risk' : '';
 
+            const localTime = utcToLocal(event.time);
             const eventHtml = `
                 <div class="event-item ${eventClass}">
                     <div class="d-flex justify-content-between">
-                        <strong>${event.type}</strong>
-                        <small class="text-secondary">${event.time}</small>
+                        <strong>${eventType}</strong>
+                        <small class="text-secondary">${localTime}</small>
                     </div>
-                    <div class="text-secondary">${event.source} → ${event.summary}</div>
+                    <div class="text-secondary">${event.source || ''} → ${event.summary || ''}</div>
                 </div>
             `;
 
@@ -793,57 +2369,133 @@
         }
 
         function updatePositions(positions) {
+            // Store data globally for sorting
+            openPositionsData = positions || [];
+            renderPositions();
+        }
+
+        function renderPositions() {
             const container = document.getElementById('positionsList');
             const countBadge = document.getElementById('openPositionsCount');
 
-            if (!positions || positions.length === 0) {
+            if (!openPositionsData || openPositionsData.length === 0) {
                 container.innerHTML = '<div class="text-secondary text-center py-3">No open positions</div>';
                 if (countBadge) countBadge.textContent = '0';
                 return;
             }
 
-            if (countBadge) countBadge.textContent = positions.length;
+            if (countBadge) countBadge.textContent = openPositionsData.length;
 
-            container.innerHTML = positions.map(pos => {
-                const isLong = pos.quantity > 0;
+            // Apply sorting if active
+            let sortedData = openPositionsData;
+            if (sortState.positions.column) {
+                sortedData = sortData(openPositionsData, sortState.positions.column, sortState.positions.direction);
+            }
+
+            container.innerHTML = sortedData.map(pos => {
+                const isLong = (pos.quantity || 0) > 0;
                 const side = isLong ? 'LONG' : 'SHORT';
                 const badgeClass = isLong ? 'bg-success' : 'bg-danger';
+                const posClass = isLong ? 'open-long' : 'open-short';
+                const entryTime = pos.entry_time ? formatDateTime(pos.entry_time) : '-';
+                const conviction = pos.conviction ? (pos.conviction * 100).toFixed(0) + '%' : '-';
+                const signal = pos.signal || '-';
+                const signalClass = signal === 'LONG' ? 'positive' : signal === 'SHORT' ? 'negative' : '';
+                const tp = pos.target_price ? '$' + Number(pos.target_price).toFixed(2) : '-';
+                const sl = pos.stop_loss ? '$' + Number(pos.stop_loss).toFixed(2) : '-';
+                const entryPrice = pos.entry_price != null ? Number(pos.entry_price).toFixed(2) : '0.00';
+                const currentPrice = pos.current_price != null ? Number(pos.current_price).toFixed(2) : '0.00';
+                const pnl = pos.pnl || 0;
+                const pnlPct = pos.pnl_pct != null ? Number(pos.pnl_pct).toFixed(1) : '0.0';
                 return `
-                <div class="position-row">
-                    <div><strong>${pos.symbol}</strong> <span class="badge ${badgeClass}">${side}</span></div>
-                    <div class="${isLong ? 'positive' : 'negative'}">${isLong ? '+' : ''}${pos.quantity}</div>
-                    <div>$${pos.entry_price.toFixed(2)}</div>
-                    <div>$${pos.current_price.toFixed(2)}</div>
-                    <div class="${pos.pnl >= 0 ? 'positive' : 'negative'}">
-                        ${formatCurrency(pos.pnl)} (${pos.pnl_pct.toFixed(1)}%)
+                <div class="position-row-extended open-position ${posClass}">
+                    <div><strong>${pos.symbol || 'N/A'}</strong> <span class="badge ${badgeClass}">${side}</span></div>
+                    <div class="text-secondary">${entryTime}</div>
+                    <div class="${isLong ? 'positive' : 'negative'}">${isLong ? '+' : ''}${pos.quantity || 0}</div>
+                    <div>$${entryPrice}</div>
+                    <div>$${currentPrice}</div>
+                    <div class="positive">${tp}</div>
+                    <div class="negative">${sl}</div>
+                    <div class="text-info">${conviction}</div>
+                    <div class="${signalClass}">${signal}</div>
+                    <div class="${pnl >= 0 ? 'positive' : 'negative'}">
+                        ${formatCurrency(pnl)} (${pnlPct}%)
                     </div>
                 </div>
             `}).join('');
         }
 
+        function formatDateTime(isoString) {
+            if (!isoString) return '-';
+            try {
+                const date = new Date(isoString);
+                // CRITICAL FIX: Check for Invalid Date (returns NaN for getTime())
+                if (isNaN(date.getTime())) {
+                    console.warn('formatDateTime: Invalid date string:', isoString);
+                    return '-';
+                }
+                return date.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }) + ' ' +
+                       date.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+            } catch (e) {
+                console.warn('formatDateTime: Error parsing date:', isoString, e);
+                return '-';
+            }
+        }
+
         function updateClosedPositions(positions) {
+            // Store data globally for sorting
+            closedPositionsData = positions || [];
+            renderClosedPositions();
+        }
+
+        function renderClosedPositions() {
             const container = document.getElementById('closedPositionsList');
             const countBadge = document.getElementById('closedPositionsCount');
 
-            if (!positions || positions.length === 0) {
+            if (!closedPositionsData || closedPositionsData.length === 0) {
                 container.innerHTML = '<div class="text-secondary text-center py-3">No closed positions yet</div>';
                 if (countBadge) countBadge.textContent = '0';
                 return;
             }
 
-            if (countBadge) countBadge.textContent = positions.length;
+            if (countBadge) countBadge.textContent = closedPositionsData.length;
 
-            container.innerHTML = positions.map(pos => `
-                <div class="position-row closed-position ${pos.side === 'LONG' ? 'closed-long' : 'closed-short'}">
-                    <div><strong>${pos.symbol}</strong> <span class="badge ${pos.side === 'LONG' ? 'bg-success' : 'bg-danger'}">${pos.side}</span></div>
-                    <div>${Math.abs(pos.quantity)}</div>
-                    <div>$${pos.entry_price.toFixed(2)}</div>
-                    <div>$${pos.exit_price.toFixed(2)}</div>
-                    <div class="${pos.pnl >= 0 ? 'positive' : 'negative'}">
-                        ${formatCurrency(pos.pnl)} (${pos.pnl_pct.toFixed(1)}%)
+            // Apply sorting if active
+            let sortedData = closedPositionsData;
+            if (sortState.closed.column) {
+                sortedData = sortData(closedPositionsData, sortState.closed.column, sortState.closed.direction);
+            }
+
+            container.innerHTML = sortedData.map(pos => {
+                const entryTime = pos.entry_time ? formatDateTime(pos.entry_time) : '-';
+                const closedAt = pos.closed_at ? formatDateTime(pos.closed_at) : '-';
+                const conviction = pos.conviction ? (pos.conviction * 100).toFixed(0) + '%' : '-';
+                const signal = pos.signal || '-';
+                const signalClass = signal === 'LONG' ? 'positive' : signal === 'SHORT' ? 'negative' : '';
+                const tp = pos.target_price ? '$' + Number(pos.target_price).toFixed(2) : '-';
+                const sl = pos.stop_loss ? '$' + Number(pos.stop_loss).toFixed(2) : '-';
+                const side = pos.side || (pos.quantity > 0 ? 'LONG' : 'SHORT');
+                const entryPrice = pos.entry_price != null ? Number(pos.entry_price).toFixed(2) : '0.00';
+                const exitPrice = pos.exit_price != null ? Number(pos.exit_price).toFixed(2) : '0.00';
+                const pnl = pos.pnl || 0;
+                const pnlPct = pos.pnl_pct != null ? Number(pos.pnl_pct).toFixed(1) : '0.0';
+                return `
+                <div class="position-row-extended closed-position ${side === 'LONG' ? 'closed-long' : 'closed-short'}">
+                    <div><strong>${pos.symbol || 'N/A'}</strong> <span class="badge ${side === 'LONG' ? 'bg-success' : 'bg-danger'}">${side}</span></div>
+                    <div class="text-secondary">${entryTime}</div>
+                    <div class="text-secondary">${closedAt}</div>
+                    <div>${Math.abs(pos.quantity || 0)}</div>
+                    <div>$${entryPrice}</div>
+                    <div>$${exitPrice}</div>
+                    <div class="positive">${tp}</div>
+                    <div class="negative">${sl}</div>
+                    <div class="text-info">${conviction}</div>
+                    <div class="${signalClass}">${signal}</div>
+                    <div class="${pnl >= 0 ? 'positive' : 'negative'}">
+                        ${formatCurrency(pnl)} (${pnlPct}%)
                     </div>
                 </div>
-            `).join('');
+            `}).join('');
         }
 
         function updateSignals(signals) {
@@ -857,54 +2509,86 @@
             container.innerHTML = signals.map(signal => {
                 const dirClass = signal.direction === 'LONG' ? 'signal-long' :
                                 signal.direction === 'SHORT' ? 'signal-short' : 'signal-flat';
+                const confidence = ((signal.confidence || 0) * 100).toFixed(0);
                 return `
                     <div class="signal-cell ${dirClass}">
-                        <div class="fw-bold">${signal.agent}</div>
-                        <div>${signal.direction}</div>
-                        <div class="text-secondary">${(signal.confidence * 100).toFixed(0)}%</div>
+                        <div class="fw-bold">${signal.agent || 'Unknown'}</div>
+                        <div>${signal.direction || 'FLAT'}</div>
+                        <div class="text-secondary">${confidence}%</div>
                     </div>
                 `;
             }).join('');
         }
 
         function updateDecisions(decisions) {
-            const container = document.getElementById('decisionsList');
-            const countBadge = document.getElementById('decisionsCount');
+            // Update both sidebar and Performance tab decisions panels
+            const containers = [
+                { list: document.getElementById('decisionsList'), badge: document.getElementById('decisionsCount') },
+                { list: document.getElementById('decisionsListPerf'), badge: document.getElementById('decisionsCountPerf') }
+            ];
 
             if (!decisions || decisions.length === 0) {
-                container.innerHTML = '<div class="text-secondary text-center py-3">No decisions yet</div>';
-                if (countBadge) countBadge.textContent = '0';
+                containers.forEach(({ list, badge }) => {
+                    if (list) list.innerHTML = '<div class="text-secondary text-center py-3">No decisions yet</div>';
+                    if (badge) badge.textContent = '0';
+                });
                 return;
             }
 
-            if (countBadge) countBadge.textContent = decisions.length;
-
-            container.innerHTML = decisions.slice(0, 20).map(dec => {
+            const decisionsHtml = decisions.slice(0, 20).map(dec => {
                 const isLong = dec.direction === 'LONG' || dec.direction === 'BUY';
                 const directionClass = isLong ? 'decision-long' : 'decision-short';
                 const actionClass = isLong ? 'long-action' : 'short-action';
                 const actionText = isLong ? 'BUY' : 'SELL';
-                const pnlClass = dec.pnl > 0 ? 'positive' : dec.pnl < 0 ? 'negative' : 'neutral';
-                const convictionPct = (dec.conviction * 100).toFixed(0);
+                const pnl = dec.pnl || 0;
+                const pnlClass = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral';
+                const convictionPct = ((dec.conviction || 0) * 100).toFixed(0);
 
                 // Parse and format the rationale
                 const formattedRationale = formatDecisionRationale(dec.rationale, convictionPct);
+
+                // Status badge (APPROVED, REJECTED, PENDING)
+                const status = dec.status || 'PENDING';
+                let statusBadge = '';
+                if (status === 'APPROVED' || status === 'EXECUTED') {
+                    statusBadge = '<span class="decision-status status-approved"><i class="fas fa-check"></i>APPROVED</span>';
+                } else if (status === 'REJECTED') {
+                    statusBadge = '<span class="decision-status status-rejected"><i class="fas fa-times"></i>REJECTED</span>';
+                } else {
+                    statusBadge = '<span class="decision-status status-pending"><i class="fas fa-clock"></i>PENDING</span>';
+                }
+
+                // Display rejection reason if rejected
+                const rejectionHtml = (status === 'REJECTED' && dec.rejection_reason)
+                    ? `<div class="rejection-reason"><i class="fas fa-exclamation-triangle"></i> <strong>Rejet:</strong> ${dec.rejection_reason}</div>`
+                    : '';
+
+                // Display estimated value (price * qty) or actual pnl if available
+                const displayValue = (dec.estimated_value || 0) > 0 ? dec.estimated_value : pnl;
+                const valueClass = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral';
 
                 return `
                     <div class="decision-card ${directionClass}">
                         <div class="decision-card-header">
                             <div>
-                                <div class="decision-card-title ${actionClass}">${dec.symbol} - ${actionText}</div>
-                                <div class="decision-card-subtitle">Conviction: ${convictionPct}% | Qty: ${dec.quantity}</div>
+                                <div class="decision-card-title ${actionClass}">${dec.symbol || 'N/A'} - ${actionText} ${statusBadge}</div>
+                                <div class="decision-card-subtitle">Conviction: ${convictionPct}% | Qty: ${dec.quantity || 0}</div>
                             </div>
-                            <div class="decision-card-pnl ${pnlClass}">${formatCurrency(dec.pnl)}</div>
+                            <div class="decision-card-pnl ${valueClass}">${formatCurrency(displayValue)}</div>
                         </div>
                         <div class="decision-card-body">
+                            ${rejectionHtml}
                             <div class="decision-rationale">${formattedRationale}</div>
                         </div>
                     </div>
                 `;
             }).join('');
+
+            // Apply to all containers
+            containers.forEach(({ list, badge }) => {
+                if (list) list.innerHTML = decisionsHtml;
+                if (badge) badge.textContent = decisions.length;
+            });
         }
 
         function formatDecisionRationale(rationale, convictionPct) {
@@ -960,54 +2644,85 @@
         }
 
         function updateRisk(risk) {
-            const container = document.getElementById('riskPanel');
-            const statusBadge = document.getElementById('riskStatus');
+            // Update both sidebar and Performance tab risk panels
+            const containers = [
+                { panel: document.getElementById('riskPanel'), badge: document.getElementById('riskStatus') },
+                { panel: document.getElementById('riskPanelPerf'), badge: document.getElementById('riskStatusPerf') }
+            ];
+
+            if (!risk) return;
             const limits = risk.limits || [];
 
             let overallStatus = 'bg-success';
+            let statusText = 'OK';
+            let riskHtml = '';
+
             if (limits.length === 0) {
-                statusBadge.textContent = 'OK';
-                container.innerHTML = '<div class="text-secondary">No risk limits configured</div>';
+                riskHtml = '<div class="text-secondary">No risk limits configured</div>';
             } else {
                 if (limits.some(l => l.status === 'breach')) {
                     overallStatus = 'bg-danger';
-                    statusBadge.textContent = 'BREACH';
+                    statusText = 'BREACH';
                 } else if (limits.some(l => l.status === 'warning')) {
                     overallStatus = 'bg-warning';
-                    statusBadge.textContent = 'WARNING';
-                } else {
-                    statusBadge.textContent = 'OK';
+                    statusText = 'WARNING';
                 }
 
-                container.innerHTML = limits.map(limit => `
-                    <div class="mb-3 risk-${limit.status}">
+                riskHtml = limits.map(limit => {
+                    const current = limit.current != null ? Number(limit.current).toFixed(1) : '0.0';
+                    const limitVal = limit.limit != null ? Number(limit.limit).toFixed(1) : '100.0';
+                    const usage = limit.usage != null ? Math.min(Number(limit.usage), 100) : 0;
+                    return `
+                    <div class="mb-3 risk-${limit.status || 'ok'}">
                         <div class="d-flex justify-content-between">
-                            <span>${limit.name}</span>
-                            <span>${limit.current.toFixed(1)}% / ${limit.limit.toFixed(1)}%</span>
+                            <span>${limit.name || 'Unknown'}</span>
+                            <span>${current}% / ${limitVal}%</span>
                         </div>
                         <div class="risk-gauge">
-                            <div class="risk-gauge-fill" style="width: ${Math.min(limit.usage, 100)}%"></div>
+                            <div class="risk-gauge-fill" style="width: ${usage}%"></div>
                         </div>
                     </div>
-                `).join('');
+                `}).join('');
             }
-            statusBadge.className = `badge ${overallStatus}`;
+
+            // Apply to all containers
+            containers.forEach(({ panel, badge }) => {
+                if (panel) panel.innerHTML = riskHtml;
+                if (badge) {
+                    badge.textContent = statusText;
+                    badge.className = `badge ${overallStatus}`;
+                }
+            });
         }
 
         function showAlert(alert) {
+            if (!alert) return;
             const container = document.getElementById('alertContainer');
+            if (!container) return;
             const alertClass = alert.severity === 'critical' ? 'danger' :
                               alert.severity === 'warning' ? 'warning' : 'info';
+            const title = alert.title || 'Alert';
+            const message = alert.message || '';
+            const time = alert.time || '';
 
             const alertHtml = `
                 <div class="alert alert-${alertClass} alert-dismissible fade show" role="alert">
-                    <strong>${alert.title}</strong><br>
-                    ${alert.message}
+                    <strong>${title}</strong><br>
+                    ${message}
                     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
                 </div>
             `;
 
             container.insertAdjacentHTML('beforeend', alertHtml);
+
+            // Update header alert message
+            const headerAlert = document.getElementById('headerAlertMessage');
+            const alertColor = alert.severity === 'critical' ? 'var(--accent-red)' :
+                              alert.severity === 'warning' ? 'var(--accent-yellow)' : 'var(--accent-blue)';
+            if (headerAlert) {
+                headerAlert.innerHTML = `<i class="fas fa-bell me-1" style="color: ${alertColor}"></i>${title}: ${message}`;
+                headerAlert.style.color = alertColor;
+            }
 
             // Auto-dismiss after 10 seconds
             setTimeout(() => {
@@ -1019,36 +2734,58 @@
 
             // Update alert count
             const alertsList = document.getElementById('alertsList');
-            alertsList.insertAdjacentHTML('afterbegin', `
-                <div class="event-item ${alert.severity === 'critical' ? 'risk' : ''}">
-                    <strong>${alert.title}</strong>
-                    <div class="text-secondary small">${alert.message}</div>
-                    <div class="text-secondary small">${alert.time}</div>
-                </div>
-            `);
+            if (alertsList) {
+                alertsList.insertAdjacentHTML('afterbegin', `
+                    <div class="event-item ${alert.severity === 'critical' ? 'risk' : ''}">
+                        <strong>${title}</strong>
+                        <div class="text-secondary small">${message}</div>
+                        <div class="text-secondary small">${time}</div>
+                    </div>
+                `);
+            }
 
-            const count = parseInt(document.getElementById('alertCount').textContent) + 1;
-            document.getElementById('alertCount').textContent = count;
+            const alertCountEl = document.getElementById('alertCount');
+            if (alertCountEl) {
+                const count = parseInt(alertCountEl.textContent || '0') + 1;
+                alertCountEl.textContent = count;
+            }
         }
 
         function loadAlerts(alerts) {
             const alertsList = document.getElementById('alertsList');
+            const headerAlert = document.getElementById('headerAlertMessage');
+            const alertCountEl = document.getElementById('alertCount');
 
             if (!alerts || alerts.length === 0) {
-                alertsList.innerHTML = '<div class="text-secondary text-center py-3">No alerts</div>';
-                document.getElementById('alertCount').textContent = '0';
+                if (alertsList) alertsList.innerHTML = '<div class="text-secondary text-center py-3">No alerts</div>';
+                if (alertCountEl) alertCountEl.textContent = '0';
+                if (headerAlert) {
+                    headerAlert.innerHTML = '<i class="fas fa-check-circle me-1" style="color: var(--accent-green)"></i>System running normally';
+                    headerAlert.style.color = 'var(--accent-green)';
+                }
                 return;
             }
 
-            alertsList.innerHTML = alerts.map(alert => `
-                <div class="event-item ${alert.severity === 'critical' ? 'risk' : ''}">
-                    <strong>${alert.title}</strong>
-                    <div class="text-secondary small">${alert.message}</div>
-                    <div class="text-secondary small">${alert.time}</div>
-                </div>
-            `).join('');
+            // Show most recent alert in header
+            const latestAlert = alerts[0];
+            const alertColor = latestAlert.severity === 'critical' ? 'var(--accent-red)' :
+                              latestAlert.severity === 'warning' ? 'var(--accent-yellow)' : 'var(--accent-blue)';
+            if (headerAlert) {
+                headerAlert.innerHTML = `<i class="fas fa-bell me-1" style="color: ${alertColor}"></i>${latestAlert.title || 'Alert'}: ${latestAlert.message || ''}`;
+                headerAlert.style.color = alertColor;
+            }
 
-            document.getElementById('alertCount').textContent = alerts.length;
+            if (alertsList) {
+                alertsList.innerHTML = alerts.map(alert => `
+                    <div class="event-item ${alert.severity === 'critical' ? 'risk' : ''}">
+                        <strong>${alert.title || 'Alert'}</strong>
+                        <div class="text-secondary small">${alert.message || ''}</div>
+                        <div class="text-secondary small">${alert.time || ''}</div>
+                    </div>
+                `).join('');
+            }
+
+            if (alertCountEl) alertCountEl.textContent = alerts.length;
         }
 
         function initCharts() {
@@ -1090,23 +2827,146 @@
         }
 
         function updateEquityChart(data) {
-            equityChart.data.labels = data.labels;
-            equityChart.data.datasets[0].data = data.values;
-            equityChart.update('none');
+            // CRITICAL FIX: Validate data format before updating chart
+            if (!data || typeof data !== 'object') {
+                console.warn('updateEquityChart: Invalid data format - expected object, got:', typeof data);
+                return;
+            }
+
+            // Validate required fields are arrays
+            if (data.labels && !Array.isArray(data.labels)) {
+                console.warn('updateEquityChart: labels is not an array');
+                return;
+            }
+            if (data.values && !Array.isArray(data.values)) {
+                console.warn('updateEquityChart: values is not an array');
+                return;
+            }
+
+            // Store full data with timestamps
+            if (data.timestamps && Array.isArray(data.timestamps)) {
+                fullEquityData = {
+                    labels: data.labels || [],
+                    values: data.values || [],
+                    timestamps: data.timestamps || []
+                };
+            } else {
+                // If no timestamps provided, generate them based on labels
+                fullEquityData = {
+                    labels: data.labels || [],
+                    values: data.values || [],
+                    timestamps: data.labels ? data.labels.map((_, i) => Date.now() - (data.labels.length - i) * 60000) : []
+                };
+            }
+
+            // Apply current time filter
+            applyTimeFilter(currentTimePeriod);
+        }
+
+        function applyTimeFilter(period) {
+            currentTimePeriod = period;
+
+            // Guard: ensure chart is initialized
+            if (!equityChart) {
+                console.warn('applyTimeFilter called before chart initialization');
+                return;
+            }
+
+            const now = Date.now();
+            let cutoffTime = 0;
+
+            // Calculate cutoff time based on period
+            switch(period) {
+                case '1h': cutoffTime = now - 1 * 60 * 60 * 1000; break;
+                case '4h': cutoffTime = now - 4 * 60 * 60 * 1000; break;
+                case '8h': cutoffTime = now - 8 * 60 * 60 * 1000; break;
+                case '12h': cutoffTime = now - 12 * 60 * 60 * 1000; break;
+                case '1d': cutoffTime = now - 24 * 60 * 60 * 1000; break;
+                case '1w': cutoffTime = now - 7 * 24 * 60 * 60 * 1000; break;
+                case '1m': cutoffTime = now - 30 * 24 * 60 * 60 * 1000; break;
+                case 'all': default: cutoffTime = 0; break;
+            }
+
+            // Filter data based on timestamps
+            let filteredLabels = [];
+            let filteredValues = [];
+
+            if (fullEquityData.timestamps && fullEquityData.timestamps.length > 0) {
+                for (let i = 0; i < fullEquityData.timestamps.length; i++) {
+                    if (fullEquityData.timestamps[i] >= cutoffTime) {
+                        filteredLabels.push(fullEquityData.labels[i]);
+                        filteredValues.push(fullEquityData.values[i]);
+                    }
+                }
+            }
+
+            // If no data after filter, show all available data
+            if (filteredLabels.length === 0 && fullEquityData.labels) {
+                filteredLabels = fullEquityData.labels.slice();
+                filteredValues = fullEquityData.values.slice();
+                console.log(`No data in ${period} window, showing all ${filteredLabels.length} points`);
+            } else {
+                console.log(`Filtered to ${filteredLabels.length} points for ${period} window`);
+            }
+
+            // Update chart
+            equityChart.data.labels = filteredLabels;
+            equityChart.data.datasets[0].data = filteredValues;
+            equityChart.update();
+
+            // Update active button styling
+            document.querySelectorAll('.time-filter-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.period === period);
+            });
+        }
+
+        function initTimeFilters() {
+            const buttons = document.querySelectorAll('.time-filter-btn');
+            console.log(`Found ${buttons.length} time filter buttons`);
+            buttons.forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const period = btn.dataset.period;
+                    console.log(`Time filter clicked: ${period}`);
+                    applyTimeFilter(period);
+                });
+            });
         }
 
         function toggleKillSwitch() {
             const btn = document.getElementById('killSwitchBtn');
+            const btnNav = document.getElementById('killSwitchBtnNav');
             const status = document.getElementById('killSwitchStatus');
             const isActive = btn.classList.contains('btn-danger');
+
+            // CRITICAL FIX: Add confirmation dialog for kill switch activation
+            if (!isActive) {
+                // Activating kill switch - requires confirmation
+                const confirmed = confirm(
+                    '⚠️ KILL SWITCH ACTIVATION\n\n' +
+                    'This will:\n' +
+                    '• Immediately halt ALL trading\n' +
+                    '• Cancel all pending orders\n' +
+                    '• Prevent new orders until manually reset\n\n' +
+                    'Are you sure you want to activate the kill switch?'
+                );
+                if (!confirmed) {
+                    console.log('Kill switch activation cancelled by user');
+                    return;
+                }
+            }
 
             if (isActive) {
                 btn.classList.remove('btn-danger');
                 btn.classList.add('btn-outline-danger');
+                btnNav.classList.remove('btn-danger');
+                btnNav.classList.add('btn-outline-danger');
                 status.textContent = 'Inactive';
             } else {
                 btn.classList.remove('btn-outline-danger');
                 btn.classList.add('btn-danger');
+                btnNav.classList.remove('btn-outline-danger');
+                btnNav.classList.add('btn-danger');
                 status.textContent = 'ACTIVE - All trading halted';
             }
 
@@ -1126,16 +2986,961 @@
         }
 
         function formatCurrency(value) {
+            const numValue = value != null ? Number(value) : 0;
+            if (isNaN(numValue)) return '$0';
             return new Intl.NumberFormat('en-US', {
                 style: 'currency',
                 currency: 'USD',
                 minimumFractionDigits: 0,
                 maximumFractionDigits: 0
-            }).format(value);
+            }).format(numValue);
         }
 
         // Initialize kill switch button
         document.getElementById('killSwitchBtn').classList.add('btn-outline-danger');
+
+        // ========== FLOW VISUALIZATION ==========
+        const flowState = {
+            signalCount: 0,
+            decisionCount: 0,
+            fillCount: 0,
+            eventRate: 0,
+            recentEvents: [],
+            lastEventTime: Date.now()
+        };
+
+        // Track events for rate calculation
+        let eventTimestamps = [];
+
+        function updateFlowStats() {
+            document.getElementById('flowSignals').textContent = flowState.signalCount;
+            document.getElementById('flowDecisions').textContent = flowState.decisionCount;
+            document.getElementById('flowFills').textContent = flowState.fillCount;
+            document.getElementById('flowEventsCount').textContent =
+                flowState.signalCount + flowState.decisionCount + flowState.fillCount;
+
+            // Calculate events per second
+            const now = Date.now();
+            eventTimestamps = eventTimestamps.filter(t => now - t < 1000);
+            document.getElementById('flowRate').textContent = eventTimestamps.length;
+        }
+
+        function addFlowEvent(event) {
+            eventTimestamps.push(Date.now());
+
+            const eventType = event.type || 'unknown';
+            let eventClass = '';
+            let displayText = '';
+
+            switch(eventType.toLowerCase()) {
+                case 'signal':
+                    flowState.signalCount++;
+                    eventClass = 'signal';
+                    displayText = `Signal: ${event.agent || '?'} → ${event.symbol || '?'} ${event.direction || ''}`;
+                    animateFlowPath('signal');
+                    highlightNode(event.agent);
+                    break;
+                case 'decision':
+                    flowState.decisionCount++;
+                    eventClass = 'decision';
+                    displayText = `Decision: ${event.symbol || '?'} ${event.action || ''} x${event.quantity || 0}`;
+                    animateFlowPath('decision');
+                    highlightNode('cio');
+                    break;
+                case 'validated_decision':
+                    eventClass = event.approved ? 'validated' : 'rejected';
+                    displayText = `Validated: ${event.symbol || '?'} ${event.approved ? '✓' : '✗'}`;
+                    animateFlowPath('validated');
+                    highlightNode('risk');
+                    break;
+                case 'order':
+                    eventClass = 'order';
+                    displayText = `Order: ${event.symbol || '?'} ${event.side || ''} x${event.quantity || 0}`;
+                    animateFlowPath('order');
+                    highlightNode('execution');
+                    break;
+                case 'fill':
+                    flowState.fillCount++;
+                    eventClass = 'fill';
+                    displayText = `Fill: ${event.symbol || '?'} ${event.filled_quantity || 0} @ ${event.fill_price || 0}`;
+                    animateFlowPath('fill');
+                    highlightNode('ib');
+                    break;
+                case 'market_data':
+                    eventClass = 'market';
+                    displayText = `Market: ${event.symbol || '?'} ${event.last || ''}`;
+                    animateFlowPath('market');
+                    break;
+                default:
+                    displayText = `${eventType}: ${event.summary || JSON.stringify(event).slice(0, 50)}`;
+            }
+
+            // Add to event log
+            const logContainer = document.getElementById('flowEventLog');
+            const eventItem = document.createElement('div');
+            eventItem.className = `flow-event-item ${eventClass}`;
+            eventItem.innerHTML = `<small>${new Date().toLocaleTimeString()}</small> ${displayText}`;
+
+            // Keep only last 20 events
+            if (logContainer.children.length > 20) {
+                logContainer.removeChild(logContainer.lastChild);
+            }
+            logContainer.insertBefore(eventItem, logContainer.firstChild);
+
+            // Remove "waiting" message
+            const waitingMsg = logContainer.querySelector('.text-secondary.text-center');
+            if (waitingMsg) waitingMsg.remove();
+
+            updateFlowStats();
+        }
+
+        function animateFlowPath(eventType) {
+            const svg = document.getElementById('flowSvg');
+            let pathId, color;
+
+            switch(eventType) {
+                case 'signal':
+                    pathId = 'arrow-signal';
+                    color = 'var(--accent-green)';
+                    break;
+                case 'decision':
+                    pathId = 'arrow-decision';
+                    color = 'var(--accent-blue)';
+                    break;
+                case 'validated':
+                    pathId = 'arrow-validated';
+                    color = 'var(--accent-yellow)';
+                    break;
+                case 'order':
+                    pathId = 'arrow-order';
+                    color = 'var(--accent-purple)';
+                    break;
+                case 'fill':
+                    pathId = 'arrow-fill';
+                    color = '#ff6b6b';
+                    break;
+                case 'market':
+                    pathId = 'arrow-market';
+                    color = 'var(--accent-cyan)';
+                    break;
+                default:
+                    return;
+            }
+
+            const path = document.getElementById(pathId);
+            if (!path) return;
+
+            // Create animated dot
+            const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            dot.setAttribute('r', '6');
+            dot.setAttribute('fill', color);
+            dot.style.filter = `drop-shadow(0 0 8px ${color})`;
+
+            // Get path for animation
+            const pathLength = path.getTotalLength();
+            svg.appendChild(dot);
+
+            // Animate along path
+            let progress = 0;
+            const duration = 800;
+            const startTime = performance.now();
+
+            function animate(currentTime) {
+                progress = (currentTime - startTime) / duration;
+                if (progress > 1) {
+                    svg.removeChild(dot);
+                    return;
+                }
+
+                const point = path.getPointAtLength(progress * pathLength);
+                dot.setAttribute('cx', point.x);
+                dot.setAttribute('cy', point.y);
+                dot.style.opacity = 1 - (progress * 0.5);
+
+                requestAnimationFrame(animate);
+            }
+
+            requestAnimationFrame(animate);
+
+            // Flash the path
+            path.style.transition = 'opacity 0.2s';
+            path.style.opacity = '1';
+            path.style.strokeWidth = '3';
+            setTimeout(() => {
+                path.style.opacity = '0.4';
+                path.style.strokeWidth = '2';
+            }, 300);
+        }
+
+        function highlightNode(agentName) {
+            const nodeMap = {
+                'MacroAgent': 'node-macro',
+                'StatArbAgent': 'node-statarb',
+                'MomentumAgent': 'node-momentum',
+                'MarketMakingAgent': 'node-mm',
+                'OptionsVolAgent': 'node-options',
+                'SentimentAgent': 'node-sentiment',
+                'cio': 'node-cio',
+                'CIOAgent': 'node-cio',
+                'risk': 'node-risk',
+                'RiskAgent': 'node-risk',
+                'compliance': 'node-risk',
+                'ComplianceAgent': 'node-risk',
+                'execution': 'node-execution',
+                'ExecutionAgent': 'node-execution',
+                'ib': 'node-ib'
+            };
+
+            const nodeId = nodeMap[agentName];
+            if (!nodeId) return;
+
+            const node = document.getElementById(nodeId);
+            if (!node) return;
+
+            const rect = node.querySelector('rect');
+            if (rect) {
+                rect.style.transition = 'all 0.2s';
+                rect.style.filter = 'brightness(1.5)';
+                rect.style.strokeWidth = '4';
+                setTimeout(() => {
+                    rect.style.filter = '';
+                    rect.style.strokeWidth = '2';
+                }, 500);
+            }
+        }
+
+        // Process incoming events for flow visualization
+        function processEventForFlow(event) {
+            if (!event) return;
+
+            const flowEvent = {
+                type: event.type || event.event_type,
+                symbol: event.symbol,
+                agent: event.source_agent || event.agent,
+                direction: event.direction,
+                action: event.action,
+                quantity: event.quantity,
+                approved: event.approved,
+                side: event.side,
+                filled_quantity: event.filled_quantity,
+                fill_price: event.fill_price,
+                last: event.last,
+                summary: event.summary
+            };
+
+            addFlowEvent(flowEvent);
+        }
+
+        // Hook into WebSocket events handler
+        const originalHandleMessage = handleWebSocketMessage;
+        function handleWebSocketMessage(data) {
+            // Process for flow visualization
+            if (data.type === 'event' && data.payload) {
+                processEventForFlow(data.payload);
+            } else if (data.type === 'events' && Array.isArray(data.payload)) {
+                data.payload.slice(0, 5).forEach(e => processEventForFlow(e));
+            }
+
+            // Call original handler if it exists
+            if (typeof originalHandleMessage === 'function') {
+                originalHandleMessage(data);
+            }
+        }
+
+        // Update stats periodically
+        setInterval(updateFlowStats, 1000);
+
+        // ========== ADVANCED ANALYTICS (Phase 8) ==========
+
+        // Analytics state
+        const analyticsState = {
+            rollingMetrics: {},
+            sessionPerformance: {},
+            strategyComparison: { strategies: {}, ranking: [] },
+            signalConsensus: { consensus: {}, high_disagreement: [] },
+            riskHeatmap: [],
+            selectedConsensusSymbol: null,
+            strategyPieChart: null
+        };
+
+        // Initialize analytics on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            // Delay analytics load to ensure main dashboard loads first
+            setTimeout(() => {
+                fetchAllAnalytics();
+                initStrategyPieChart();
+            }, 1000);
+
+            // Refresh analytics every 30 seconds
+            setInterval(fetchAllAnalytics, 30000);
+        });
+
+        // Fetch all analytics data
+        async function fetchAllAnalytics() {
+            try {
+                const [rolling, session, strategy, consensus, heatmap] = await Promise.all([
+                    fetch('/api/analytics/rolling-metrics').then(r => r.json()).catch(() => ({ rolling_metrics: {} })),
+                    fetch('/api/analytics/session-performance').then(r => r.json()).catch(() => ({ session_performance: {} })),
+                    fetch('/api/analytics/strategy-comparison').then(r => r.json()).catch(() => ({ strategies: {}, ranking: [] })),
+                    fetch('/api/analytics/signal-consensus').then(r => r.json()).catch(() => ({ consensus: {}, high_disagreement: [] })),
+                    fetch('/api/analytics/risk-heatmap').then(r => r.json()).catch(() => ({ risk_heatmap: [] }))
+                ]);
+
+                analyticsState.rollingMetrics = rolling.rolling_metrics || {};
+                analyticsState.sessionPerformance = session.session_performance || {};
+                analyticsState.strategyComparison = { strategies: strategy.strategies || {}, ranking: strategy.ranking || [] };
+                analyticsState.signalConsensus = { consensus: consensus.consensus || {}, high_disagreement: consensus.high_disagreement || [] };
+                analyticsState.riskHeatmap = heatmap.risk_heatmap || [];
+
+                // Update all displays
+                updateRollingMetricsDisplay();
+                updateSessionPerformanceDisplay();
+                updateStrategyComparisonDisplay();
+                updateSignalConsensusDisplay();
+                updateRiskHeatmapDisplay();
+                updateCorrelationHeatmapDisplay();
+
+            } catch (error) {
+                console.error('Error fetching analytics:', error);
+            }
+        }
+
+        // Wrapper functions for WebSocket data updates
+        function updateRollingMetrics(data) {
+            if (data) {
+                analyticsState.rollingMetrics = data;
+                updateRollingMetricsDisplay();
+            }
+        }
+
+        function updateSessionPerformance(data) {
+            if (data) {
+                analyticsState.sessionPerformance = data;
+                updateSessionPerformanceDisplay();
+            }
+        }
+
+        function updateStrategyComparison(data) {
+            if (data) {
+                analyticsState.strategyComparison.strategies = data;
+                updateStrategyComparisonDisplay();
+            }
+        }
+
+        function updateStrategyRanking(data) {
+            if (data) {
+                analyticsState.strategyComparison.ranking = data;
+                updateStrategyComparisonDisplay();
+            }
+        }
+
+        function updateSignalConsensus(data) {
+            if (data) {
+                analyticsState.signalConsensus.consensus = data;
+                updateSignalConsensusDisplay();
+            }
+        }
+
+        // ========== ROLLING METRICS DISPLAY ==========
+        function updateRollingMetricsDisplay() {
+            const container = document.getElementById('rollingMetricsGrid');
+            const statusBadge = document.getElementById('rollingMetricsStatus');
+            const metrics = analyticsState.rollingMetrics;
+
+            if (!metrics || Object.keys(metrics).length === 0) {
+                container.innerHTML = '<div class="text-secondary text-center py-3">No rolling metrics data available</div>';
+                statusBadge.textContent = 'No Data';
+                statusBadge.className = 'badge bg-secondary';
+                return;
+            }
+
+            const periods = ['1D', '1W', '1M', '3M', 'YTD', '1Y'];
+            let html = '';
+
+            // Sharpe Ratio Row
+            html += '<div class="col-12 mb-2"><small class="text-secondary">Sharpe Ratio</small></div>';
+            periods.forEach(period => {
+                const data = metrics[period] || {};
+                const sharpe = data.sharpe_ratio;
+                const metricClass = getMetricClass(sharpe, 1.0, 0.5);
+                const displayValue = sharpe !== null && sharpe !== undefined ? sharpe.toFixed(2) : '--';
+
+                html += `
+                    <div class="rolling-metric-card ${metricClass}">
+                        <div class="rolling-metric-period">${period}</div>
+                        <div class="rolling-metric-value ${sharpe > 0 ? 'positive' : sharpe < 0 ? 'negative' : ''}">${displayValue}</div>
+                        <div class="rolling-metric-label">Sharpe</div>
+                    </div>
+                `;
+            });
+
+            // Sortino Ratio Row
+            html += '<div class="col-12 mb-2 mt-3"><small class="text-secondary">Sortino Ratio</small></div>';
+            periods.forEach(period => {
+                const data = metrics[period] || {};
+                const sortino = data.sortino_ratio;
+                const metricClass = getMetricClass(sortino, 1.5, 0.75);
+                const displayValue = sortino !== null && sortino !== undefined ? sortino.toFixed(2) : '--';
+
+                html += `
+                    <div class="rolling-metric-card ${metricClass}">
+                        <div class="rolling-metric-period">${period}</div>
+                        <div class="rolling-metric-value ${sortino > 0 ? 'positive' : sortino < 0 ? 'negative' : ''}">${displayValue}</div>
+                        <div class="rolling-metric-label">Sortino</div>
+                    </div>
+                `;
+            });
+
+            container.innerHTML = html;
+
+            // Update status badge based on 1M Sharpe
+            const monthSharpe = metrics['1M']?.sharpe_ratio;
+            if (monthSharpe !== null && monthSharpe !== undefined) {
+                if (monthSharpe >= 1.0) {
+                    statusBadge.textContent = 'Excellent';
+                    statusBadge.className = 'badge bg-success';
+                } else if (monthSharpe >= 0.5) {
+                    statusBadge.textContent = 'Good';
+                    statusBadge.className = 'badge bg-info';
+                } else if (monthSharpe >= 0) {
+                    statusBadge.textContent = 'Fair';
+                    statusBadge.className = 'badge bg-warning';
+                } else {
+                    statusBadge.textContent = 'Poor';
+                    statusBadge.className = 'badge bg-danger';
+                }
+            } else {
+                statusBadge.textContent = 'Loading...';
+                statusBadge.className = 'badge bg-secondary';
+            }
+        }
+
+        function getMetricClass(value, goodThreshold, warningThreshold) {
+            if (value === null || value === undefined) return '';
+            if (value >= goodThreshold) return 'metric-good';
+            if (value >= warningThreshold) return 'metric-warning';
+            return 'metric-bad';
+        }
+
+        // ========== SESSION PERFORMANCE DISPLAY ==========
+        function updateSessionPerformanceDisplay() {
+            const gridContainer = document.getElementById('sessionGrid');
+            const barChart = document.getElementById('sessionBarChart');
+            const sessions = analyticsState.sessionPerformance;
+
+            if (!sessions || Object.keys(sessions).length === 0) {
+                gridContainer.innerHTML = '<div class="text-secondary text-center py-3">No session data available</div>';
+                return;
+            }
+
+            const sessionNames = { asian: 'Asian', european: 'London', overlap: 'EU-US Overlap', us: 'New York' };
+            const sessionOrder = ['asian', 'european', 'overlap', 'us'];
+
+            // Find best session
+            let bestSession = null;
+            let bestWinRate = 0;
+            sessionOrder.forEach(key => {
+                const data = sessions[key];
+                if (data && data.total_trades >= 5 && data.win_rate_pct > bestWinRate) {
+                    bestWinRate = data.win_rate_pct;
+                    bestSession = key;
+                }
+            });
+
+            // Update bar chart
+            const maxWinRate = Math.max(...sessionOrder.map(key => sessions[key]?.win_rate_pct || 0), 1);
+            let barHtml = '';
+            sessionOrder.forEach(key => {
+                const data = sessions[key] || {};
+                const winRate = data.win_rate_pct || 0;
+                const height = (winRate / maxWinRate) * 100;
+                const isBest = key === bestSession;
+
+                barHtml += `
+                    <div class="session-bar ${isBest ? 'session-best-bar' : ''}"
+                         style="height: ${Math.max(height, 5)}%;"
+                         data-session="${key}"
+                         title="${sessionNames[key]}: ${winRate.toFixed(1)}%">
+                        <span class="session-bar-label">${sessionNames[key].substring(0, 6)}</span>
+                    </div>
+                `;
+            });
+            barChart.innerHTML = barHtml;
+
+            // Update session cards
+            let gridHtml = '';
+            sessionOrder.forEach(key => {
+                const data = sessions[key] || {};
+                const isBest = key === bestSession;
+
+                gridHtml += `
+                    <div class="session-card ${isBest ? 'session-best' : ''}">
+                        <div class="session-card-header">
+                            <span class="session-name">${sessionNames[key]} ${isBest ? '<i class="fas fa-crown text-warning"></i>' : ''}</span>
+                            <span class="session-win-rate ${data.win_rate_pct > 50 ? 'positive' : 'negative'}">${(data.win_rate_pct || 0).toFixed(1)}%</span>
+                        </div>
+                        <div class="session-stats">
+                            <div class="session-stat">
+                                <span class="session-stat-label">Trades</span>
+                                <span>${data.total_trades || 0}</span>
+                            </div>
+                            <div class="session-stat">
+                                <span class="session-stat-label">P&L</span>
+                                <span class="${(data.total_pnl || 0) >= 0 ? 'positive' : 'negative'}">${formatCurrency(data.total_pnl || 0)}</span>
+                            </div>
+                            <div class="session-stat">
+                                <span class="session-stat-label">Avg Win</span>
+                                <span class="positive">${formatCurrency(data.avg_win || 0)}</span>
+                            </div>
+                            <div class="session-stat">
+                                <span class="session-stat-label">Avg Loss</span>
+                                <span class="negative">-${formatCurrency(Math.abs(data.avg_loss || 0))}</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+            gridContainer.innerHTML = gridHtml;
+        }
+
+        // ========== STRATEGY COMPARISON DISPLAY ==========
+        function initStrategyPieChart() {
+            const ctx = document.getElementById('strategyPieChart');
+            if (!ctx) return;
+
+            analyticsState.strategyPieChart = new Chart(ctx.getContext('2d'), {
+                type: 'doughnut',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        data: [],
+                        backgroundColor: [
+                            'rgba(0, 212, 170, 0.8)',
+                            'rgba(77, 171, 247, 0.8)',
+                            'rgba(255, 217, 61, 0.8)',
+                            'rgba(168, 85, 247, 0.8)',
+                            'rgba(255, 107, 107, 0.8)',
+                            'rgba(0, 212, 255, 0.8)',
+                            'rgba(255, 138, 101, 0.8)',
+                            'rgba(129, 199, 132, 0.8)'
+                        ],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'right',
+                            labels: {
+                                color: '#a0a0a0',
+                                font: { size: 11 }
+                            }
+                        },
+                        title: {
+                            display: true,
+                            text: 'P&L Attribution',
+                            color: '#e8e8e8',
+                            font: { size: 12 }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateStrategyComparisonDisplay() {
+            const tableBody = document.getElementById('strategyTableBody');
+            const { strategies, ranking } = analyticsState.strategyComparison;
+
+            if (!ranking || ranking.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="7" class="text-secondary text-center">No strategy data available</td></tr>';
+                return;
+            }
+
+            let html = '';
+            ranking.forEach((strat, index) => {
+                const rankClass = index === 0 ? 'rank-1' : index === 1 ? 'rank-2' : index === 2 ? 'rank-3' : 'rank-other';
+                const accuracy = strat.hit_rate_pct || strat.win_rate_pct || 0;
+                const pnl = strat.total_pnl || 0;
+
+                html += `
+                    <tr>
+                        <td><span class="strategy-rank ${rankClass}">${index + 1}</span></td>
+                        <td><strong>${strat.strategy_name || 'Unknown'}</strong></td>
+                        <td>${strat.total_signals || 0}</td>
+                        <td class="${accuracy > 50 ? 'positive' : 'negative'}">${accuracy.toFixed(1)}%</td>
+                        <td>${((strat.avg_conviction || 0) * 100).toFixed(0)}%</td>
+                        <td class="${pnl >= 0 ? 'positive' : 'negative'}">${formatCurrency(pnl)}</td>
+                        <td>
+                            <div class="strategy-toggle active" data-strategy="${strat.strategy_name}" onclick="toggleStrategy(this)"></div>
+                        </td>
+                    </tr>
+                `;
+            });
+            tableBody.innerHTML = html;
+
+            // Update pie chart
+            if (analyticsState.strategyPieChart) {
+                const labels = ranking.map(s => s.strategy_name || 'Unknown');
+                const data = ranking.map(s => Math.abs(s.total_pnl || 0));
+
+                analyticsState.strategyPieChart.data.labels = labels;
+                analyticsState.strategyPieChart.data.datasets[0].data = data;
+                analyticsState.strategyPieChart.update();
+            }
+        }
+
+        function toggleStrategy(element) {
+            element.classList.toggle('active');
+            const strategy = element.dataset.strategy;
+            console.log(`Strategy ${strategy} toggled: ${element.classList.contains('active') ? 'enabled' : 'disabled'}`);
+            // TODO: Send toggle state to backend
+        }
+
+        // ========== SIGNAL CONSENSUS DISPLAY ==========
+        function updateSignalConsensusDisplay() {
+            const pillsContainer = document.getElementById('consensusSymbolPills');
+            const agentsList = document.getElementById('consensusAgentsList');
+            const gaugeValue = document.getElementById('consensusGaugeValue');
+            const gaugeFill = document.getElementById('consensusGaugeFill');
+            const strengthBadge = document.getElementById('consensusStrengthBadge');
+            const disagreementAlert = document.getElementById('consensusDisagreementAlert');
+            const disagreementText = document.getElementById('consensusDisagreementText');
+
+            const { consensus, high_disagreement } = analyticsState.signalConsensus;
+            const symbols = Object.keys(consensus);
+
+            if (symbols.length === 0) {
+                pillsContainer.innerHTML = '<span class="text-secondary">No active signals</span>';
+                agentsList.innerHTML = '';
+                gaugeValue.textContent = '--';
+                strengthBadge.textContent = '--';
+                disagreementAlert.style.display = 'none';
+                return;
+            }
+
+            // Set default selected symbol if none
+            if (!analyticsState.selectedConsensusSymbol || !symbols.includes(analyticsState.selectedConsensusSymbol)) {
+                analyticsState.selectedConsensusSymbol = symbols[0];
+            }
+
+            // Render symbol pills
+            let pillsHtml = '';
+            symbols.forEach(symbol => {
+                const isActive = symbol === analyticsState.selectedConsensusSymbol;
+                const data = consensus[symbol] || {};
+                const bias = data.market_bias || 0;
+                let pillColor = '';
+                if (bias > 0.3) pillColor = 'style="border-color: var(--accent-green);"';
+                else if (bias < -0.3) pillColor = 'style="border-color: var(--accent-red);"';
+
+                pillsHtml += `
+                    <span class="consensus-symbol-pill ${isActive ? 'active' : ''}"
+                          ${pillColor}
+                          onclick="selectConsensusSymbol('${symbol}')">${symbol}</span>
+                `;
+            });
+            pillsContainer.innerHTML = pillsHtml;
+
+            // Get selected symbol data
+            const selectedData = consensus[analyticsState.selectedConsensusSymbol] || {};
+            const strength = (selectedData.consensus_strength || 0) * 100;
+            const bias = selectedData.market_bias || 0;
+            const agentSignals = selectedData.agent_signals || {};
+
+            // Update gauge
+            const biasPercent = ((bias + 1) / 2) * 100; // Convert -1..1 to 0..100
+            const dashOffset = 251.2 * (1 - biasPercent / 100);
+            gaugeFill.setAttribute('stroke-dashoffset', dashOffset);
+            gaugeFill.setAttribute('stroke', bias > 0 ? 'var(--accent-green)' : bias < 0 ? 'var(--accent-red)' : 'var(--accent-cyan)');
+
+            gaugeValue.textContent = `${strength.toFixed(0)}%`;
+
+            // Update strength badge
+            if (strength >= 70) {
+                strengthBadge.textContent = 'Strong';
+                strengthBadge.className = 'badge bg-success';
+            } else if (strength >= 40) {
+                strengthBadge.textContent = 'Moderate';
+                strengthBadge.className = 'badge bg-warning';
+            } else {
+                strengthBadge.textContent = 'Weak';
+                strengthBadge.className = 'badge bg-secondary';
+            }
+
+            // Render agent signals
+            let agentsHtml = '';
+            Object.entries(agentSignals).forEach(([agent, direction]) => {
+                const badgeClass = direction === 'LONG' ? 'bullish' : direction === 'SHORT' ? 'bearish' : 'neutral';
+                agentsHtml += `<span class="consensus-agent-badge ${badgeClass}">${agent}: ${direction}</span>`;
+            });
+            agentsList.innerHTML = agentsHtml || '<span class="text-secondary">No agent signals</span>';
+
+            // Show disagreement alert if needed
+            if (high_disagreement && high_disagreement.length > 0) {
+                const symbols = high_disagreement.map(d => d.symbol).join(', ');
+                disagreementText.textContent = `Strong disagreement on ${symbols}`;
+                disagreementAlert.style.display = 'block';
+            } else {
+                disagreementAlert.style.display = 'none';
+            }
+        }
+
+        function selectConsensusSymbol(symbol) {
+            analyticsState.selectedConsensusSymbol = symbol;
+            updateSignalConsensusDisplay();
+        }
+
+        // ========== CORRELATION HEATMAP DISPLAY ==========
+        function updateCorrelationHeatmapDisplay() {
+            const container = document.getElementById('correlationHeatmap');
+            const avgBadge = document.getElementById('avgCorrelationBadge');
+            const alert = document.getElementById('correlationAlert');
+
+            // Get positions from the main dashboard state
+            const positions = openPositionsData || [];
+
+            if (positions.length < 2) {
+                container.innerHTML = '<div class="text-secondary text-center py-3">Need 2+ positions for correlations</div>';
+                avgBadge.textContent = 'Avg: --';
+                alert.style.display = 'none';
+                return;
+            }
+
+            const symbols = positions.map(p => p.symbol).slice(0, 8); // Max 8 symbols for readability
+            const n = symbols.length;
+
+            // Generate correlation matrix (using random data for demo - real data would come from backend)
+            const correlations = generateCorrelationMatrix(symbols);
+
+            // Calculate average correlation (excluding diagonal)
+            let sum = 0, count = 0;
+            for (let i = 0; i < n; i++) {
+                for (let j = i + 1; j < n; j++) {
+                    sum += Math.abs(correlations[i][j]);
+                    count++;
+                }
+            }
+            const avgCorr = count > 0 ? sum / count : 0;
+
+            // Build heatmap HTML
+            container.style.gridTemplateColumns = `40px repeat(${n}, 1fr)`;
+
+            let html = '<div></div>'; // Empty corner cell
+            symbols.forEach(s => {
+                html += `<div class="correlation-header">${s.substring(0, 4)}</div>`;
+            });
+
+            for (let i = 0; i < n; i++) {
+                html += `<div class="correlation-header">${symbols[i].substring(0, 4)}</div>`;
+                for (let j = 0; j < n; j++) {
+                    const corr = correlations[i][j];
+                    const cellClass = getCorrCellClass(corr, i === j);
+                    html += `
+                        <div class="correlation-cell ${cellClass}"
+                             title="${symbols[i]} vs ${symbols[j]}: ${corr.toFixed(2)}"
+                             onclick="showCorrelationDetail('${symbols[i]}', '${symbols[j]}', ${corr})">
+                            ${i === j ? '' : corr.toFixed(1)}
+                        </div>
+                    `;
+                }
+            }
+
+            container.innerHTML = html;
+            avgBadge.textContent = `Avg: ${avgCorr.toFixed(2)}`;
+
+            // Show alert if average correlation is high
+            if (avgCorr > 0.7) {
+                avgBadge.className = 'badge bg-danger';
+                alert.style.display = 'block';
+            } else if (avgCorr > 0.5) {
+                avgBadge.className = 'badge bg-warning';
+                alert.style.display = 'none';
+            } else {
+                avgBadge.className = 'badge bg-secondary';
+                alert.style.display = 'none';
+            }
+        }
+
+        function generateCorrelationMatrix(symbols) {
+            // This would normally come from backend - using pseudo-random for demo
+            const n = symbols.length;
+            const matrix = [];
+            for (let i = 0; i < n; i++) {
+                matrix[i] = [];
+                for (let j = 0; j < n; j++) {
+                    if (i === j) {
+                        matrix[i][j] = 1.0;
+                    } else if (j < i) {
+                        matrix[i][j] = matrix[j][i];
+                    } else {
+                        // Generate somewhat realistic correlations based on symbol similarity
+                        const hash = (symbols[i].charCodeAt(0) + symbols[j].charCodeAt(0)) % 20;
+                        matrix[i][j] = (hash - 10) / 15; // Range roughly -0.67 to +0.67
+                    }
+                }
+            }
+            return matrix;
+        }
+
+        function getCorrCellClass(corr, isSelf) {
+            if (isSelf) return 'corr-self';
+            if (corr >= 0.7) return 'corr-high-pos';
+            if (corr >= 0.4) return 'corr-med-pos';
+            if (corr >= 0.1) return 'corr-low-pos';
+            if (corr >= -0.1) return 'corr-neutral';
+            if (corr >= -0.4) return 'corr-low-neg';
+            if (corr >= -0.7) return 'corr-med-neg';
+            return 'corr-high-neg';
+        }
+
+        function showCorrelationDetail(symbol1, symbol2, corr) {
+            console.log(`Correlation detail: ${symbol1} vs ${symbol2} = ${corr.toFixed(3)}`);
+            // Could show a modal or tooltip with more detail
+        }
+
+        // ========== RISK HEATMAP DISPLAY ==========
+        function updateRiskHeatmapDisplay() {
+            const container = document.getElementById('riskHeatmapGrid');
+            const countBadge = document.getElementById('highRiskCountBadge');
+            const riskData = analyticsState.riskHeatmap;
+
+            // If no backend data, generate from positions
+            let displayData = riskData;
+            if (!displayData || displayData.length === 0) {
+                displayData = generateRiskDataFromPositions();
+            }
+
+            if (displayData.length === 0) {
+                container.innerHTML = '<div class="text-secondary text-center py-3">No positions to analyze</div>';
+                countBadge.textContent = '0 high risk';
+                countBadge.className = 'badge bg-secondary';
+                return;
+            }
+
+            let highRiskCount = 0;
+            let html = '';
+
+            displayData.forEach(pos => {
+                const score = pos.risk_score || 0;
+                let riskClass = 'risk-low';
+                if (score >= 75) {
+                    riskClass = 'risk-critical';
+                    highRiskCount++;
+                } else if (score >= 50) {
+                    riskClass = 'risk-high';
+                    highRiskCount++;
+                } else if (score >= 25) {
+                    riskClass = 'risk-medium';
+                }
+
+                const factors = (pos.risk_factors || []).slice(0, 2).join(', ').replace(/_/g, ' ');
+
+                html += `
+                    <div class="risk-heatmap-cell ${riskClass}"
+                         title="Risk Score: ${score} - ${factors}"
+                         onclick="showRiskDetail('${pos.symbol}')">
+                        <div class="risk-symbol">${pos.symbol}</div>
+                        <div class="risk-score">${score}</div>
+                        <div class="risk-factors">${factors || 'Normal'}</div>
+                    </div>
+                `;
+            });
+
+            container.innerHTML = html;
+
+            // Update badge
+            if (highRiskCount > 0) {
+                countBadge.textContent = `${highRiskCount} high risk`;
+                countBadge.className = 'badge bg-danger';
+            } else {
+                countBadge.textContent = '0 high risk';
+                countBadge.className = 'badge bg-success';
+            }
+        }
+
+        function generateRiskDataFromPositions() {
+            const positions = openPositionsData || [];
+            return positions.map(pos => {
+                // Generate risk score based on position characteristics
+                let score = 20; // Base score
+                const factors = [];
+
+                // Size-based risk
+                const absQty = Math.abs(pos.quantity || 0);
+                if (absQty > 100) { score += 20; factors.push('large_position'); }
+                else if (absQty > 50) { score += 10; }
+
+                // P&L-based risk
+                const pnlPct = Math.abs(pos.pnl_pct || 0);
+                if (pnlPct > 5) { score += 25; factors.push('high_volatility'); }
+                else if (pnlPct > 2) { score += 10; }
+
+                // Negative P&L adds risk
+                if ((pos.pnl || 0) < 0) {
+                    score += 15;
+                    if (pnlPct > 3) factors.push('significant_loss');
+                }
+
+                // Conviction-based (low conviction = higher risk)
+                const conviction = pos.conviction || 0.5;
+                if (conviction < 0.3) { score += 15; factors.push('low_conviction'); }
+                else if (conviction < 0.5) { score += 5; }
+
+                return {
+                    symbol: pos.symbol,
+                    risk_score: Math.min(100, score),
+                    risk_factors: factors,
+                    concentration_pct: 0,
+                    days_in_position: 0
+                };
+            });
+        }
+
+        function showRiskDetail(symbol) {
+            console.log(`Risk detail for ${symbol}`);
+            // Could show a modal with detailed risk breakdown
+        }
+
+        // ========== WEBSOCKET HANDLERS FOR ANALYTICS ==========
+        // Extend the main handleUpdate function to handle analytics updates
+        const originalHandleUpdate = handleUpdate;
+        handleUpdate = function(data) {
+            // Call original handler
+            originalHandleUpdate(data);
+
+            // Handle analytics-specific updates
+            switch(data.type) {
+                case 'rolling_metrics':
+                    analyticsState.rollingMetrics = data.payload || {};
+                    updateRollingMetricsDisplay();
+                    break;
+                case 'session_performance':
+                    analyticsState.sessionPerformance = data.payload || {};
+                    updateSessionPerformanceDisplay();
+                    break;
+                case 'strategy_comparison':
+                    analyticsState.strategyComparison = data.payload || { strategies: {}, ranking: [] };
+                    updateStrategyComparisonDisplay();
+                    break;
+                case 'signal_consensus':
+                    analyticsState.signalConsensus = data.payload || { consensus: {}, high_disagreement: [] };
+                    updateSignalConsensusDisplay();
+                    break;
+                case 'risk_heatmap':
+                    analyticsState.riskHeatmap = data.payload || [];
+                    updateRiskHeatmapDisplay();
+                    break;
+                case 'positions':
+                    // When positions update, also update correlation and risk heatmaps
+                    setTimeout(() => {
+                        updateCorrelationHeatmapDisplay();
+                        updateRiskHeatmapDisplay();
+                    }, 100);
+                    break;
+            }
+        };
     </script>
 </body>
 </html>

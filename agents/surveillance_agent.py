@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from enum import Enum
@@ -345,17 +345,17 @@ class SurveillanceAgent(BaseAgent):
             "layering_detection", True
         )
 
-        # Order tracking
+        # Order tracking (bounded to prevent memory leak)
         self._orders: dict[str, OrderRecord] = {}
-        self._order_history: list[OrderRecord] = []
-        self._fills: list[FillEvent] = []
+        self._order_history: deque[OrderRecord] = deque(maxlen=5000)
+        self._fills: deque[FillEvent] = deque(maxlen=5000)
 
-        # Alert tracking
-        self._alerts: list[SurveillanceAlert] = []
+        # Alert tracking (bounded)
+        self._alerts: deque[SurveillanceAlert] = deque(maxlen=1000)
         self._alert_counter = 0
 
-        # STOR tracking (#C2)
-        self._stor_reports: list[STORReport] = []
+        # STOR tracking (#C2, bounded)
+        self._stor_reports: deque[STORReport] = deque(maxlen=500)
         self._stor_counter = 0
         self._stor_auto_generate = self._surveillance_config.get("stor_auto_generate", True)
         self._stor_severity_threshold = AlertSeverity(

@@ -208,7 +208,7 @@ Be conservative with confidence scores. Use >0.7 only for clear technical setups
         state = self._states[symbol]
 
         # Update price history
-        price = event.last_price or event.close or 0.0
+        price = event.last or event.close or 0.0
         if price > 0:
             state.last_price = price
             state.price_history.append((event.timestamp, price))
@@ -484,6 +484,10 @@ Provide your forecast in the specified JSON format."""
 
     def _forecast_to_signal(self, forecast: PriceForecast) -> SignalEvent:
         """Convert a forecast to a SignalEvent."""
+        # Get current price for stop_loss and target_price calculations
+        state = self._states.get(forecast.symbol)
+        current_price = state.last_price if state and state.last_price > 0 else forecast.predicted_price
+
         # Only generate actionable signal if confidence meets threshold
         if forecast.confidence < self._min_confidence:
             return SignalEvent(
@@ -495,12 +499,25 @@ Provide your forecast in the specified JSON format."""
                 confidence=forecast.confidence,
                 rationale=f"Forecast confidence {forecast.confidence:.0%} below threshold {self._min_confidence:.0%}. {forecast.rationale}",
                 data_sources=("llm_forecast", "price_history"),
+                target_price=None,
+                stop_loss=None,
             )
 
         # Calculate signal strength based on confidence and range tightness
         strength = forecast.confidence
         if forecast.range_width_pct < 2.0:  # Tight range = higher conviction
             strength = min(1.0, strength * 1.2)
+
+        # Calculate stop_loss and target_price based on direction (2% stop, 4% target = 2:1 reward/risk)
+        if forecast.direction == SignalDirection.LONG:
+            stop_loss = current_price * 0.98  # 2% below current price
+            target_price = current_price * 1.04  # 4% above current price
+        elif forecast.direction == SignalDirection.SHORT:
+            stop_loss = current_price * 1.02  # 2% above current price
+            target_price = current_price * 0.96  # 4% below current price
+        else:
+            stop_loss = None
+            target_price = None
 
         return SignalEvent(
             source_agent=self.name,
@@ -516,6 +533,8 @@ Provide your forecast in the specified JSON format."""
                 f"{forecast.rationale}"
             ),
             data_sources=("llm_forecast", "price_history", "technical_analysis"),
+            target_price=target_price,
+            stop_loss=stop_loss,
             metadata={
                 "forecast_horizon": forecast.forecast_horizon,
                 "predicted_price": forecast.predicted_price,
@@ -536,6 +555,8 @@ Provide your forecast in the specified JSON format."""
             confidence=0.3,
             rationale=f"Forecasting: {reason}",
             data_sources=("llm_forecast",),
+            target_price=None,
+            stop_loss=None,
         )
         await self._event_bus.publish_signal(signal)
         self._audit_logger.log_event(signal)

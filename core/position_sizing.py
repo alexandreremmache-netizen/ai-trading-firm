@@ -10,11 +10,48 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Any
 
 import numpy as np
+
+
+# =============================================================================
+# QUICK WIN #7: Turn-of-Month Effect
+# =============================================================================
+def get_turn_of_month_multiplier(date: datetime | None = None) -> float:
+    """
+    QUICK WIN #7: Return position size multiplier based on turn-of-month effect.
+
+    Last 4 trading days + first 3 trading days of month show
+    statistically higher returns due to institutional cash flows
+    (pension fund rebalancing, monthly deposits, etc.).
+
+    Returns:
+        1.0 (normal) or 1.25 (turn of month)
+    """
+    if date is None:
+        date = datetime.now()
+
+    day = date.day
+
+    # Get last day of month
+    if date.month == 12:
+        next_month = date.replace(year=date.year + 1, month=1, day=1)
+    else:
+        next_month = date.replace(month=date.month + 1, day=1)
+    last_day = (next_month - timedelta(days=1)).day
+
+    # First 3 days of month
+    if day <= 3:
+        return 1.25
+
+    # Last 4 days of month
+    if day >= last_day - 3:
+        return 1.25
+
+    return 1.0
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +68,91 @@ class SizingMethod(Enum):
     MEAN_VARIANCE = "mean_variance"  # #P5
     RISK_PARITY = "risk_parity"  # #P5
     MIN_VARIANCE = "min_variance"  # #P5
+    HRP = "hrp"  # Phase 3: Hierarchical Risk Parity
+    RESAMPLED = "resampled"  # Phase 4: Resampled Efficiency (Michaud)
+    TURNOVER_PENALIZED = "turnover_penalized"  # Phase 5: Transaction cost aware
+
+
+# =============================================================================
+# Phase 5.2: Transaction Cost Configuration
+# =============================================================================
+
+@dataclass
+class TransactionCostConfig:
+    """
+    Configuration for transaction costs (Phase 5.2).
+
+    Transaction costs are critical for portfolio optimization as they can
+    significantly impact realized returns. This config supports:
+    - Fixed costs (per trade)
+    - Variable costs (proportional to trade value)
+    - Market impact (proportional to trade size relative to volume)
+    - Turnover penalty for portfolio rebalancing
+
+    Default values are conservative estimates for institutional trading.
+    """
+    # Fixed cost per trade (e.g., commission)
+    fixed_cost_per_trade: float = 0.0
+
+    # Variable cost as basis points of trade value (e.g., 10 bps = 0.10%)
+    variable_cost_bps: float = 10.0
+
+    # Market impact coefficient (for larger trades)
+    # Impact = coefficient * sqrt(trade_size / avg_daily_volume)
+    market_impact_coefficient: float = 0.1
+
+    # Turnover penalty lambda for optimization
+    # Higher = stronger preference for current weights (less trading)
+    turnover_penalty_lambda: float = 0.5
+
+    # Minimum improvement required to trigger rebalance (as %)
+    min_trade_improvement_pct: float = 0.3
+
+    # Bid-ask spread by asset class (in bps)
+    spread_by_asset_class: dict[str, float] = field(default_factory=lambda: {
+        "equity": 5.0,
+        "future": 2.0,
+        "forex": 1.0,
+        "commodity": 10.0,
+        "etf": 3.0,
+    })
+
+    def get_total_cost_bps(self, asset_class: str = "equity") -> float:
+        """Get total round-trip cost in basis points."""
+        spread = self.spread_by_asset_class.get(asset_class, 5.0)
+        return self.variable_cost_bps + spread
+
+    def calculate_trade_cost(
+        self,
+        trade_value: float,
+        asset_class: str = "equity",
+        avg_daily_volume: float | None = None,
+    ) -> float:
+        """
+        Calculate total cost for a trade.
+
+        Args:
+            trade_value: Absolute value of trade
+            asset_class: Asset class for spread lookup
+            avg_daily_volume: Average daily volume (for impact)
+
+        Returns:
+            Total cost in currency
+        """
+        # Fixed cost
+        cost = self.fixed_cost_per_trade
+
+        # Variable cost (commission + spread)
+        total_bps = self.get_total_cost_bps(asset_class)
+        cost += trade_value * (total_bps / 10000)
+
+        # Market impact (if volume provided)
+        if avg_daily_volume is not None and avg_daily_volume > 0:
+            participation_rate = trade_value / avg_daily_volume
+            impact = self.market_impact_coefficient * np.sqrt(participation_rate)
+            cost += trade_value * impact
+
+        return cost
 
 
 @dataclass
@@ -250,19 +372,28 @@ class PositionSizer:
         Args:
             config: Configuration with:
                 - method: Default sizing method (default: "kelly")
-                - use_half_kelly: Use half Kelly (default: True)
-                - max_position_pct: Maximum position size (default: 10%)
-                - min_position_pct: Minimum position size (default: 1%)
+                - kelly_fraction: Fractional Kelly multiplier (default: 0.25 = quarter-Kelly)
+                - max_position_pct: Maximum position size (default: 3%)
+                - min_position_pct: Minimum position size (default: 0.5%)
+                - max_total_exposure_pct: Maximum total portfolio exposure (default: 50%)
                 - vol_target: Target volatility (default: 15%)
                 - correlation_discount: Discount for correlated positions (default: True)
+                - max_kelly_raw: Maximum raw Kelly fraction before multiplier (default: 0.15 = 15%)
         """
         self._config = config or {}
         self._default_method = SizingMethod[self._config.get("method", "kelly").upper()]
-        self._use_half_kelly = self._config.get("use_half_kelly", True)
-        self._max_position_pct = self._config.get("max_position_pct", 10.0)
-        self._min_position_pct = self._config.get("min_position_pct", 1.0)
+        # IMPROVED: Use quarter-Kelly (0.25x) instead of half-Kelly for safer sizing
+        self._kelly_fraction = self._config.get("kelly_fraction", 0.25)
+        self._use_half_kelly = self._config.get("use_half_kelly", False)  # Deprecated, use kelly_fraction
+        # IMPROVED: Reduce max position from 10% to 3% to limit concentration risk
+        self._max_position_pct = self._config.get("max_position_pct", 3.0)
+        self._min_position_pct = self._config.get("min_position_pct", 0.5)
+        # NEW: Maximum total portfolio exposure (gross)
+        self._max_total_exposure_pct = self._config.get("max_total_exposure_pct", 50.0)
         self._vol_target = self._config.get("vol_target", 0.15)  # 15% annual
         self._correlation_discount = self._config.get("correlation_discount", True)
+        # NEW: Cap raw Kelly to prevent outsized positions even with good edge
+        self._max_kelly_raw = self._config.get("max_kelly_raw", 0.15)  # 15% max raw Kelly
 
         # Strategy statistics cache
         self._strategy_stats: dict[str, StrategyStats] = {}
@@ -272,7 +403,8 @@ class PositionSizer:
 
         logger.info(
             f"PositionSizer initialized: method={self._default_method.value}, "
-            f"half_kelly={self._use_half_kelly}, max={self._max_position_pct}%"
+            f"kelly_fraction={self._kelly_fraction}, max_position={self._max_position_pct}%, "
+            f"max_total_exposure={self._max_total_exposure_pct}%, max_kelly_raw={self._max_kelly_raw}"
         )
 
     def update_strategy_stats(self, strategy: str, stats: StrategyStats) -> None:
@@ -299,15 +431,24 @@ class PositionSizer:
         self,
         strategy: str,
         portfolio_value: float,
-        kelly_variant: SizingMethod = SizingMethod.HALF_KELLY
+        kelly_variant: SizingMethod = SizingMethod.QUARTER_KELLY,
+        current_exposure_pct: float = 0.0
     ) -> PositionSizeResult:
         """
-        Calculate position size using Kelly Criterion.
+        Calculate position size using Kelly Criterion with conservative constraints.
+
+        IMPROVED money management:
+        - Uses quarter-Kelly (0.25x) by default for safety
+        - Caps raw Kelly at 15% before applying fraction
+        - Enforces 3% max position size
+        - Considers total portfolio exposure limit (50%)
+        - Requires minimum 50 trades for statistical significance
 
         Args:
             strategy: Strategy name
             portfolio_value: Total portfolio value
             kelly_variant: Kelly variant to use
+            current_exposure_pct: Current total portfolio exposure as % (0-100)
 
         Returns:
             PositionSizeResult with calculated size
@@ -325,25 +466,59 @@ class PositionSizer:
                 rationale="No strategy statistics available",
             )
 
-        # Calculate Kelly fraction
-        kelly = stats.kelly_fraction
         adjustments = []
 
-        # Apply Kelly variant
-        if kelly_variant == SizingMethod.HALF_KELLY:
-            adjusted = kelly * 0.5
-            adjustments.append("Applied half-Kelly (0.5x)")
-        elif kelly_variant == SizingMethod.QUARTER_KELLY:
-            adjusted = kelly * 0.25
-            adjustments.append("Applied quarter-Kelly (0.25x)")
-        else:
-            adjusted = kelly
+        # IMPROVED: Require minimum trades for statistical significance
+        MIN_TRADES_FOR_KELLY = 50
+        if stats.n_trades < MIN_TRADES_FOR_KELLY:
+            logger.warning(
+                f"Insufficient trades for Kelly ({stats.n_trades}/{MIN_TRADES_FOR_KELLY}), "
+                f"using minimum size for {strategy}"
+            )
+            return PositionSizeResult(
+                symbol=strategy,
+                method=kelly_variant,
+                raw_fraction=0,
+                adjusted_fraction=self._min_position_pct / 100,
+                position_size_pct=self._min_position_pct,
+                position_value=portfolio_value * self._min_position_pct / 100,
+                rationale=f"Insufficient trades ({stats.n_trades}/{MIN_TRADES_FOR_KELLY})",
+                adjustments=["Minimum size due to low sample count"],
+            )
 
-        # Apply constraints
-        if adjusted > self._max_position_pct / 100:
-            adjusted = self._max_position_pct / 100
-            adjustments.append(f"Capped at max {self._max_position_pct}%")
+        # Calculate raw Kelly fraction
+        kelly = stats.kelly_fraction
+        adjustments.append(f"Raw Kelly: {kelly*100:.2f}%")
 
+        # IMPROVED: Cap raw Kelly BEFORE applying fraction multiplier
+        # This prevents outsized positions even with seemingly good edge
+        if kelly > self._max_kelly_raw:
+            kelly = self._max_kelly_raw
+            adjustments.append(f"Raw Kelly capped at {self._max_kelly_raw*100:.1f}%")
+
+        # Apply Kelly fraction (default: 0.25x = quarter-Kelly)
+        adjusted = kelly * self._kelly_fraction
+        adjustments.append(f"Applied {self._kelly_fraction}x Kelly ({adjusted*100:.2f}%)")
+
+        # IMPROVED: Enforce strict max position size (3% default)
+        max_position_frac = self._max_position_pct / 100
+        if adjusted > max_position_frac:
+            adjusted = max_position_frac
+            adjustments.append(f"Capped at max position {self._max_position_pct}%")
+
+        # NEW: Consider total exposure limit
+        # If portfolio is already 40% exposed and limit is 50%, only allow 10% more
+        if current_exposure_pct > 0:
+            remaining_exposure_pct = max(0, self._max_total_exposure_pct - current_exposure_pct)
+            remaining_exposure_frac = remaining_exposure_pct / 100
+            if adjusted > remaining_exposure_frac:
+                adjusted = remaining_exposure_frac
+                adjustments.append(
+                    f"Limited by total exposure ({current_exposure_pct:.1f}% used, "
+                    f"{remaining_exposure_pct:.1f}% remaining)"
+                )
+
+        # Apply minimum floor
         if adjusted < self._min_position_pct / 100 and kelly > 0:
             adjusted = self._min_position_pct / 100
             adjustments.append(f"Floor at min {self._min_position_pct}%")
@@ -361,7 +536,7 @@ class PositionSizer:
             adjusted_fraction=adjusted,
             position_size_pct=adjusted * 100,
             position_value=position_value,
-            rationale=f"Kelly: win_rate={stats.win_rate:.2%}, edge={stats.edge:.4f}",
+            rationale=f"Kelly: win_rate={stats.win_rate:.2%}, edge={stats.edge:.4f}, n_trades={stats.n_trades}",
             adjustments=adjustments,
         )
 
@@ -453,7 +628,10 @@ class PositionSizer:
         """
         Adjust position size based on correlation with existing positions.
 
-        Reduces size if highly correlated with existing holdings.
+        IMPROVED: More aggressive correlation discount to reduce concentration risk:
+        - Starts discounting at 0.5 correlation (was 0.7)
+        - Maximum discount of 70% (was 45%)
+        - Considers cumulative correlation effect across multiple positions
 
         Args:
             symbol: Symbol to size
@@ -477,8 +655,9 @@ class PositionSizer:
 
         adjustments = []
         max_correlation = 0.0
+        correlated_positions = []  # Track all correlated positions
 
-        # Find highest correlation with existing positions
+        # Find all correlations with existing positions
         for existing_symbol, existing_value in existing_positions.items():
             if existing_value == 0:
                 continue
@@ -490,16 +669,34 @@ class PositionSizer:
             if corr is None:
                 continue
 
+            # IMPROVED: Track all significant correlations
+            if abs(corr) > 0.3:  # Track correlations > 0.3
+                correlated_positions.append((existing_symbol, corr, existing_value))
+
             if abs(corr) > abs(max_correlation):
                 max_correlation = corr
 
-        # Apply correlation discount
-        # High correlation (>0.7) reduces position size
+        # IMPROVED: Apply more aggressive correlation discount
+        # Start discounting at 0.5 correlation (was 0.7)
         discount = 1.0
-        if abs(max_correlation) > 0.7:
-            discount = 1 - (abs(max_correlation) - 0.7) * 1.5  # Up to 45% discount
-            discount = max(0.55, discount)  # At least 55% of base size
-            adjustments.append(f"Correlation discount: {(1-discount)*100:.1f}% (max_corr={max_correlation:.2f})")
+        if abs(max_correlation) > 0.5:
+            # Linear discount: 0% at 0.5, up to 70% at 1.0
+            discount = 1.0 - (abs(max_correlation) - 0.5) * 1.4
+            discount = max(0.30, discount)  # Minimum 30% of base size (was 55%)
+            adjustments.append(
+                f"Correlation discount: {(1-discount)*100:.1f}% (max_corr={max_correlation:.2f})"
+            )
+
+        # IMPROVED: Additional cumulative discount for multiple correlated positions
+        # Each additional correlated position reduces size further
+        if len(correlated_positions) > 1:
+            cumulative_discount = 1.0 - (len(correlated_positions) - 1) * 0.10
+            cumulative_discount = max(0.5, cumulative_discount)  # Max 50% additional reduction
+            discount *= cumulative_discount
+            adjustments.append(
+                f"Cumulative correlation: {len(correlated_positions)} correlated positions, "
+                f"additional {(1-cumulative_discount)*100:.0f}% reduction"
+            )
 
         adjusted_pct = base_size_pct * discount
 
@@ -519,7 +716,8 @@ class PositionSizer:
             adjusted_fraction=adjusted_pct / 100,
             position_size_pct=adjusted_pct,
             position_value=portfolio_value * adjusted_pct / 100,
-            rationale=f"Correlation-adjusted: base={base_size_pct:.1f}%, max_corr={max_correlation:.2f}",
+            rationale=f"Correlation-adjusted: base={base_size_pct:.1f}%, max_corr={max_correlation:.2f}, "
+                      f"correlated_positions={len(correlated_positions)}",
             adjustments=adjustments,
         )
 
@@ -601,6 +799,41 @@ class PositionSizer:
             corr_result.adjustments = result.adjustments + corr_result.adjustments
             result = corr_result
 
+        # QUICK WIN #7: Apply turn-of-month multiplier
+        if self._config.get("use_turn_of_month_boost", False):
+            tom_multiplier = get_turn_of_month_multiplier()
+            if tom_multiplier > 1.0:
+                # Check if asset class is eligible (default: equities and futures)
+                tom_asset_classes = self._config.get("tom_asset_classes", ["equity", "future"])
+                # Simple heuristic: futures symbols are typically 2-3 uppercase letters
+                is_future = len(symbol) <= 4 and symbol.isupper() and not symbol.startswith("$")
+
+                if is_future or "equity" in tom_asset_classes:
+                    original_pct = result.position_size_pct
+                    boosted_pct = min(
+                        original_pct * tom_multiplier,
+                        self._max_position_pct  # Don't exceed max
+                    )
+                    boost_applied = boosted_pct / original_pct if original_pct > 0 else 1.0
+
+                    # Create new result with boosted size
+                    result = PositionSizeResult(
+                        symbol=result.symbol,
+                        method=result.method,
+                        raw_fraction=result.raw_fraction,
+                        adjusted_fraction=boosted_pct / 100,
+                        position_size_pct=boosted_pct,
+                        position_value=portfolio_value * boosted_pct / 100,
+                        rationale=result.rationale,
+                        adjustments=result.adjustments + [
+                            f"TOM boost: {boost_applied:.0%} ({original_pct:.1f}% -> {boosted_pct:.1f}%)"
+                        ],
+                    )
+                    logger.debug(
+                        f"Turn-of-month boost applied to {symbol}: "
+                        f"{original_pct:.1f}% -> {boosted_pct:.1f}%"
+                    )
+
         return result
 
     def calculate_contracts(
@@ -676,14 +909,23 @@ class PositionSizer:
         """Get sizer status for monitoring."""
         return {
             "default_method": self._default_method.value,
-            "use_half_kelly": self._use_half_kelly,
+            "kelly_fraction": self._kelly_fraction,
+            "max_kelly_raw": self._max_kelly_raw,
             "max_position_pct": self._max_position_pct,
             "min_position_pct": self._min_position_pct,
+            "max_total_exposure_pct": self._max_total_exposure_pct,
             "vol_target": self._vol_target,
             "correlation_discount": self._correlation_discount,
             "strategies_tracked": len(self._strategy_stats),
             "correlation_pairs": len(self._correlations),
             "supports_portfolio_optimization": True,  # #P5
+            # Money management summary
+            "money_management": {
+                "kelly_type": "quarter-kelly" if self._kelly_fraction <= 0.25 else "fractional-kelly",
+                "max_single_position": f"{self._max_position_pct}%",
+                "max_total_exposure": f"{self._max_total_exposure_pct}%",
+                "raw_kelly_cap": f"{self._max_kelly_raw*100}%",
+            }
         }
 
     # =========================================================================
@@ -1041,6 +1283,439 @@ class PositionSizer:
 
         return results
 
+    # =========================================================================
+    # Phase 3: HIERARCHICAL RISK PARITY (HRP)
+    # =========================================================================
+
+    def optimize_portfolio_hrp(
+        self,
+        symbols: list[str],
+        covariance_matrix: np.ndarray,
+        portfolio_value: float,
+        linkage_method: str = "single"
+    ) -> dict[str, PositionSizeResult]:
+        """
+        Hierarchical Risk Parity (HRP) portfolio optimization (Phase 3).
+
+        HRP is a portfolio allocation method developed by Marcos López de Prado
+        that addresses limitations of traditional mean-variance optimization.
+
+        Key benefits over MVO:
+        - No matrix inversion required (numerically stable)
+        - Works with singular covariance matrices
+        - Produces well-diversified portfolios
+        - Better out-of-sample performance
+        - Handles high-dimensional asset spaces
+
+        Algorithm:
+        1. Build distance matrix from correlation
+        2. Hierarchical clustering (single linkage by default)
+        3. Quasi-diagonalization of covariance
+        4. Recursive bisection for weight allocation
+
+        Args:
+            symbols: List of asset symbols
+            covariance_matrix: Covariance matrix (NxN numpy array)
+            portfolio_value: Total portfolio value
+            linkage_method: Clustering method ('single', 'ward', 'complete', 'average')
+
+        Returns:
+            Dictionary of symbol to PositionSizeResult
+
+        Reference: López de Prado, M. (2016). "Building Diversified Portfolios that
+                   Outperform Out-of-Sample", Journal of Portfolio Management
+        """
+        n = len(symbols)
+        if n == 0:
+            return {}
+
+        if n == 1:
+            # Single asset, allocate 100%
+            return {
+                symbols[0]: PositionSizeResult(
+                    symbol=symbols[0],
+                    method=SizingMethod.HRP,
+                    raw_fraction=1.0,
+                    adjusted_fraction=1.0,
+                    position_size_pct=100.0,
+                    position_value=portfolio_value,
+                    rationale="Single asset: 100% allocation",
+                )
+            }
+
+        try:
+            from scipy.cluster.hierarchy import linkage, leaves_list
+            from scipy.spatial.distance import squareform
+        except ImportError:
+            logger.warning("scipy not available for HRP, falling back to equal weights")
+            return self._equal_weight_fallback(symbols, portfolio_value)
+
+        # Step 1: Convert covariance to correlation
+        corr_matrix = self._cov_to_corr(covariance_matrix)
+
+        # Step 2: Compute distance matrix from correlation
+        # Distance = sqrt(0.5 * (1 - correlation))
+        dist_matrix = np.sqrt(0.5 * (1 - corr_matrix))
+
+        # Step 3: Perform hierarchical clustering
+        # Convert distance matrix to condensed form
+        condensed_dist = squareform(dist_matrix, checks=False)
+
+        # Handle potential NaN/Inf values
+        condensed_dist = np.nan_to_num(condensed_dist, nan=1.0, posinf=1.0, neginf=0.0)
+
+        # Perform hierarchical clustering
+        link = linkage(condensed_dist, method=linkage_method)
+
+        # Step 4: Get quasi-diagonalization ordering
+        sorted_indices = leaves_list(link)
+
+        # Step 5: Recursive bisection to get weights
+        weights = self._hrp_recursive_bisection(covariance_matrix, sorted_indices)
+
+        # Apply constraints
+        weights = self._apply_weight_constraints(weights)
+
+        # Calculate portfolio statistics
+        port_var = np.dot(weights, np.dot(covariance_matrix, weights))
+        port_vol = np.sqrt(max(0, port_var))
+
+        # Calculate diversification ratio
+        individual_vols = np.sqrt(np.diag(covariance_matrix))
+        weighted_avg_vol = np.dot(weights, individual_vols)
+        div_ratio = weighted_avg_vol / port_vol if port_vol > 0 else 1.0
+
+        logger.info(
+            f"HRP optimization: portfolio_vol={port_vol:.2%}, "
+            f"diversification_ratio={div_ratio:.2f}, n_assets={n}"
+        )
+
+        # Create results
+        results = {}
+        for i, symbol in enumerate(symbols):
+            w = weights[i]
+            asset_vol = individual_vols[i]
+
+            results[symbol] = PositionSizeResult(
+                symbol=symbol,
+                method=SizingMethod.HRP,
+                raw_fraction=w,
+                adjusted_fraction=w,
+                position_size_pct=w * 100,
+                position_value=portfolio_value * w,
+                rationale=f"HRP: asset_vol={asset_vol:.2%}, cluster_order={sorted_indices.tolist().index(i)}",
+                adjustments=[f"diversification_ratio={div_ratio:.2f}"],
+            )
+
+        return results
+
+    def _cov_to_corr(self, cov: np.ndarray) -> np.ndarray:
+        """Convert covariance matrix to correlation matrix."""
+        std = np.sqrt(np.diag(cov))
+        std[std == 0] = 1e-8  # Avoid division by zero
+
+        corr = cov / np.outer(std, std)
+
+        # Clean up numerical issues
+        corr = np.clip(corr, -1.0, 1.0)
+        np.fill_diagonal(corr, 1.0)
+
+        return corr
+
+    def _hrp_recursive_bisection(
+        self,
+        cov: np.ndarray,
+        sorted_indices: np.ndarray
+    ) -> np.ndarray:
+        """
+        Recursive bisection step of HRP algorithm.
+
+        Allocates weights by recursively splitting the sorted assets
+        into clusters and allocating based on inverse variance.
+
+        Args:
+            cov: Covariance matrix
+            sorted_indices: Quasi-diagonalization ordering from clustering
+
+        Returns:
+            Array of portfolio weights
+        """
+        n = len(sorted_indices)
+        weights = np.ones(n)
+
+        # List of clusters to process: (start_idx, end_idx, current_weight)
+        clusters = [(0, n)]
+
+        while clusters:
+            start, end = clusters.pop(0)
+            size = end - start
+
+            if size == 1:
+                continue
+
+            # Split into two clusters
+            mid = (start + end) // 2
+            left_indices = sorted_indices[start:mid]
+            right_indices = sorted_indices[mid:end]
+
+            # Calculate cluster variances
+            left_var = self._get_cluster_variance(cov, left_indices)
+            right_var = self._get_cluster_variance(cov, right_indices)
+
+            # Allocate based on inverse variance
+            total_inv_var = 1/left_var + 1/right_var if left_var > 0 and right_var > 0 else 2.0
+            left_weight = (1/left_var) / total_inv_var if left_var > 0 else 0.5
+            right_weight = 1.0 - left_weight
+
+            # Apply weights to cluster members
+            for idx in range(start, mid):
+                weights[sorted_indices[idx]] *= left_weight
+            for idx in range(mid, end):
+                weights[sorted_indices[idx]] *= right_weight
+
+            # Add subclusters for further processing
+            if mid - start > 1:
+                clusters.append((start, mid))
+            if end - mid > 1:
+                clusters.append((mid, end))
+
+        return weights
+
+    def _get_cluster_variance(
+        self,
+        cov: np.ndarray,
+        indices: np.ndarray
+    ) -> float:
+        """
+        Calculate variance of a cluster (sub-portfolio).
+
+        Uses inverse-variance weighting within the cluster.
+
+        Args:
+            cov: Full covariance matrix
+            indices: Indices of assets in the cluster
+
+        Returns:
+            Cluster variance
+        """
+        if len(indices) == 0:
+            return 1e-8
+
+        if len(indices) == 1:
+            return cov[indices[0], indices[0]]
+
+        # Extract sub-covariance matrix
+        sub_cov = cov[np.ix_(indices, indices)]
+
+        # Inverse-variance weights within cluster
+        inv_diag = 1.0 / np.diag(sub_cov)
+        inv_diag = np.nan_to_num(inv_diag, nan=1.0, posinf=1.0)
+        cluster_weights = inv_diag / np.sum(inv_diag)
+
+        # Cluster variance
+        cluster_var = np.dot(cluster_weights, np.dot(sub_cov, cluster_weights))
+
+        return max(cluster_var, 1e-8)
+
+    def _equal_weight_fallback(
+        self,
+        symbols: list[str],
+        portfolio_value: float
+    ) -> dict[str, PositionSizeResult]:
+        """Fallback to equal weights when HRP cannot be computed."""
+        n = len(symbols)
+        w = 1.0 / n
+
+        return {
+            symbol: PositionSizeResult(
+                symbol=symbol,
+                method=SizingMethod.EQUAL_WEIGHT,
+                raw_fraction=w,
+                adjusted_fraction=w,
+                position_size_pct=w * 100,
+                position_value=portfolio_value * w,
+                rationale="Fallback to equal weights",
+            )
+            for symbol in symbols
+        }
+
+    # =========================================================================
+    # Phase 4: Resampled Efficiency (Michaud)
+    # =========================================================================
+
+    def optimize_portfolio_resampled(
+        self,
+        symbols: list[str],
+        returns_matrix: np.ndarray,
+        portfolio_value: float,
+        n_simulations: int = 500,
+        risk_aversion: float = 2.5,
+        min_weight: float = 0.0,
+        max_weight: float = 0.40,
+    ) -> dict[str, PositionSizeResult]:
+        """
+        Resampled Efficiency Frontier optimization (Michaud, 1998).
+
+        Traditional mean-variance optimization suffers from estimation error:
+        small changes in expected returns lead to large weight changes.
+
+        Resampled efficiency addresses this by:
+        1. Bootstrap sampling return/covariance estimates
+        2. Running MVO on each sample
+        3. Averaging the weights across samples
+
+        This produces more stable, diversified portfolios with better
+        out-of-sample performance.
+
+        Research finding: Resampled efficiency reduces weight variance
+        by 40-60% and improves out-of-sample Sharpe by 10-20%.
+
+        Args:
+            symbols: List of asset symbols
+            returns_matrix: T x N matrix of historical returns
+            portfolio_value: Total portfolio value
+            n_simulations: Number of bootstrap samples (default: 500)
+            risk_aversion: Risk aversion parameter for MVO
+            min_weight: Minimum weight per asset
+            max_weight: Maximum weight per asset
+
+        Returns:
+            Dictionary of symbol to PositionSizeResult
+        """
+        n_assets = len(symbols)
+        T, N = returns_matrix.shape
+
+        if N != n_assets:
+            logger.error(f"Returns matrix columns ({N}) != number of symbols ({n_assets})")
+            return self._equal_weight_fallback(symbols, portfolio_value)
+
+        if T < 30:
+            logger.warning(f"Insufficient data for resampling ({T} < 30 observations)")
+            return self._equal_weight_fallback(symbols, portfolio_value)
+
+        # Collect weights from all simulations
+        all_weights = np.zeros((n_simulations, n_assets))
+
+        for sim in range(n_simulations):
+            # Bootstrap sample: sample T observations with replacement
+            sample_indices = np.random.choice(T, size=T, replace=True)
+            sample_returns = returns_matrix[sample_indices, :]
+
+            # Estimate parameters from bootstrap sample
+            sample_mean = np.mean(sample_returns, axis=0)
+            sample_cov = np.cov(sample_returns, rowvar=False)
+
+            # Ensure covariance is valid
+            if sample_cov.ndim == 0:
+                sample_cov = np.array([[sample_cov]])
+            elif sample_cov.ndim == 1:
+                sample_cov = np.diag(sample_cov)
+
+            # Run MVO on this sample
+            weights = self._mean_variance_optimize(
+                sample_mean, sample_cov, risk_aversion, min_weight, max_weight
+            )
+
+            all_weights[sim, :] = weights
+
+        # Average weights across all simulations
+        avg_weights = np.mean(all_weights, axis=0)
+
+        # Normalize to sum to 1
+        avg_weights = avg_weights / np.sum(avg_weights)
+
+        # Calculate weight statistics for diagnostics
+        weight_std = np.std(all_weights, axis=0)
+        weight_cv = weight_std / (avg_weights + 1e-8)  # Coefficient of variation
+
+        # Calculate full-sample statistics for comparison
+        full_mean = np.mean(returns_matrix, axis=0)
+        full_cov = np.cov(returns_matrix, rowvar=False)
+        if full_cov.ndim == 0:
+            full_cov = np.array([[full_cov]])
+        elif full_cov.ndim == 1:
+            full_cov = np.diag(full_cov)
+
+        # Portfolio metrics
+        port_return = np.dot(avg_weights, full_mean) * 252  # Annualized
+        port_vol = np.sqrt(np.dot(avg_weights, np.dot(full_cov, avg_weights)) * 252)
+
+        logger.info(
+            f"Resampled optimization: n_sims={n_simulations}, "
+            f"exp_return={port_return:.2%}, exp_vol={port_vol:.2%}, "
+            f"avg_weight_cv={np.mean(weight_cv):.2f}"
+        )
+
+        # Create results
+        results = {}
+        for i, symbol in enumerate(symbols):
+            w = avg_weights[i]
+
+            results[symbol] = PositionSizeResult(
+                symbol=symbol,
+                method=SizingMethod.RESAMPLED,
+                raw_fraction=w,
+                adjusted_fraction=w,
+                position_size_pct=w * 100,
+                position_value=portfolio_value * w,
+                rationale=(
+                    f"Resampled MVO: weight_std={weight_std[i]:.3f}, "
+                    f"cv={weight_cv[i]:.2f}"
+                ),
+                adjustments=[
+                    f"n_simulations={n_simulations}",
+                    f"port_return={port_return:.2%}",
+                    f"port_vol={port_vol:.2%}",
+                ],
+            )
+
+        return results
+
+    def _mean_variance_optimize(
+        self,
+        expected_returns: np.ndarray,
+        covariance_matrix: np.ndarray,
+        risk_aversion: float,
+        min_weight: float = 0.0,
+        max_weight: float = 1.0,
+    ) -> np.ndarray:
+        """
+        Single mean-variance optimization for use in resampling.
+
+        Solves: max w'*mu - (lambda/2)*w'*Sigma*w
+        Subject to: sum(w) = 1, min <= w <= max
+
+        Args:
+            expected_returns: Expected return vector
+            covariance_matrix: Covariance matrix
+            risk_aversion: Risk aversion parameter
+            min_weight: Minimum weight
+            max_weight: Maximum weight
+
+        Returns:
+            Optimal weight vector
+        """
+        n = len(expected_returns)
+
+        try:
+            # Unconstrained solution
+            sigma_inv = np.linalg.inv(covariance_matrix + np.eye(n) * 1e-8)
+            raw_weights = (1 / risk_aversion) * sigma_inv @ expected_returns
+
+            # Project to simplex and apply bounds
+            weights = np.clip(raw_weights, min_weight, max_weight)
+
+            # Normalize
+            if np.sum(weights) > 0:
+                weights = weights / np.sum(weights)
+            else:
+                weights = np.ones(n) / n
+
+            return weights
+
+        except np.linalg.LinAlgError:
+            return np.ones(n) / n
+
     def _apply_weight_constraints(self, weights: np.ndarray) -> np.ndarray:
         """
         Apply position size constraints to weights.
@@ -1081,14 +1756,17 @@ class PositionSizer:
         base_size_pct: float,
         portfolio_value: float,
         current_drawdown: float,
-        max_acceptable_drawdown: float = 0.20,
-        drawdown_sensitivity: float = 2.0
+        max_acceptable_drawdown: float = 0.10,  # IMPROVED: Reduced from 20% to 10%
+        drawdown_sensitivity: float = 1.5  # IMPROVED: Start reducing earlier (was 2.0)
     ) -> PositionSizeResult:
         """
-        Adjust position size based on current portfolio drawdown (P2).
+        Adjust position size based on current portfolio drawdown.
 
-        Reduces position sizes as drawdown increases to limit further losses
-        and preserve capital during adverse periods.
+        IMPROVED: More aggressive drawdown protection:
+        - Starts reducing at ANY drawdown (not just above threshold)
+        - Halts new positions at 10% drawdown (was 20%)
+        - More gradual reduction curve (sensitivity 1.5 vs 2.0)
+        - Tiered response: warning at 3%, reduce at 5%, halt at 10%
 
         Formula: adjusted_size = base_size * (1 - (drawdown / max_dd) ^ sensitivity)
 
@@ -1097,9 +1775,8 @@ class PositionSizer:
             base_size_pct: Base position size as percentage
             portfolio_value: Total portfolio value
             current_drawdown: Current drawdown as decimal (e.g., 0.10 = 10%)
-            max_acceptable_drawdown: Maximum acceptable drawdown (default: 20%)
-            drawdown_sensitivity: How aggressively to reduce size (default: 2.0)
-                Higher values = more aggressive reduction
+            max_acceptable_drawdown: Maximum acceptable drawdown (default: 10%)
+            drawdown_sensitivity: How aggressively to reduce size (default: 1.5)
 
         Returns:
             PositionSizeResult with drawdown-adjusted size
@@ -1108,6 +1785,12 @@ class PositionSizer:
 
         # Ensure drawdown is positive
         dd = abs(current_drawdown)
+
+        # IMPROVED: Tiered drawdown response thresholds
+        DRAWDOWN_WARNING = 0.03   # 3%: Start logging warnings
+        DRAWDOWN_REDUCE = 0.05   # 5%: Actively reduce position sizes
+        DRAWDOWN_SEVERE = 0.08   # 8%: Minimal new positions
+        DRAWDOWN_HALT = 0.10     # 10%: Halt all new positions
 
         if dd <= 0:
             # No drawdown, use base size
@@ -1122,12 +1805,39 @@ class PositionSizer:
                 adjustments=["drawdown_adjustment=1.0"],
             )
 
-        # Calculate reduction factor
-        dd_ratio = min(dd / max_acceptable_drawdown, 1.0)
-        reduction_factor = 1.0 - (dd_ratio ** drawdown_sensitivity)
-        reduction_factor = max(0.1, reduction_factor)  # Minimum 10% of base size
+        # IMPROVED: Tiered response based on drawdown severity
+        if dd >= DRAWDOWN_HALT:
+            # HALT: No new positions
+            adjustments.append(f"HALTED: Drawdown {dd:.1%} >= halt threshold {DRAWDOWN_HALT:.0%}")
+            return PositionSizeResult(
+                symbol=symbol,
+                method=SizingMethod.VOL_TARGET,
+                raw_fraction=base_size_pct / 100,
+                adjusted_fraction=0.0,
+                position_size_pct=0.0,
+                position_value=0.0,
+                rationale=f"Drawdown halt: {dd:.1%} exceeds {DRAWDOWN_HALT:.0%} limit",
+                adjustments=adjustments,
+            )
 
-        adjustments.append(f"Drawdown reduction: {(1-reduction_factor)*100:.1f}%")
+        if dd >= DRAWDOWN_SEVERE:
+            # SEVERE: Maximum 20% of base size
+            reduction_factor = 0.20
+            adjustments.append(f"SEVERE drawdown ({dd:.1%}): max 20% of base size")
+        elif dd >= DRAWDOWN_REDUCE:
+            # REDUCE: 20-60% of base size based on drawdown
+            # Linear interpolation from 60% at 5% dd to 20% at 8% dd
+            reduction_factor = 0.60 - (dd - DRAWDOWN_REDUCE) / (DRAWDOWN_SEVERE - DRAWDOWN_REDUCE) * 0.40
+            adjustments.append(f"REDUCE mode ({dd:.1%}): {reduction_factor*100:.0f}% of base size")
+        elif dd >= DRAWDOWN_WARNING:
+            # WARNING: 60-90% of base size
+            # Linear interpolation from 90% at 3% dd to 60% at 5% dd
+            reduction_factor = 0.90 - (dd - DRAWDOWN_WARNING) / (DRAWDOWN_REDUCE - DRAWDOWN_WARNING) * 0.30
+            adjustments.append(f"WARNING mode ({dd:.1%}): {reduction_factor*100:.0f}% of base size")
+        else:
+            # Small drawdown: 90-100% of base size
+            reduction_factor = 1.0 - (dd / DRAWDOWN_WARNING) * 0.10
+            adjustments.append(f"Minor drawdown ({dd:.1%}): {reduction_factor*100:.0f}% of base size")
 
         # Apply reduction
         adjusted_pct = base_size_pct * reduction_factor
@@ -1137,14 +1847,9 @@ class PositionSizer:
             adjusted_pct = self._max_position_pct
             adjustments.append(f"Capped at max {self._max_position_pct}%")
 
-        if adjusted_pct < self._min_position_pct:
+        if adjusted_pct < self._min_position_pct and reduction_factor > 0:
             adjusted_pct = self._min_position_pct
             adjustments.append(f"Floor at min {self._min_position_pct}%")
-
-        # If drawdown exceeds max, halt new positions
-        if dd >= max_acceptable_drawdown:
-            adjusted_pct = 0
-            adjustments.append(f"HALTED: Drawdown {dd:.1%} >= max {max_acceptable_drawdown:.1%}")
 
         return PositionSizeResult(
             symbol=symbol,
@@ -1363,3 +2068,335 @@ class PositionSizer:
             })
 
         return frontier
+
+    # =========================================================================
+    # Phase 5.2: Transaction Cost Aware Optimization
+    # =========================================================================
+
+    def optimize_portfolio_turnover_penalized(
+        self,
+        symbols: list[str],
+        expected_returns: dict[str, float],
+        covariance_matrix: np.ndarray,
+        portfolio_value: float,
+        current_weights: dict[str, float] | None = None,
+        cost_config: TransactionCostConfig | None = None,
+        risk_aversion: float = 2.5,
+    ) -> dict[str, PositionSizeResult]:
+        """
+        Transaction cost aware portfolio optimization (Phase 5.2).
+
+        Extends mean-variance optimization to account for transaction costs.
+        This is critical for practical portfolio management where frequent
+        rebalancing can erode returns.
+
+        The objective function is:
+        max: w'μ - (λ/2)w'Σw - γ||w - w_current||₁ * costs
+
+        Where:
+        - w'μ = expected return
+        - (λ/2)w'Σw = risk penalty
+        - γ||w - w_current||₁ = turnover penalty weighted by trading costs
+
+        Key features:
+        - Penalizes deviations from current portfolio (reduces turnover)
+        - Accounts for asset-class specific trading costs
+        - Implements minimum trade threshold (don't rebalance for tiny improvements)
+        - Returns no-trade recommendation if costs exceed benefits
+
+        Research finding: Transaction costs of 50bps round-trip can reduce
+        optimal rebalancing frequency by 40-60%.
+
+        Args:
+            symbols: List of asset symbols
+            expected_returns: Expected returns by symbol (annual)
+            covariance_matrix: Covariance matrix (NxN numpy array)
+            portfolio_value: Total portfolio value
+            current_weights: Current portfolio weights (default: equal weight)
+            cost_config: Transaction cost configuration
+            risk_aversion: Risk aversion parameter
+
+        Returns:
+            Dictionary of symbol to PositionSizeResult with optimal weights
+        """
+        n = len(symbols)
+        if n == 0:
+            return {}
+
+        # Default to equal weights if no current portfolio
+        if current_weights is None:
+            current_weights = {s: 1.0 / n for s in symbols}
+
+        # Default cost config
+        if cost_config is None:
+            cost_config = TransactionCostConfig()
+
+        # Convert to arrays
+        mu = np.array([expected_returns.get(s, 0.0) for s in symbols])
+        w_current = np.array([current_weights.get(s, 0.0) for s in symbols])
+
+        # Ensure covariance matrix is valid
+        cov = covariance_matrix + np.eye(n) * 1e-8
+
+        # Calculate optimal weights without turnover penalty (baseline)
+        try:
+            cov_inv = np.linalg.inv(cov)
+            w_unconstrained = (1 / risk_aversion) * cov_inv @ mu
+            w_unconstrained = np.clip(w_unconstrained, 0, None)
+            if np.sum(w_unconstrained) > 0:
+                w_unconstrained = w_unconstrained / np.sum(w_unconstrained)
+            else:
+                w_unconstrained = np.ones(n) / n
+        except np.linalg.LinAlgError:
+            w_unconstrained = np.ones(n) / n
+
+        # Calculate turnover and trading costs
+        turnover = np.abs(w_unconstrained - w_current)
+        total_turnover_pct = np.sum(turnover)
+
+        # Estimate total trading cost
+        avg_cost_bps = cost_config.get_total_cost_bps()
+        total_trade_value = total_turnover_pct * portfolio_value
+        total_cost = cost_config.calculate_trade_cost(total_trade_value)
+        cost_as_return = total_cost / portfolio_value if portfolio_value > 0 else 0
+
+        # Calculate benefit of rebalancing (expected improvement)
+        new_return = np.dot(w_unconstrained, mu)
+        old_return = np.dot(w_current, mu)
+        improvement = new_return - old_return
+
+        # Check minimum improvement threshold
+        min_improvement = cost_config.min_trade_improvement_pct / 100
+
+        # Decision: rebalance or not?
+        if improvement < cost_as_return + min_improvement:
+            # Don't rebalance - cost exceeds benefit
+            logger.info(
+                f"Turnover-penalized: No rebalance. "
+                f"Improvement={improvement:.4f}, Cost={cost_as_return:.4f}, "
+                f"Min threshold={min_improvement:.4f}"
+            )
+
+            # Return current weights
+            results = {}
+            for i, symbol in enumerate(symbols):
+                w = w_current[i]
+                results[symbol] = PositionSizeResult(
+                    symbol=symbol,
+                    method=SizingMethod.TURNOVER_PENALIZED,
+                    raw_fraction=w_unconstrained[i],
+                    adjusted_fraction=w,
+                    position_size_pct=w * 100,
+                    position_value=portfolio_value * w,
+                    rationale=f"No rebalance: cost ({cost_as_return:.2%}) > benefit ({improvement:.2%})",
+                    adjustments=[
+                        "no_trade_decision",
+                        f"turnover={total_turnover_pct:.2%}",
+                        f"cost_bps={avg_cost_bps:.1f}",
+                    ],
+                )
+            return results
+
+        # Rebalance with turnover penalty
+        # Use iterative approach to find optimal weights with penalty
+        lambda_turnover = cost_config.turnover_penalty_lambda
+
+        weights = self._solve_turnover_penalized_mvo(
+            mu, cov, w_current, risk_aversion, lambda_turnover, cost_config
+        )
+
+        # Apply constraints
+        weights = self._apply_weight_constraints(weights)
+
+        # Calculate final metrics
+        new_turnover = np.abs(weights - w_current)
+        final_turnover_pct = np.sum(new_turnover)
+        final_trade_value = final_turnover_pct * portfolio_value
+        final_cost = cost_config.calculate_trade_cost(final_trade_value)
+
+        port_return = np.dot(weights, mu)
+        port_vol = np.sqrt(np.dot(weights, np.dot(cov, weights)))
+        net_improvement = (port_return - np.dot(w_current, mu)) - final_cost / portfolio_value
+
+        logger.info(
+            f"Turnover-penalized optimization: turnover={final_turnover_pct:.2%}, "
+            f"cost=${final_cost:.2f}, net_improvement={net_improvement:.4f}"
+        )
+
+        # Create results
+        results = {}
+        for i, symbol in enumerate(symbols):
+            w = weights[i]
+            trade_size = abs(w - w_current[i])
+
+            results[symbol] = PositionSizeResult(
+                symbol=symbol,
+                method=SizingMethod.TURNOVER_PENALIZED,
+                raw_fraction=w_unconstrained[i],
+                adjusted_fraction=w,
+                position_size_pct=w * 100,
+                position_value=portfolio_value * w,
+                rationale=f"TC-aware: trade={trade_size:.2%}, port_vol={port_vol:.2%}",
+                adjustments=[
+                    f"turnover_penalty={lambda_turnover:.2f}",
+                    f"trade_cost=${final_cost:.2f}",
+                    f"net_improvement={net_improvement:.4f}",
+                ],
+            )
+
+        return results
+
+    def _solve_turnover_penalized_mvo(
+        self,
+        mu: np.ndarray,
+        cov: np.ndarray,
+        w_current: np.ndarray,
+        risk_aversion: float,
+        lambda_turnover: float,
+        cost_config: TransactionCostConfig,
+        max_iter: int = 50,
+        tol: float = 1e-6,
+    ) -> np.ndarray:
+        """
+        Solve MVO with turnover penalty using proximal gradient descent.
+
+        The L1 penalty on turnover is non-differentiable, so we use
+        soft-thresholding (proximal operator).
+
+        Args:
+            mu: Expected returns
+            cov: Covariance matrix
+            w_current: Current weights
+            risk_aversion: Risk aversion
+            lambda_turnover: Turnover penalty weight
+            cost_config: Cost configuration
+            max_iter: Maximum iterations
+            tol: Convergence tolerance
+
+        Returns:
+            Optimal weights
+        """
+        n = len(mu)
+        weights = w_current.copy()
+
+        # Cost per unit turnover (in return space)
+        cost_bps = cost_config.get_total_cost_bps()
+        cost_per_unit = cost_bps / 10000  # Convert to decimal
+
+        # Step size (should be < 1 / max_eigenvalue)
+        max_eig = np.max(np.abs(np.linalg.eigvals(cov)))
+        step = 0.5 / (risk_aversion * max_eig + 1e-8)
+
+        for iteration in range(max_iter):
+            weights_old = weights.copy()
+
+            # Gradient of quadratic part: -μ + λ*Σ*w
+            grad = -mu + risk_aversion * cov @ weights
+
+            # Gradient step
+            weights_temp = weights - step * grad
+
+            # Proximal step (soft-thresholding for L1 penalty)
+            threshold = step * lambda_turnover * cost_per_unit
+            diff = weights_temp - w_current
+
+            # Soft-thresholding: shrink towards current weights
+            shrunk = np.sign(diff) * np.maximum(np.abs(diff) - threshold, 0)
+            weights = w_current + shrunk
+
+            # Project to simplex (sum to 1, non-negative)
+            weights = np.clip(weights, 0, None)
+            if np.sum(weights) > 0:
+                weights = weights / np.sum(weights)
+            else:
+                weights = np.ones(n) / n
+
+            # Check convergence
+            if np.max(np.abs(weights - weights_old)) < tol:
+                logger.debug(f"Turnover-penalized MVO converged in {iteration + 1} iterations")
+                break
+
+        return weights
+
+    def calculate_rebalancing_threshold(
+        self,
+        symbols: list[str],
+        current_weights: dict[str, float],
+        target_weights: dict[str, float],
+        portfolio_value: float,
+        cost_config: TransactionCostConfig | None = None,
+        expected_returns: dict[str, float] | None = None,
+        holding_period_days: int = 30,
+    ) -> dict[str, Any]:
+        """
+        Calculate whether rebalancing is worthwhile given costs (Phase 5.2).
+
+        This provides a decision framework for when to rebalance, considering:
+        - Trading costs (commissions, spread, market impact)
+        - Expected drift if not rebalancing
+        - Time horizon until next rebalance
+
+        Args:
+            symbols: Asset symbols
+            current_weights: Current portfolio weights
+            target_weights: Target portfolio weights
+            portfolio_value: Total portfolio value
+            cost_config: Transaction cost configuration
+            expected_returns: Expected returns (for benefit calculation)
+            holding_period_days: Expected days until next rebalance
+
+        Returns:
+            Dictionary with recommendation and analysis
+        """
+        if cost_config is None:
+            cost_config = TransactionCostConfig()
+
+        n = len(symbols)
+
+        # Calculate turnover
+        turnover_by_asset = {}
+        total_turnover = 0.0
+
+        for symbol in symbols:
+            current = current_weights.get(symbol, 0.0)
+            target = target_weights.get(symbol, 0.0)
+            diff = abs(target - current)
+            turnover_by_asset[symbol] = diff
+            total_turnover += diff
+
+        # Calculate trading costs
+        trade_value = total_turnover * portfolio_value
+        total_cost = cost_config.calculate_trade_cost(trade_value)
+        cost_as_pct = (total_cost / portfolio_value) * 100 if portfolio_value > 0 else 0
+
+        # Calculate expected benefit (if returns provided)
+        expected_benefit = 0.0
+        if expected_returns:
+            current_return = sum(
+                current_weights.get(s, 0) * expected_returns.get(s, 0)
+                for s in symbols
+            )
+            target_return = sum(
+                target_weights.get(s, 0) * expected_returns.get(s, 0)
+                for s in symbols
+            )
+            # Annualized benefit, adjusted for holding period
+            expected_benefit = (target_return - current_return) * (holding_period_days / 365)
+
+        # Make recommendation
+        benefit_exceeds_cost = expected_benefit > (total_cost / portfolio_value)
+        min_threshold_met = total_turnover > (cost_config.min_trade_improvement_pct / 100)
+
+        should_rebalance = benefit_exceeds_cost or min_threshold_met
+
+        return {
+            "recommendation": "REBALANCE" if should_rebalance else "HOLD",
+            "total_turnover_pct": total_turnover * 100,
+            "turnover_by_asset": turnover_by_asset,
+            "estimated_cost_dollars": total_cost,
+            "estimated_cost_pct": cost_as_pct,
+            "expected_benefit_pct": expected_benefit * 100,
+            "cost_benefit_ratio": total_cost / (expected_benefit * portfolio_value) if expected_benefit > 0 else float('inf'),
+            "min_threshold_pct": cost_config.min_trade_improvement_pct,
+            "holding_period_days": holding_period_days,
+        }

@@ -7,6 +7,7 @@ Tests for the Risk Management agent that validates trading decisions.
 
 import pytest
 import asyncio
+from collections import deque
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone, timedelta
 
@@ -179,8 +180,8 @@ class TestRiskAgentInitialization:
         config = AgentConfig(name="RiskAgent", parameters={})
         agent = RiskAgent(config, mock_event_bus, mock_audit_logger, mock_broker)
 
-        # Should use default values
-        assert agent._max_position_pct == 0.05
+        # Should use default values (max_position_size_pct defaults to 2.5%)
+        assert agent._max_position_pct == 0.025  # 2.5% default
         assert agent._max_daily_loss_pct == 0.03
 
     @pytest.mark.asyncio
@@ -283,24 +284,58 @@ class TestKillSwitch:
 # ============================================================================
 
 class TestDrawdown:
-    """Test drawdown handling."""
+    """Test drawdown handling with autonomous risk management."""
 
     def test_drawdown_levels(self):
-        """Test drawdown level enumeration."""
+        """Test drawdown level enumeration - new tiered system."""
         assert DrawdownLevel.NORMAL.value == "normal"
         assert DrawdownLevel.WARNING.value == "warning"
-        assert DrawdownLevel.REDUCE.value == "reduce"
-        assert DrawdownLevel.HALT.value == "halt"
+        assert DrawdownLevel.CRITICAL.value == "critical"
+        assert DrawdownLevel.SEVERE.value == "severe"
+        assert DrawdownLevel.MAXIMUM.value == "maximum"
 
     def test_initial_drawdown_level(self, risk_agent):
         """Test initial drawdown level is NORMAL."""
         assert risk_agent._current_drawdown_level == DrawdownLevel.NORMAL
 
     def test_drawdown_thresholds(self, risk_agent):
-        """Test drawdown threshold configuration."""
-        assert risk_agent._drawdown_warning_pct == 0.05
-        assert risk_agent._drawdown_reduce_pct == 0.075
-        assert risk_agent._drawdown_halt_pct == 0.10
+        """Test drawdown threshold configuration - new tiered system."""
+        assert risk_agent._drawdown_warning_pct == 0.05  # 5%
+        assert risk_agent._drawdown_critical_pct == 0.10  # 10%
+        assert risk_agent._drawdown_severe_pct == 0.15  # 15%
+        assert risk_agent._drawdown_maximum_pct == 0.20  # 20%
+
+    def test_autonomous_mode_flags(self, risk_agent):
+        """Test autonomous mode flags are initialized correctly."""
+        assert risk_agent._defensive_mode_active is False
+        assert risk_agent._no_new_longs is False
+
+    def test_position_size_multiplier_normal(self, risk_agent):
+        """Test position size multiplier at NORMAL level."""
+        risk_agent._current_drawdown_level = DrawdownLevel.NORMAL
+        assert risk_agent.get_position_size_multiplier() == 1.0
+
+    def test_position_size_multiplier_warning(self, risk_agent):
+        """Test position size multiplier at WARNING level (50% reduction)."""
+        risk_agent._current_drawdown_level = DrawdownLevel.WARNING
+        assert risk_agent.get_position_size_multiplier() == 0.5
+
+    def test_position_size_multiplier_critical(self, risk_agent):
+        """Test position size multiplier at CRITICAL level (no new positions)."""
+        risk_agent._current_drawdown_level = DrawdownLevel.CRITICAL
+        assert risk_agent.get_position_size_multiplier() == 0.0
+
+    def test_can_open_position_normal(self, risk_agent):
+        """Test can open position at NORMAL level."""
+        can_open, reason = risk_agent.can_open_new_position(is_long=True)
+        assert can_open is True
+
+    def test_can_open_position_defensive_mode(self, risk_agent):
+        """Test cannot open position in defensive mode."""
+        risk_agent._defensive_mode_active = True
+        can_open, reason = risk_agent.can_open_new_position(is_long=True)
+        assert can_open is False
+        assert "DEFENSIVE MODE" in reason
 
 
 # ============================================================================
@@ -563,7 +598,8 @@ class TestEdgeCases:
 
     def test_var_history(self, risk_agent):
         """Test VaR history tracking."""
-        assert isinstance(risk_agent._returns_history, list)
+        # Memory safety: returns_history uses deque instead of list
+        assert isinstance(risk_agent._returns_history, deque)
         assert risk_agent._max_history_days == 252
 
         # Add some returns
@@ -582,7 +618,8 @@ class TestMonitoringStatus:
 
     def test_check_latencies_tracking(self, risk_agent):
         """Test check latencies tracking."""
-        assert isinstance(risk_agent._check_latencies, list)
+        # Memory safety: check_latencies uses deque instead of list
+        assert isinstance(risk_agent._check_latencies, deque)
 
         # Add some latencies
         risk_agent._check_latencies.append(5.0)

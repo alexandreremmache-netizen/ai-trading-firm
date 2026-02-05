@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -35,9 +37,11 @@ from core.events import (
     SignalEvent,
     DecisionEvent,
     ValidatedDecisionEvent,
+    MarketDataEvent,
     SignalDirection,
     OrderSide,
     OrderType,
+    DecisionAction,
 )
 
 if TYPE_CHECKING:
@@ -47,6 +51,13 @@ if TYPE_CHECKING:
     from core.attribution import PerformanceAttribution
     from core.correlation_manager import CorrelationManager, CorrelationRegime
     from core.risk_budget import RiskBudgetManager
+
+# Import Signal Quality Scorer
+try:
+    from core.signal_quality import SignalQualityScorer, create_signal_quality_scorer
+    HAS_SIGNAL_QUALITY = True
+except ImportError:
+    HAS_SIGNAL_QUALITY = False
 
 
 logger = logging.getLogger(__name__)
@@ -60,6 +71,53 @@ class MarketRegime(Enum):
     TRENDING = "trending"
     MEAN_REVERTING = "mean_reverting"
     NEUTRAL = "neutral"
+
+
+class DecisionMode(Enum):
+    """
+    CIO decision-making mode based on market/system conditions.
+
+    NORMAL: Full strategy suite, normal position sizing
+    DEFENSIVE: Reduced position sizes, conservative strategies only
+    EMERGENCY: Minimal strategies, severely capped position sizes, exit-focused
+    HUMAN_CIO: Human-in-the-loop mode - all decisions require human approval
+    """
+    NORMAL = "normal"
+    DEFENSIVE = "defensive"
+    EMERGENCY = "emergency"
+    HUMAN_CIO = "human_cio"  # Requires human approval for all decisions
+
+
+@dataclass
+class PendingHumanDecision:
+    """A decision awaiting human approval in HUMAN_CIO mode."""
+    decision_id: str
+    symbol: str
+    direction: SignalDirection
+    quantity: int
+    conviction: float
+    rationale: str
+    signals: dict  # Original signals that led to this decision
+    aggregation: Any  # SignalAggregation
+    created_at: datetime
+    expires_at: datetime  # Auto-reject after this time
+    status: str = "pending"  # pending, approved, rejected, expired
+
+
+# Core strategies allowed in EMERGENCY mode (most battle-tested)
+EMERGENCY_MODE_CORE_STRATEGIES = {
+    "MacroAgent",
+    "MomentumAgent",
+    "StatArbAgent",
+}
+
+# Position size caps by mode
+POSITION_SIZE_CAPS = {
+    DecisionMode.NORMAL: 1.0,       # 100% of calculated size
+    DecisionMode.DEFENSIVE: 0.5,    # 50% of calculated size
+    DecisionMode.EMERGENCY: 0.25,   # 25% of calculated size
+    DecisionMode.HUMAN_CIO: 1.0,    # Human decides size, no auto cap
+}
 
 
 @dataclass
@@ -108,6 +166,154 @@ class DecisionRecord:
     outcome_recorded: bool = False
 
 
+@dataclass
+class TrackedPosition:
+    """
+    CIO-tracked position with performance metrics for autonomous management.
+
+    The CIO monitors all positions and makes autonomous decisions to:
+    - Close losing positions that exceed loss threshold
+    - Take profits on winning positions
+    - Reduce position size when conviction drops
+    - Override individual stop-losses in special situations
+    """
+    symbol: str
+    quantity: int
+    entry_price: float
+    entry_time: datetime
+    is_long: bool
+    current_price: float = 0.0
+    highest_price: float = 0.0  # For tracking peak (trailing stop logic)
+    lowest_price: float = float("inf")  # For short positions
+    original_conviction: float = 0.0  # Conviction when position was opened
+    current_conviction: float = 0.0  # Current conviction from latest signals
+    last_signal_time: datetime | None = None  # When we last got a signal for this symbol
+    contributing_strategies: list[str] = field(default_factory=list)
+    stop_loss_level: float | None = None  # Individual stop-loss price
+    take_profit_level: float | None = None  # Take profit target
+    stop_loss_overridden: bool = False  # True if CIO has overridden individual stop
+    # R-Multiple Tracking (Phase 3 Enhancement)
+    initial_risk: float = 0.0  # Distance from entry to stop-loss (1R unit)
+
+    @property
+    def pnl_pct(self) -> float:
+        """Calculate unrealized P&L percentage."""
+        if self.entry_price <= 0 or self.current_price <= 0:
+            return 0.0
+        if self.is_long:
+            return ((self.current_price - self.entry_price) / self.entry_price) * 100
+        else:
+            return ((self.entry_price - self.current_price) / self.entry_price) * 100
+
+    @property
+    def pnl_dollar(self) -> float:
+        """Calculate unrealized P&L in dollars."""
+        if self.is_long:
+            return (self.current_price - self.entry_price) * self.quantity
+        else:
+            return (self.entry_price - self.current_price) * self.quantity
+
+    @property
+    def holding_hours(self) -> float:
+        """Calculate how long position has been held."""
+        delta = datetime.now(timezone.utc) - self.entry_time
+        return delta.total_seconds() / 3600
+
+    @property
+    def drawdown_from_peak_pct(self) -> float:
+        """Calculate drawdown from highest price seen (for longs)."""
+        if self.highest_price <= 0:
+            return 0.0
+        return ((self.highest_price - self.current_price) / self.highest_price) * 100
+
+    @property
+    def rally_from_trough_pct(self) -> float:
+        """Calculate rally from lowest price seen (for shorts)."""
+        if self.lowest_price == float("inf") or self.lowest_price <= 0:
+            return 0.0
+        return ((self.current_price - self.lowest_price) / self.lowest_price) * 100
+
+    @property
+    def r_multiple(self) -> float:
+        """
+        Calculate R-Multiple (risk-adjusted return).
+
+        R-Multiple = PnL / Initial Risk
+        - 1R = breakeven on initial risk
+        - 2R = made 2x the initial risk
+        - -1R = lost exactly the initial risk (stopped out)
+
+        If no stop-loss was set, returns 0.0.
+        """
+        if self.initial_risk <= 0:
+            return 0.0
+
+        # Calculate P&L in price terms
+        if self.is_long:
+            pnl = self.current_price - self.entry_price
+        else:
+            pnl = self.entry_price - self.current_price
+
+        return pnl / self.initial_risk
+
+    def update_price(self, price: float) -> None:
+        """Update current price and track extremes."""
+        self.current_price = price
+        if self.is_long:
+            self.highest_price = max(self.highest_price, price)
+        else:
+            self.lowest_price = min(self.lowest_price, price)
+
+
+@dataclass
+class PositionManagementConfig:
+    """Configuration for autonomous position management."""
+    # Loss thresholds - when to close losing positions
+    max_loss_pct: float = 5.0  # Close position at -5% loss
+    extended_loss_pct: float = 8.0  # Definitely close at -8%
+    loss_time_threshold_hours: float = 48.0  # Close if losing for 48+ hours
+
+    # Profit taking thresholds
+    profit_target_pct: float = 15.0  # Start taking profit at +15%
+    trailing_profit_pct: float = 3.0  # Take profit if drops 3% from peak
+    partial_profit_pct: float = 50.0  # Partial exit: sell 50% at target
+
+    # Conviction-based position reduction
+    conviction_drop_threshold: float = 0.3  # Reduce if conviction drops > 30%
+    min_conviction_to_hold: float = 0.4  # Close if conviction below this
+
+    # Time-based rules
+    max_holding_days: float = 30.0  # Maximum holding period (days)
+    stale_signal_hours: float = 24.0  # Signal is stale after 24 hours
+
+    # Market regime adjustments
+    volatile_regime_loss_pct: float = 3.0  # Tighter stop in volatile markets
+    trending_regime_profit_mult: float = 1.5  # Let profits run in trends
+
+    # Stop-loss override rules
+    allow_stop_override_in_trending: bool = True  # Can override stops in strong trends
+    stop_override_min_conviction: float = 0.8  # Need 80%+ conviction to override
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for status reporting."""
+        return {
+            "max_loss_pct": self.max_loss_pct,
+            "extended_loss_pct": self.extended_loss_pct,
+            "loss_time_threshold_hours": self.loss_time_threshold_hours,
+            "profit_target_pct": self.profit_target_pct,
+            "trailing_profit_pct": self.trailing_profit_pct,
+            "partial_profit_pct": self.partial_profit_pct,
+            "conviction_drop_threshold": self.conviction_drop_threshold,
+            "min_conviction_to_hold": self.min_conviction_to_hold,
+            "max_holding_days": self.max_holding_days,
+            "stale_signal_hours": self.stale_signal_hours,
+            "volatile_regime_loss_pct": self.volatile_regime_loss_pct,
+            "trending_regime_profit_mult": self.trending_regime_profit_mult,
+            "allow_stop_override_in_trending": self.allow_stop_override_in_trending,
+            "stop_override_min_conviction": self.stop_override_min_conviction,
+        }
+
+
 class CIOAgent(DecisionAgent):
     """
     Chief Investment Officer Agent.
@@ -141,7 +347,7 @@ class CIOAgent(DecisionAgent):
             "StatArbAgent": config.parameters.get("signal_weight_stat_arb", 0.25),
             "MomentumAgent": config.parameters.get("signal_weight_momentum", 0.25),
             "MarketMakingAgent": config.parameters.get("signal_weight_market_making", 0.15),
-            "OptionsVolAgent": config.parameters.get("signal_weight_options_vol", 0.20),
+            "MACDvAgent": config.parameters.get("signal_weight_macdv", 0.20),
         }
 
         # Current effective weights (may be adjusted dynamically)
@@ -171,12 +377,22 @@ class CIOAgent(DecisionAgent):
         self._performance_weight_factor = config.parameters.get("performance_weight_factor", 0.3)
         self._regime_weight_factor = config.parameters.get("regime_weight_factor", 0.2)
 
-        # Position sizing settings
+        # Position sizing settings - IMPROVED for better money management
         self._use_kelly_sizing = config.parameters.get("use_kelly_sizing", True)
-        self._kelly_fraction = config.parameters.get("kelly_fraction", 0.5)  # Half-Kelly
+        # IMPROVED: Use quarter-Kelly (0.25x) for safer position sizing
+        self._kelly_fraction = config.parameters.get("kelly_fraction", 0.25)
         self._base_position_size = config.parameters.get("base_position_size", 100)
-        self._max_position_size = config.parameters.get("max_position_size", 1000)
+        # IMPROVED: Reduce max position size from 1000 to 500 shares
+        self._max_position_size = config.parameters.get("max_position_size", 500)
         self._portfolio_value = config.parameters.get("portfolio_value", 1_000_000.0)
+        # NEW: Maximum position as % of portfolio (default 2.5%)
+        self._max_position_pct = config.parameters.get("max_position_pct", 2.5)
+        # NEW: Maximum total portfolio exposure (default 50%)
+        self._max_total_exposure_pct = config.parameters.get("max_total_exposure_pct", 50.0)
+        # NEW: Maximum raw Kelly before applying fraction (default 15%)
+        self._max_kelly_raw = config.parameters.get("max_kelly_raw", 0.15)
+        # NEW: Per-position daily loss limit as % of portfolio (default 1%)
+        self._max_position_daily_loss_pct = config.parameters.get("max_position_daily_loss_pct", 1.0)
 
         # State
         self._pending_aggregations: dict[str, SignalAggregation] = {}
@@ -211,9 +427,20 @@ class CIOAgent(DecisionAgent):
         self._correlation_lookback = config.parameters.get("signal_correlation_lookback", 50)
         self._use_correlation_adjustment = config.parameters.get("use_signal_correlation_adjustment", True)
 
-        # P2: Historical decision accuracy tracking
-        self._decision_history: list[DecisionRecord] = []
+        # Enhanced monthly correlation tracking (Phase D improvement)
+        self._monthly_correlation_lookback = config.parameters.get("monthly_correlation_lookback", 720)  # 30 days hourly
+        self._high_correlation_threshold = config.parameters.get("high_correlation_threshold", 0.95)
+        self._high_correlation_weight_factor = config.parameters.get("high_correlation_weight_factor", 0.5)
+        self._monthly_correlations: dict[tuple[str, str], float] = {}  # (agent1, agent2) -> monthly correlation
+        self._last_monthly_correlation_update: datetime | None = None
+        self._monthly_correlation_update_interval_hours = config.parameters.get(
+            "monthly_correlation_update_interval_hours", 1.0
+        )
+        self._correlation_halved_count = 0  # Track how often weights are halved due to high correlation
+
+        # P2: Historical decision accuracy tracking (bounded to prevent memory leak)
         self._max_decision_history = config.parameters.get("max_decision_history", 500)
+        self._decision_history: deque[DecisionRecord] = deque(maxlen=self._max_decision_history)
         self._decision_accuracy_by_strategy: dict[str, dict[str, float]] = {}  # strategy -> {accuracy, count}
         self._decision_accuracy_by_regime: dict[str, dict[str, float]] = {}  # regime -> {accuracy, count}
         self._overall_decision_accuracy: float = 0.0
@@ -246,7 +473,7 @@ class CIOAgent(DecisionAgent):
                 "MarketMakingAgent": 0.8,
             },
             MarketRegime.VOLATILE: {
-                "OptionsVolAgent": 1.4,
+                "MACDvAgent": 1.4,
                 "MarketMakingAgent": 0.7,
                 "MomentumAgent": 0.8,
             },
@@ -260,14 +487,110 @@ class CIOAgent(DecisionAgent):
             },
         }
 
+        # =====================================================================
+        # AUTONOMOUS POSITION MANAGEMENT
+        # =====================================================================
+
+        # Tracked positions for CIO-level management
+        self._tracked_positions: dict[str, TrackedPosition] = {}
+
+        # Position management configuration
+        pm_config = config.parameters.get("position_management", {})
+        self._position_management_config = PositionManagementConfig(
+            max_loss_pct=pm_config.get("max_loss_pct", 5.0),
+            extended_loss_pct=pm_config.get("extended_loss_pct", 8.0),
+            loss_time_threshold_hours=pm_config.get("loss_time_threshold_hours", 48.0),
+            profit_target_pct=pm_config.get("profit_target_pct", 15.0),
+            trailing_profit_pct=pm_config.get("trailing_profit_pct", 3.0),
+            partial_profit_pct=pm_config.get("partial_profit_pct", 50.0),
+            conviction_drop_threshold=pm_config.get("conviction_drop_threshold", 0.3),
+            min_conviction_to_hold=pm_config.get("min_conviction_to_hold", 0.4),
+            max_holding_days=pm_config.get("max_holding_days", 30.0),
+            stale_signal_hours=pm_config.get("stale_signal_hours", 24.0),
+            volatile_regime_loss_pct=pm_config.get("volatile_regime_loss_pct", 3.0),
+            trending_regime_profit_mult=pm_config.get("trending_regime_profit_mult", 1.5),
+            allow_stop_override_in_trending=pm_config.get("allow_stop_override_in_trending", True),
+            stop_override_min_conviction=pm_config.get("stop_override_min_conviction", 0.8),
+        )
+
+        # Position management state
+        self._position_management_enabled = config.parameters.get("position_management_enabled", True)
+        self._last_position_review = datetime.now(timezone.utc)
+        self._position_review_interval_seconds = config.parameters.get("position_review_interval_seconds", 60.0)
+
+        # Track position management decisions for analytics
+        self._position_management_stats = {
+            "losers_closed": 0,
+            "profits_taken": 0,
+            "positions_reduced": 0,
+            "stop_overrides": 0,
+            "time_exits": 0,
+            "conviction_exits": 0,
+            # Phase 3: R-Multiple tracking
+            "r_multiple_exits_2r": 0,
+            "r_multiple_exits_3r": 0,
+            "total_r_multiple_closed": 0.0,  # Sum of R-multiples at exit
+            "closed_trade_count": 0,
+        }
+
+        # =====================================================================
+        # DECISION MODE (Emergency/Defensive mode support)
+        # =====================================================================
+        self._decision_mode = DecisionMode.NORMAL
+        self._decision_mode_override: DecisionMode | None = None  # Manual override
+        self._decision_mode_auto_escalation = config.parameters.get("decision_mode_auto_escalation", True)
+        self._defensive_mode_drawdown_threshold = config.parameters.get("defensive_mode_drawdown_threshold", 0.03)  # 3%
+        self._emergency_mode_drawdown_threshold = config.parameters.get("emergency_mode_drawdown_threshold", 0.05)  # 5%
+        self._mode_change_history: deque[tuple[datetime, DecisionMode, str]] = deque(maxlen=50)
+
+        # =====================================================================
+        # HUMAN-IN-THE-LOOP MODE (HUMAN_CIO)
+        # =====================================================================
+        hitl_config = config.parameters.get("human_in_the_loop", {})
+        self._human_decision_timeout_seconds = hitl_config.get("timeout_seconds", 300.0)  # 5 min default
+        self._max_pending_human_decisions = hitl_config.get("max_pending_decisions", 100)  # Issue 4.2: Bounded queue
+        self._pending_human_decisions: dict[str, PendingHumanDecision] = {}  # decision_id -> pending
+        self._human_decision_lock = threading.RLock()  # Issue 4.1: Thread-safe approval/rejection
+        self._human_decision_history: deque[dict] = deque(maxlen=500)  # Audit trail
+        self._human_cio_enabled = False  # Set via set_human_cio_mode()
+        self._human_cio_reason: str = ""  # Why human-in-the-loop is active
+        self._human_decision_callback: Any = None  # Optional callback for pending decisions
+
+        # =====================================================================
+        # SIGNAL QUALITY SCORING (Phase 2 Enhancement)
+        # =====================================================================
+        signal_quality_config = config.parameters.get("signal_quality", {})
+        self._signal_quality_enabled = signal_quality_config.get("enabled", True)
+        self._signal_quality_scorer: SignalQualityScorer | None = None
+        if HAS_SIGNAL_QUALITY and self._signal_quality_enabled:
+            self._signal_quality_scorer = create_signal_quality_scorer({
+                "min_total_score": signal_quality_config.get("min_total_score", 50.0),
+                "min_volume_score": signal_quality_config.get("min_volume_score", 5.0),
+                "min_trend_score": signal_quality_config.get("min_trend_score", 5.0),
+            })
+            logger.info("Signal Quality Scorer initialized")
+
+        # Market data cache for quality scoring (bounded deques per symbol)
+        self._market_data_cache: dict[str, dict[str, deque]] = {}
+        self._market_data_maxlen = 100  # Keep last 100 data points
+
     async def initialize(self) -> None:
         """Initialize CIO agent."""
         logger.info(f"CIOAgent initializing with weights: {self._weights}")
         logger.info(f"Min conviction threshold: {self._min_conviction}")
 
     def get_subscribed_events(self) -> list[EventType]:
-        """CIO subscribes to validated decisions only - signals come via barrier."""
-        return [EventType.VALIDATED_DECISION]
+        """CIO subscribes to validated decisions and market data (for quality scoring cache)."""
+        return [EventType.VALIDATED_DECISION, EventType.MARKET_DATA]
+
+    async def handle_event(self, event: Event) -> None:
+        """Handle subscribed events."""
+        if event.event_type == EventType.MARKET_DATA and isinstance(event, MarketDataEvent):
+            # Update market data cache for signal quality scoring
+            price = event.last or event.bid or event.ask or 0.0
+            volume = event.volume or 0.0
+            if price > 0:
+                self.update_market_data_cache(event.symbol, price, volume)
 
     async def start(self) -> None:
         """Start CIO agent with barrier monitoring loop."""
@@ -320,12 +643,17 @@ class CIOAgent(DecisionAgent):
         Process all signals from completed barrier (fan-in).
 
         Groups signals by symbol and makes decisions for each.
+        Also reviews existing positions for autonomous management.
         """
         # Check for emergency deleveraging BEFORE processing new signals
         deleverage_triggered = await self._check_and_deleverage()
         if deleverage_triggered:
             # Skip normal signal processing when actively deleveraging
             return
+
+        # AUTONOMOUS POSITION MANAGEMENT: Review existing positions first
+        if self._position_management_enabled:
+            await self._review_and_manage_positions(signals)
 
         # Group signals by symbol
         by_symbol: dict[str, dict[str, SignalEvent]] = {}
@@ -470,6 +798,568 @@ class CIOAgent(DecisionAgent):
         except Exception as e:
             logger.exception(f"CIO: Error checking leverage for deleveraging: {e}")
             return False
+
+    # =========================================================================
+    # AUTONOMOUS POSITION MANAGEMENT
+    # =========================================================================
+
+    async def _review_and_manage_positions(
+        self,
+        signals: dict[str, SignalEvent],
+    ) -> None:
+        """
+        Review all tracked positions and make autonomous management decisions.
+
+        This is the core autonomous decision-making method that:
+        1. Closes losing positions exceeding loss thresholds
+        2. Takes profits on winning positions
+        3. Reduces position size when conviction drops
+        4. Can override individual stop-losses in special situations
+        5. Adapts rules based on market regime
+
+        Called during each signal barrier cycle.
+        """
+        now = datetime.now(timezone.utc)
+
+        # Rate limit position reviews
+        if (now - self._last_position_review).total_seconds() < self._position_review_interval_seconds:
+            return
+        self._last_position_review = now
+
+        # Sync tracked positions with broker positions
+        await self._sync_tracked_positions()
+
+        # Update conviction from latest signals
+        self._update_position_convictions(signals)
+
+        # Review each position
+        for symbol, pos in list(self._tracked_positions.items()):
+            decision = await self._evaluate_position_for_management(pos)
+            if decision:
+                await self._publish_position_management_decision(decision)
+
+    async def _sync_tracked_positions(self) -> None:
+        """
+        Sync CIO tracked positions with broker portfolio state.
+
+        Ensures we're tracking all open positions and removes closed ones.
+        """
+        if not self._broker:
+            return
+
+        try:
+            portfolio_state = await self._broker.get_portfolio_state()
+            broker_positions = portfolio_state.positions
+
+            # Update existing tracked positions with latest prices
+            for symbol, pos in broker_positions.items():
+                if pos.quantity == 0:
+                    # Position closed - remove from tracking
+                    if symbol in self._tracked_positions:
+                        del self._tracked_positions[symbol]
+                    continue
+
+                price = (pos.market_value / pos.quantity) if pos.quantity != 0 else pos.avg_cost
+
+                if symbol in self._tracked_positions:
+                    # Update existing position
+                    tracked = self._tracked_positions[symbol]
+                    tracked.update_price(price)
+                    tracked.quantity = pos.quantity
+                else:
+                    # New position we're not tracking yet - add it
+                    is_long = pos.quantity > 0
+                    # Estimate initial risk (2% default for unknown positions)
+                    est_initial_risk = pos.avg_cost * 0.02
+                    self._tracked_positions[symbol] = TrackedPosition(
+                        symbol=symbol,
+                        quantity=abs(pos.quantity),
+                        entry_price=pos.avg_cost,
+                        entry_time=datetime.now(timezone.utc),  # Approximate
+                        is_long=is_long,
+                        current_price=price,
+                        highest_price=price if is_long else 0.0,
+                        lowest_price=price if not is_long else float("inf"),
+                        original_conviction=0.5,  # Unknown, use neutral
+                        current_conviction=0.5,
+                        initial_risk=est_initial_risk,  # Phase 3: R-Multiple tracking
+                    )
+                    logger.info(
+                        f"CIO: Started tracking existing position {symbol}: "
+                        f"{'LONG' if is_long else 'SHORT'} {abs(pos.quantity)} @ ${pos.avg_cost:.2f}"
+                    )
+
+            # Remove tracked positions that no longer exist
+            symbols_to_remove = [
+                sym for sym in self._tracked_positions
+                if sym not in broker_positions or broker_positions[sym].quantity == 0
+            ]
+            for sym in symbols_to_remove:
+                del self._tracked_positions[sym]
+                logger.info(f"CIO: Stopped tracking closed position {sym}")
+
+        except Exception as e:
+            logger.exception(f"CIO: Error syncing tracked positions: {e}")
+
+    def _update_position_convictions(self, signals: dict[str, SignalEvent]) -> None:
+        """
+        Update position convictions based on latest signals.
+
+        Conviction is derived from signal confidence and direction alignment.
+        """
+        now = datetime.now(timezone.utc)
+
+        for symbol, pos in self._tracked_positions.items():
+            # Find signals for this symbol
+            symbol_signals = [
+                sig for sig in signals.values()
+                if sig.symbol == symbol
+            ]
+
+            if not symbol_signals:
+                continue
+
+            # Calculate weighted conviction from signals
+            total_weight = 0.0
+            weighted_conviction = 0.0
+
+            for signal in symbol_signals:
+                agent_weight = self._weights.get(signal.source_agent, 0.1)
+
+                # Check if signal direction aligns with position direction
+                aligned = (
+                    (pos.is_long and signal.direction == SignalDirection.LONG) or
+                    (not pos.is_long and signal.direction == SignalDirection.SHORT)
+                )
+
+                # Confidence contribution: positive if aligned, negative if opposed
+                if aligned:
+                    contribution = signal.confidence
+                elif signal.direction == SignalDirection.FLAT:
+                    contribution = 0.3  # Neutral signal = low conviction
+                else:
+                    contribution = -signal.confidence  # Opposing signal = negative
+
+                weighted_conviction += agent_weight * contribution
+                total_weight += agent_weight
+
+            if total_weight > 0:
+                new_conviction = (weighted_conviction / total_weight + 1) / 2  # Normalize to 0-1
+                new_conviction = max(0.0, min(1.0, new_conviction))
+                pos.current_conviction = new_conviction
+                pos.last_signal_time = now
+                pos.contributing_strategies = [sig.source_agent for sig in symbol_signals]
+
+    async def _evaluate_position_for_management(
+        self,
+        pos: TrackedPosition,
+    ) -> DecisionEvent | None:
+        """
+        Evaluate a single position and determine if management action is needed.
+
+        Returns a DecisionEvent if action should be taken, None otherwise.
+
+        Decision hierarchy (evaluated in order):
+        1. Emergency loss cut (extended_loss_pct)
+        2. Standard loss cut (max_loss_pct + time condition)
+        3. Take profit (profit_target_pct + trailing)
+        4. Conviction-based reduction
+        5. Time-based exit (max_holding_days)
+        6. Stop-loss override check (special situations)
+        """
+        config = self._position_management_config
+        regime = self._current_regime
+
+        # Adjust thresholds based on market regime
+        effective_loss_pct = self._get_regime_adjusted_loss_threshold(regime)
+        effective_profit_pct = self._get_regime_adjusted_profit_threshold(regime)
+
+        # 1. EMERGENCY LOSS CUT - Always trigger at extended loss
+        if pos.pnl_pct <= -config.extended_loss_pct:
+            return self._create_close_loser_decision(
+                pos,
+                reason=f"EMERGENCY: Loss exceeds {config.extended_loss_pct}% threshold",
+                is_emergency=True,
+            )
+
+        # 2. STANDARD LOSS CUT - Loss threshold + time condition
+        if pos.pnl_pct <= -effective_loss_pct:
+            if pos.holding_hours >= config.loss_time_threshold_hours:
+                return self._create_close_loser_decision(
+                    pos,
+                    reason=(
+                        f"Loss {pos.pnl_pct:.1f}% exceeds {effective_loss_pct}% "
+                        f"and held for {pos.holding_hours:.1f} hours"
+                    ),
+                )
+            elif pos.current_conviction < config.min_conviction_to_hold:
+                return self._create_close_loser_decision(
+                    pos,
+                    reason=(
+                        f"Loss {pos.pnl_pct:.1f}% with low conviction "
+                        f"({pos.current_conviction:.1%} < {config.min_conviction_to_hold:.1%})"
+                    ),
+                )
+
+        # 3. TAKE PROFIT - Profit target reached
+        if pos.pnl_pct >= effective_profit_pct:
+            # Check trailing condition
+            if pos.is_long and pos.drawdown_from_peak_pct >= config.trailing_profit_pct:
+                return self._create_take_profit_decision(
+                    pos,
+                    reason=(
+                        f"Take profit: Gain {pos.pnl_pct:.1f}% with "
+                        f"{pos.drawdown_from_peak_pct:.1f}% pullback from peak"
+                    ),
+                    partial_exit=(config.partial_profit_pct < 100),
+                )
+            elif not pos.is_long and pos.rally_from_trough_pct >= config.trailing_profit_pct:
+                return self._create_take_profit_decision(
+                    pos,
+                    reason=(
+                        f"Take profit on short: Gain {pos.pnl_pct:.1f}% with "
+                        f"{pos.rally_from_trough_pct:.1f}% rally from trough"
+                    ),
+                    partial_exit=(config.partial_profit_pct < 100),
+                )
+
+        # 3.5 R-MULTIPLE BASED MANAGEMENT (Phase 3 Enhancement)
+        r_mult = pos.r_multiple
+        if r_mult != 0.0:
+            # Take partial profit at 2R
+            if r_mult >= 2.0 and not getattr(pos, '_took_2r_profit', False):
+                logger.info(f"CIO: {pos.symbol} reached 2R ({r_mult:.1f}R) - taking partial profit")
+                pos._took_2r_profit = True  # type: ignore
+                return self._create_take_profit_decision(
+                    pos,
+                    reason=f"R-Multiple reached {r_mult:.1f}R - partial profit taking",
+                    partial_exit=True,
+                )
+
+            # At 3R, consider full exit if conviction dropping
+            if r_mult >= 3.0 and pos.current_conviction < pos.original_conviction * 0.8:
+                return self._create_take_profit_decision(
+                    pos,
+                    reason=f"R-Multiple {r_mult:.1f}R with declining conviction - full exit",
+                    partial_exit=False,
+                )
+
+            # Log R-multiple periodically for tracking
+            if abs(r_mult) >= 1.0:
+                logger.debug(f"CIO: {pos.symbol} R-Multiple: {r_mult:.2f}R (PnL: {pos.pnl_pct:.1f}%)")
+
+        # 4. CONVICTION-BASED REDUCTION
+        if pos.original_conviction > 0:
+            conviction_drop = (pos.original_conviction - pos.current_conviction) / pos.original_conviction
+            if conviction_drop >= config.conviction_drop_threshold:
+                return self._create_reduce_position_decision(
+                    pos,
+                    reduction_pct=50.0,  # Reduce by 50% when conviction drops
+                    reason=(
+                        f"Conviction dropped {conviction_drop:.0%} "
+                        f"(from {pos.original_conviction:.1%} to {pos.current_conviction:.1%})"
+                    ),
+                )
+
+        # 5. CONVICTION TOO LOW TO HOLD
+        if pos.current_conviction < config.min_conviction_to_hold:
+            stale_hours = config.stale_signal_hours
+            if pos.last_signal_time:
+                hours_since_signal = (datetime.now(timezone.utc) - pos.last_signal_time).total_seconds() / 3600
+                if hours_since_signal > stale_hours:
+                    return self._create_close_loser_decision(
+                        pos,
+                        reason=(
+                            f"Low conviction ({pos.current_conviction:.1%}) with stale signals "
+                            f"(last signal {hours_since_signal:.1f}h ago)"
+                        ),
+                    )
+
+        # 6. TIME-BASED EXIT
+        max_hours = config.max_holding_days * 24
+        if pos.holding_hours >= max_hours:
+            return self._create_close_loser_decision(
+                pos,
+                reason=f"Maximum holding period exceeded ({pos.holding_hours / 24:.1f} days)",
+            )
+
+        # 7. STOP-LOSS OVERRIDE CHECK (for trending markets)
+        if (
+            config.allow_stop_override_in_trending and
+            regime == MarketRegime.TRENDING and
+            pos.stop_loss_level and
+            pos.current_conviction >= config.stop_override_min_conviction and
+            not pos.stop_loss_overridden
+        ):
+            # Check if price is near stop-loss but position still looks good
+            if pos.is_long:
+                stop_proximity = (pos.current_price - pos.stop_loss_level) / pos.current_price
+                if 0 < stop_proximity < 0.02:  # Within 2% of stop
+                    logger.info(
+                        f"CIO: Overriding stop-loss for {pos.symbol} in trending market "
+                        f"(conviction {pos.current_conviction:.1%})"
+                    )
+                    pos.stop_loss_overridden = True
+                    self._position_management_stats["stop_overrides"] += 1
+                    # Don't return a decision - just override the stop
+
+        return None
+
+    def _get_regime_adjusted_loss_threshold(self, regime: MarketRegime) -> float:
+        """Get loss threshold adjusted for market regime."""
+        config = self._position_management_config
+
+        if regime == MarketRegime.VOLATILE:
+            return config.volatile_regime_loss_pct
+        elif regime == MarketRegime.RISK_OFF:
+            return config.max_loss_pct * 0.8  # Tighter stops in risk-off
+        else:
+            return config.max_loss_pct
+
+    def _get_regime_adjusted_profit_threshold(self, regime: MarketRegime) -> float:
+        """Get profit threshold adjusted for market regime."""
+        config = self._position_management_config
+
+        if regime == MarketRegime.TRENDING:
+            return config.profit_target_pct * config.trending_regime_profit_mult
+        elif regime == MarketRegime.VOLATILE:
+            return config.profit_target_pct * 0.7  # Take profits earlier
+        else:
+            return config.profit_target_pct
+
+    def _create_close_loser_decision(
+        self,
+        pos: TrackedPosition,
+        reason: str,
+        is_emergency: bool = False,
+    ) -> DecisionEvent:
+        """Create a decision to close a losing position."""
+        action = OrderSide.SELL if pos.is_long else OrderSide.BUY
+
+        decision = DecisionEvent(
+            source_agent=self.name,
+            symbol=pos.symbol,
+            action=action,
+            quantity=pos.quantity,
+            order_type=OrderType.MARKET if is_emergency else OrderType.LIMIT,
+            limit_price=None,
+            rationale=f"CIO CLOSE LOSER: {reason}",
+            contributing_signals=tuple(pos.contributing_strategies),
+            data_sources=("position_management", "portfolio_state"),
+            conviction_score=1.0 if is_emergency else 0.8,
+            decision_action=DecisionAction.CLOSE_LOSER,
+            position_pnl_pct=pos.pnl_pct,
+            holding_duration_hours=pos.holding_hours,
+            stop_loss_override=pos.stop_loss_overridden,
+            regime_context=self._current_regime.value,
+        )
+
+        self._position_management_stats["losers_closed"] += 1
+        # Phase 3: Track R-multiple at exit
+        if pos.r_multiple != 0:
+            self._position_management_stats["total_r_multiple_closed"] += pos.r_multiple
+            self._position_management_stats["closed_trade_count"] += 1
+            logger.info(f"CIO: Closed loser {pos.symbol} at {pos.r_multiple:.2f}R")
+        return decision
+
+    def _create_take_profit_decision(
+        self,
+        pos: TrackedPosition,
+        reason: str,
+        partial_exit: bool = False,
+    ) -> DecisionEvent:
+        """Create a decision to take profit on a winning position."""
+        action = OrderSide.SELL if pos.is_long else OrderSide.BUY
+        quantity = pos.quantity if not partial_exit else int(pos.quantity * 0.5)
+
+        decision = DecisionEvent(
+            source_agent=self.name,
+            symbol=pos.symbol,
+            action=action,
+            quantity=quantity,
+            order_type=OrderType.LIMIT,
+            limit_price=None,
+            rationale=f"CIO TAKE PROFIT: {reason}",
+            contributing_signals=tuple(pos.contributing_strategies),
+            data_sources=("position_management", "portfolio_state"),
+            conviction_score=0.9,
+            decision_action=DecisionAction.TAKE_PROFIT,
+            position_pnl_pct=pos.pnl_pct,
+            holding_duration_hours=pos.holding_hours,
+            regime_context=self._current_regime.value,
+        )
+
+        self._position_management_stats["profits_taken"] += 1
+        # Phase 3: Track R-multiple at exit
+        if pos.r_multiple != 0:
+            self._position_management_stats["total_r_multiple_closed"] += pos.r_multiple
+            self._position_management_stats["closed_trade_count"] += 1
+            if pos.r_multiple >= 3.0:
+                self._position_management_stats["r_multiple_exits_3r"] += 1
+            elif pos.r_multiple >= 2.0:
+                self._position_management_stats["r_multiple_exits_2r"] += 1
+            logger.info(f"CIO: Took profit {pos.symbol} at {pos.r_multiple:.2f}R")
+        return decision
+
+    def _create_reduce_position_decision(
+        self,
+        pos: TrackedPosition,
+        reduction_pct: float,
+        reason: str,
+    ) -> DecisionEvent:
+        """Create a decision to reduce position size."""
+        action = OrderSide.SELL if pos.is_long else OrderSide.BUY
+        reduce_qty = max(1, int(pos.quantity * reduction_pct / 100))
+
+        decision = DecisionEvent(
+            source_agent=self.name,
+            symbol=pos.symbol,
+            action=action,
+            quantity=reduce_qty,
+            order_type=OrderType.LIMIT,
+            limit_price=None,
+            rationale=f"CIO REDUCE POSITION: {reason}",
+            contributing_signals=tuple(pos.contributing_strategies),
+            data_sources=("position_management", "signal_analysis"),
+            conviction_score=0.7,
+            decision_action=DecisionAction.REDUCE_POSITION,
+            position_pnl_pct=pos.pnl_pct,
+            holding_duration_hours=pos.holding_hours,
+            regime_context=self._current_regime.value,
+        )
+
+        self._position_management_stats["positions_reduced"] += 1
+        return decision
+
+    async def _publish_position_management_decision(
+        self,
+        decision: DecisionEvent,
+    ) -> None:
+        """Publish a position management decision with full audit logging."""
+        # Log decision (COMPLIANCE REQUIREMENT)
+        self._audit_logger.log_decision(
+            agent_name=self.name,
+            decision_id=decision.event_id,
+            symbol=decision.symbol,
+            action=decision.action.value if decision.action else "none",
+            quantity=decision.quantity,
+            rationale=decision.rationale,
+            data_sources=list(decision.data_sources),
+            contributing_signals=list(decision.contributing_signals),
+            conviction_score=decision.conviction_score,
+        )
+
+        # Log position management specific event
+        self._audit_logger.log_agent_event(
+            agent_name=self.name,
+            event_type="position_management_decision",
+            details={
+                "decision_id": decision.event_id,
+                "symbol": decision.symbol,
+                "action": decision.action.value if decision.action else None,
+                "decision_action": decision.decision_action.value if decision.decision_action else None,
+                "quantity": decision.quantity,
+                "position_pnl_pct": decision.position_pnl_pct,
+                "holding_duration_hours": decision.holding_duration_hours,
+                "stop_loss_override": decision.stop_loss_override,
+                "regime_context": decision.regime_context,
+                "rationale": decision.rationale,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+        # Publish decision
+        await self._event_bus.publish(decision)
+
+        # Track active decision
+        self._active_decisions[decision.event_id] = datetime.now(timezone.utc)
+
+        logger.info(
+            f"CIO POSITION MANAGEMENT: {decision.decision_action.value if decision.decision_action else 'ACTION'} "
+            f"{decision.quantity} {decision.symbol} "
+            f"(PnL: {decision.position_pnl_pct:.1f}%, held: {decision.holding_duration_hours:.1f}h)"
+        )
+
+    def register_position(
+        self,
+        symbol: str,
+        quantity: int,
+        entry_price: float,
+        is_long: bool,
+        conviction: float,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+        contributing_strategies: list[str] | None = None,
+    ) -> None:
+        """
+        Register a new position for CIO tracking.
+
+        Called by the orchestrator when a position is opened.
+        """
+        # Phase 3: Calculate initial risk (1R) from stop-loss
+        initial_risk = 0.0
+        if stop_loss is not None and stop_loss > 0 and entry_price > 0:
+            initial_risk = abs(entry_price - stop_loss)
+        else:
+            # Default to 2% of entry price if no stop-loss defined
+            initial_risk = entry_price * 0.02
+
+        self._tracked_positions[symbol] = TrackedPosition(
+            symbol=symbol,
+            quantity=quantity,
+            entry_price=entry_price,
+            entry_time=datetime.now(timezone.utc),
+            is_long=is_long,
+            current_price=entry_price,
+            highest_price=entry_price if is_long else 0.0,
+            lowest_price=entry_price if not is_long else float("inf"),
+            original_conviction=conviction,
+            current_conviction=conviction,
+            last_signal_time=datetime.now(timezone.utc),
+            contributing_strategies=contributing_strategies or [],
+            stop_loss_level=stop_loss,
+            take_profit_level=take_profit,
+            initial_risk=initial_risk,  # Phase 3: R-Multiple tracking
+        )
+
+        logger.info(
+            f"CIO: Registered new position {symbol}: "
+            f"{'LONG' if is_long else 'SHORT'} {quantity} @ ${entry_price:.2f} "
+            f"(conviction: {conviction:.1%})"
+        )
+
+    def get_tracked_positions(self) -> dict[str, dict[str, Any]]:
+        """Get all tracked positions with their status."""
+        return {
+            symbol: {
+                "symbol": pos.symbol,
+                "quantity": pos.quantity,
+                "entry_price": pos.entry_price,
+                "current_price": pos.current_price,
+                "is_long": pos.is_long,
+                "pnl_pct": pos.pnl_pct,
+                "pnl_dollar": pos.pnl_dollar,
+                "holding_hours": pos.holding_hours,
+                "original_conviction": pos.original_conviction,
+                "current_conviction": pos.current_conviction,
+                "stop_loss_level": pos.stop_loss_level,
+                "stop_loss_overridden": pos.stop_loss_overridden,
+                "highest_price": pos.highest_price,
+                "drawdown_from_peak_pct": pos.drawdown_from_peak_pct,
+                "contributing_strategies": pos.contributing_strategies,
+            }
+            for symbol, pos in self._tracked_positions.items()
+        }
+
+    def get_position_management_stats(self) -> dict[str, Any]:
+        """Get position management statistics."""
+        return {
+            "tracked_positions": len(self._tracked_positions),
+            "management_enabled": self._position_management_enabled,
+            "config": self._position_management_config.to_dict(),
+            "stats": dict(self._position_management_stats),
+            "last_review": self._last_position_review.isoformat(),
+        }
 
     async def process_event(self, event: Event) -> None:
         """
@@ -770,6 +1660,19 @@ class CIOAgent(DecisionAgent):
             )
             return
 
+        # Extract best stop_loss and target_price from contributing signals
+        # Use the stop_loss from the signal with highest confidence
+        best_stop_loss = None
+        best_target_price = None
+        best_signal_confidence = 0.0
+        for signal in agg.signals.values():
+            if signal.confidence > best_signal_confidence:
+                if signal.stop_loss:
+                    best_stop_loss = signal.stop_loss
+                    best_signal_confidence = signal.confidence
+                if signal.target_price:
+                    best_target_price = signal.target_price
+
         # Create decision event
         decision = DecisionEvent(
             source_agent=self.name,
@@ -778,6 +1681,7 @@ class CIOAgent(DecisionAgent):
             quantity=quantity,
             order_type=OrderType.LIMIT,  # Default to limit orders
             limit_price=None,  # Will be set by execution
+            stop_price=best_stop_loss,  # Pass stop_loss from signals for automatic stop placement
             rationale=self._build_rationale(agg),
             contributing_signals=tuple(s.event_id for s in agg.signals.values()),
             data_sources=self._collect_data_sources(agg),
@@ -827,6 +1731,7 @@ class CIOAgent(DecisionAgent):
         - Performance-weighted signals
         - Signal correlation adjustment (NEW)
         - P2: Signal confidence weighting (filter low confidence, apply non-linear weighting)
+        - Phase 2: Signal quality scoring
         """
         # Update dynamic weights if enabled
         if self._use_dynamic_weights:
@@ -849,12 +1754,81 @@ class CIOAgent(DecisionAgent):
             )
             filtered_signals = agg.signals
 
+        # =====================================================================
+        # EMERGENCY MODE: Filter to core strategies only
+        # =====================================================================
+        effective_mode = self._get_effective_decision_mode()
+        if effective_mode == DecisionMode.EMERGENCY:
+            mode_filtered_signals = {
+                agent: signal for agent, signal in filtered_signals.items()
+                if self.is_strategy_allowed_in_current_mode(agent)
+            }
+
+            if mode_filtered_signals:
+                excluded = set(filtered_signals.keys()) - set(mode_filtered_signals.keys())
+                if excluded:
+                    logger.warning(
+                        f"EMERGENCY MODE: Excluded {len(excluded)} non-core strategies: {excluded}. "
+                        f"Using only: {list(mode_filtered_signals.keys())}"
+                    )
+                filtered_signals = mode_filtered_signals
+            else:
+                logger.warning(
+                    f"EMERGENCY MODE: No core strategies have signals for {agg.symbol}, "
+                    f"skipping decision"
+                )
+                return
+
+        # =====================================================================
+        # Phase 2: Signal Quality Scoring
+        # =====================================================================
+        if self._signal_quality_scorer is not None and self._signal_quality_enabled:
+            quality_filtered_signals = {}
+            market_data = self._get_market_data_for_quality(agg.symbol)
+
+            for agent_name, signal in filtered_signals.items():
+                # Get other signals for confluence check
+                other_signals = [s for n, s in filtered_signals.items() if n != agent_name]
+
+                quality_result = self._signal_quality_scorer.validate_signal(
+                    signal=signal,
+                    market_data=market_data,
+                    support_levels=[],  # Could be enhanced with S/R detection
+                    resistance_levels=[],
+                    other_signals=other_signals,
+                )
+
+                if quality_result.is_valid:
+                    quality_filtered_signals[agent_name] = signal
+                    logger.debug(
+                        f"Signal {agent_name} quality OK: {quality_result.total_score:.1f} "
+                        f"({quality_result.tier.value})"
+                    )
+                else:
+                    logger.info(
+                        f"Signal {agent_name} REJECTED by quality filter: "
+                        f"score={quality_result.total_score:.1f}, "
+                        f"reasons={quality_result.rejection_reasons}"
+                    )
+
+            # Use quality-filtered signals if any remain
+            if quality_filtered_signals:
+                filtered_signals = quality_filtered_signals
+            else:
+                logger.warning(
+                    f"All signals for {agg.symbol} rejected by quality filter, "
+                    f"proceeding with confidence-filtered signals"
+                )
+
+        # Phase 2: Get VIX-adjusted weights if VIX data available
+        base_weights = self.get_vix_adjusted_weights() if hasattr(self, '_vix_current') and self._vix_current else self._weights
+
         # Get correlation-adjusted weights (#Q5)
         if self._use_correlation_adjustment and len(filtered_signals) > 1:
-            adjusted_weights = self._get_correlation_adjusted_weights(filtered_signals)
+            adjusted_weights = self._get_correlation_adjusted_weights(filtered_signals, base_weights)
             agg.correlation_adjusted = True
         else:
-            adjusted_weights = {agent: self._weights.get(agent, 0.1) for agent in filtered_signals}
+            adjusted_weights = {agent: base_weights.get(agent, 0.1) for agent in filtered_signals}
             agg.correlation_adjusted = False
 
         total_weight = 0.0
@@ -936,6 +1910,68 @@ class CIOAgent(DecisionAgent):
             new_weights = {k: v / total for k, v in new_weights.items()}
 
         self._weights = new_weights
+
+    # =========================================================================
+    # MARKET DATA CACHE FOR SIGNAL QUALITY SCORING
+    # =========================================================================
+
+    def update_market_data_cache(self, symbol: str, price: float, volume: float = 0) -> None:
+        """
+        Update market data cache for signal quality scoring.
+
+        Call this when market data arrives to maintain quality scoring data.
+        """
+        if symbol not in self._market_data_cache:
+            self._market_data_cache[symbol] = {
+                'prices': deque(maxlen=self._market_data_maxlen),
+                'volumes': deque(maxlen=self._market_data_maxlen),
+            }
+
+        if price > 0:
+            self._market_data_cache[symbol]['prices'].append(price)
+        if volume > 0:
+            self._market_data_cache[symbol]['volumes'].append(volume)
+
+    def _get_market_data_for_quality(self, symbol: str) -> dict:
+        """
+        Get market data dict for signal quality scoring.
+
+        Returns dict with:
+        - prices: list of recent prices
+        - volumes: list of recent volumes
+        - volatility_regime: current volatility regime
+        - adx: ADX indicator value (estimated)
+        """
+        cache = self._market_data_cache.get(symbol, {})
+        prices = list(cache.get('prices', []))
+        volumes = list(cache.get('volumes', []))
+
+        # Estimate volatility regime from recent returns
+        volatility_regime = 'normal'
+        if len(prices) >= 20:
+            import numpy as np
+            returns = np.diff(prices[-20:]) / np.array(prices[-20:-1])
+            vol = np.std(returns) * 100  # Percentage volatility
+            if vol > 2.0:
+                volatility_regime = 'high'
+            elif vol < 0.5:
+                volatility_regime = 'low'
+
+        # Estimate ADX from trend strength
+        adx = 25.0  # Default neutral ADX
+        if len(prices) >= 20:
+            import numpy as np
+            sma_short = np.mean(prices[-10:])
+            sma_long = np.mean(prices[-20:])
+            trend_diff = abs(sma_short - sma_long) / sma_long * 100
+            adx = min(50.0, 15.0 + trend_diff * 5)
+
+        return {
+            'prices': prices,
+            'volumes': volumes,
+            'volatility_regime': volatility_regime,
+            'adx': adx,
+        }
 
     # =========================================================================
     # SIGNAL CORRELATION ADJUSTMENT (#Q5)
@@ -1064,10 +2100,11 @@ class CIOAgent(DecisionAgent):
 
     def _get_correlation_adjusted_weights(
         self,
-        signals: dict[str, SignalEvent]
+        signals: dict[str, SignalEvent],
+        base_weights: dict[str, float] | None = None,
     ) -> dict[str, float]:
         """
-        Adjust signal weights to account for correlation (#Q5).
+        Adjust signal weights to account for correlation (#Q5, Phase D enhanced).
 
         Highly correlated signals should not be double-counted.
         Uses a discount factor based on pairwise correlations.
@@ -1075,35 +2112,56 @@ class CIOAgent(DecisionAgent):
         The adjustment reduces the effective weight of signals that are
         highly correlated with others, preventing overconfidence from
         redundant information.
+
+        Phase 2: Now accepts optional base_weights parameter for VIX-adjusted weights.
+        Phase D Enhancement: Monthly rolling correlation with aggressive halving at >0.95.
         """
         agents = list(signals.keys())
-        base_weights = {agent: self._weights.get(agent, 0.1) for agent in agents}
+        if base_weights is None:
+            base_weights = self._weights
+        weight_map = {agent: base_weights.get(agent, 0.1) for agent in agents}
 
         if len(agents) < 2:
-            return base_weights
+            return weight_map
+
+        # Update monthly correlations if needed
+        self._maybe_update_monthly_correlations()
 
         # Calculate correlation discount for each agent
         adjusted_weights = {}
 
         for agent in agents:
             # Find maximum correlation with other signals in this set
+            # Use monthly correlation if available, fall back to short-term
             max_corr = 0.0
             correlated_agents = []
+            halved_due_to_high_corr = False
 
             for other_agent in agents:
                 if other_agent == agent:
                     continue
 
-                corr = self._signal_correlation_matrix.get((agent, other_agent))
-                if corr is not None:
-                    if abs(corr) > 0.5:  # Significant correlation
-                        correlated_agents.append((other_agent, corr))
-                    max_corr = max(max_corr, abs(corr))
+                # Prefer monthly correlation for stability (Phase D)
+                corr = self._monthly_correlations.get((agent, other_agent))
+                if corr is None:
+                    corr = self._signal_correlation_matrix.get((agent, other_agent))
+                if corr is None:
+                    continue
 
-            # Apply discount based on correlation
-            # High correlation (>0.8) reduces weight significantly
-            # Moderate correlation (0.5-0.8) reduces weight moderately
-            if max_corr > 0.8:
+                if abs(corr) > 0.5:  # Significant correlation
+                    correlated_agents.append((other_agent, corr))
+                max_corr = max(max_corr, abs(corr))
+
+            # Phase D: Apply enhanced discount based on correlation
+            # Very high correlation (>0.95) halves weight (Phase D improvement)
+            # High correlation (>0.8) reduces weight by 50%
+            # Moderate-high correlation (0.6-0.8) reduces weight by 25%
+            # Moderate correlation (0.5-0.6) reduces weight by 10%
+            if max_corr >= self._high_correlation_threshold:  # Default 0.95
+                discount = self._high_correlation_weight_factor  # Default 0.5
+                halved_due_to_high_corr = True
+                self._correlation_halved_count += 1
+            elif max_corr > 0.8:
                 discount = 0.5  # 50% weight reduction
             elif max_corr > 0.6:
                 discount = 0.75  # 25% weight reduction
@@ -1112,17 +2170,23 @@ class CIOAgent(DecisionAgent):
             else:
                 discount = 1.0  # No discount
 
-            adjusted_weights[agent] = base_weights[agent] * discount
+            adjusted_weights[agent] = weight_map[agent] * discount
 
             if discount < 1.0 and correlated_agents:
                 corr_info = ", ".join([f"{a}:{c:.2f}" for a, c in correlated_agents])
-                logger.debug(
-                    f"Signal {agent} weight discounted by {(1-discount)*100:.0f}% "
-                    f"due to correlation with [{corr_info}]"
-                )
+                if halved_due_to_high_corr:
+                    logger.warning(
+                        f"Signal {agent} weight HALVED due to very high correlation "
+                        f"(>={self._high_correlation_threshold}) with [{corr_info}]"
+                    )
+                else:
+                    logger.debug(
+                        f"Signal {agent} weight discounted by {(1-discount)*100:.0f}% "
+                        f"due to correlation with [{corr_info}]"
+                    )
 
         # Normalize weights to sum to original total
-        original_total = sum(base_weights.values())
+        original_total = sum(weight_map.values())
         adjusted_total = sum(adjusted_weights.values())
 
         if adjusted_total > 0 and original_total > 0:
@@ -1130,6 +2194,126 @@ class CIOAgent(DecisionAgent):
             adjusted_weights = {k: v * scale for k, v in adjusted_weights.items()}
 
         return adjusted_weights
+
+    def _maybe_update_monthly_correlations(self) -> None:
+        """
+        Update monthly correlations if enough time has passed (Phase D).
+
+        Monthly correlations use a 30-day rolling window (720 hourly observations)
+        and are updated hourly for computational efficiency.
+        """
+        now = datetime.now(timezone.utc)
+
+        # Check if update is needed
+        if self._last_monthly_correlation_update is not None:
+            hours_since_update = (now - self._last_monthly_correlation_update).total_seconds() / 3600
+            if hours_since_update < self._monthly_correlation_update_interval_hours:
+                return
+
+        # Update monthly correlations
+        agents = list(self._signal_history.keys())
+
+        for i, agent1 in enumerate(agents):
+            for agent2 in agents[i + 1:]:
+                corr = self._calculate_monthly_correlation(agent1, agent2)
+                if corr is not None:
+                    self._monthly_correlations[(agent1, agent2)] = corr
+                    self._monthly_correlations[(agent2, agent1)] = corr
+
+        self._last_monthly_correlation_update = now
+
+        # Log highly correlated pairs
+        high_corr_pairs = [
+            (pair, corr) for pair, corr in self._monthly_correlations.items()
+            if corr >= self._high_correlation_threshold and pair[0] < pair[1]  # Avoid duplicates
+        ]
+        if high_corr_pairs:
+            for pair, corr in high_corr_pairs:
+                logger.info(
+                    f"High monthly correlation detected: {pair[0]}-{pair[1]} = {corr:.3f}"
+                )
+
+    def _calculate_monthly_correlation(self, agent1: str, agent2: str) -> float | None:
+        """
+        Calculate monthly rolling correlation between two agents (Phase D).
+
+        Uses a 30-day window (720 hourly observations by default).
+        Returns None if insufficient data.
+        """
+        history1 = self._signal_history.get(agent1, [])
+        history2 = self._signal_history.get(agent2, [])
+
+        # Need substantial history for monthly correlation
+        if len(history1) < 30 or len(history2) < 30:
+            return None
+
+        # Time-align signals (same logic as short-term, but with larger window)
+        MAX_TIME_DIFF_SECONDS = 3600  # 1 hour tolerance for hourly correlation
+
+        dict1 = {ts: val for ts, val in history1}
+        dict2 = {ts: val for ts, val in history2}
+
+        values1 = []
+        values2 = []
+
+        for ts1, val1 in sorted(dict1.items(), reverse=True):
+            best_match = None
+            best_diff = float('inf')
+
+            for ts2, val2 in dict2.items():
+                diff = abs((ts1 - ts2).total_seconds())
+                if diff < best_diff:
+                    best_diff = diff
+                    best_match = (ts2, val2)
+
+            if best_match and best_diff <= MAX_TIME_DIFF_SECONDS:
+                values1.append(val1)
+                values2.append(best_match[1])
+
+            # Use monthly lookback
+            if len(values1) >= self._monthly_correlation_lookback:
+                break
+
+        if len(values1) < 30:
+            return None
+
+        # Calculate Pearson correlation
+        try:
+            mean1 = sum(values1) / len(values1)
+            mean2 = sum(values2) / len(values2)
+
+            numerator = sum((v1 - mean1) * (v2 - mean2) for v1, v2 in zip(values1, values2))
+            denom1 = sum((v1 - mean1) ** 2 for v1 in values1) ** 0.5
+            denom2 = sum((v2 - mean2) ** 2 for v2 in values2) ** 0.5
+
+            if denom1 * denom2 == 0:
+                return 0.0
+
+            corr = numerator / (denom1 * denom2)
+            return max(-1.0, min(1.0, corr))
+
+        except Exception as e:
+            logger.debug(f"Error calculating monthly correlation: {e}")
+            return None
+
+    def get_correlation_statistics(self) -> dict:
+        """Get correlation adjustment statistics (Phase D)."""
+        return {
+            "short_term_correlations": len(self._signal_correlation_matrix),
+            "monthly_correlations": len(self._monthly_correlations),
+            "correlation_halved_count": self._correlation_halved_count,
+            "high_correlation_threshold": self._high_correlation_threshold,
+            "high_correlation_weight_factor": self._high_correlation_weight_factor,
+            "last_monthly_update": (
+                self._last_monthly_correlation_update.isoformat()
+                if self._last_monthly_correlation_update else None
+            ),
+            "high_correlation_pairs": [
+                {"agents": list(pair), "correlation": round(corr, 3)}
+                for pair, corr in self._monthly_correlations.items()
+                if corr >= self._high_correlation_threshold and pair[0] < pair[1]
+            ],
+        }
 
     def _calculate_effective_signal_count(self, signals: dict[str, SignalEvent]) -> float:
         """
@@ -1218,41 +2402,28 @@ class CIOAgent(DecisionAgent):
 
     def _calculate_kelly_size(self, agg: SignalAggregation) -> int:
         """
-        Calculate position size using Kelly criterion.
+        Calculate position size using Kelly criterion with IMPROVED money management.
 
-        The Kelly criterion determines the optimal fraction of capital to risk
-        on a bet/trade to maximize long-term growth rate (geometric mean).
+        IMPROVEMENTS for better risk control:
+        1. Quarter-Kelly (0.25x) instead of half-Kelly for safety
+        2. Raw Kelly capped at 15% BEFORE applying fraction (was 25%)
+        3. Maximum position capped at 2.5% of portfolio (was unlimited)
+        4. Maximum total exposure limited to 50% of portfolio
+        5. More aggressive drawdown reduction (starts at 3% drawdown)
+        6. Additional cap: max 1% daily loss per position
 
         Kelly formula: f* = (bp - q) / b
         Where:
-            b = avg_win / avg_loss (win/loss ratio, also called "odds")
-            p = win probability (win rate)
-            q = 1 - p (loss probability)
+            b = avg_win / avg_loss (win/loss ratio)
+            p = win probability
+            q = 1 - p
             f* = optimal fraction of capital to risk
-
-        Mathematical derivation:
-            The Kelly formula maximizes E[log(wealth)] which is equivalent to
-            maximizing the geometric growth rate. For a series of bets with
-            binary outcomes (win amount b or lose amount 1), the optimal
-            fraction is: f* = p - q/b = (bp - q) / b
-
-        Example calculation:
-            If win_rate = 60% (p=0.6), avg_win = $200, avg_loss = $100:
-            b = 200/100 = 2 (win $2 for every $1 risked)
-            f* = (2 * 0.6 - 0.4) / 2 = 0.8 / 2 = 0.40 (40% of capital)
-
-        In practice, we use fractional Kelly (typically half-Kelly) to reduce
-        volatility while sacrificing only ~25% of growth rate.
 
         Args:
             agg: Aggregated signal data with weighted confidence and direction
 
         Returns:
             Position size in shares (integer), or 0 if conditions not met
-
-        Note:
-            Uses actual tracked statistics rather than estimation from Sharpe.
-            Requires minimum 50 trades for statistical significance.
         """
         # Get strategy with highest contribution to this signal
         best_strategy = max(
@@ -1263,15 +2434,11 @@ class CIOAgent(DecisionAgent):
         # Get strategy stats
         perf = self._strategy_performance.get(best_strategy)
         if not perf:
-            # Fall back to conviction-based sizing
             return self._calculate_conviction_size(agg)
 
-        # P1-9: Need minimum trades for statistical significance
-        # Standard error of win rate estimate = sqrt(p*(1-p)/n)
-        # At n=50, SE ~ 7%, giving 95% CI of ~14% width
-        # At n=100, SE ~ 5%, giving 95% CI of ~10% width
-        MIN_TRADES_FOR_KELLY = 50  # Minimum for meaningful Kelly estimate
-        WARN_TRADES_THRESHOLD = 100  # Below this, estimates are still noisy
+        # Require minimum trades for statistical significance
+        MIN_TRADES_FOR_KELLY = 50
+        WARN_TRADES_THRESHOLD = 100
 
         if perf.total_trades < MIN_TRADES_FOR_KELLY:
             logger.info(
@@ -1283,85 +2450,105 @@ class CIOAgent(DecisionAgent):
         if perf.total_trades < WARN_TRADES_THRESHOLD:
             logger.warning(
                 f"Kelly: Low sample size for {best_strategy} ({perf.total_trades} trades). "
-                f"Position sizing may be unreliable. Consider reducing kelly_fraction."
+                f"Position sizing may be unreliable."
             )
 
         # Kelly inputs from actual tracked data
-        win_rate = perf.win_rate  # p: probability of winning trade
-        avg_win = perf.avg_win  # Average profit on winners (in $)
-        avg_loss = perf.avg_loss  # Average loss on losers (positive $)
+        win_rate = perf.win_rate
+        avg_win = perf.avg_win
+        avg_loss = perf.avg_loss
 
-        # Validate inputs - need valid probabilities and positive P&L values
+        # Validate inputs
         if win_rate <= 0 or win_rate >= 1:
             return self._calculate_conviction_size(agg)
-
         if avg_win <= 0 or avg_loss <= 0:
             return self._calculate_conviction_size(agg)
 
-        # Step 1: Calculate b = win/loss ratio (the "odds")
-        # This represents how much you win per dollar risked
+        # Step 1: Calculate raw Kelly
         b = avg_win / avg_loss
-
-        p = win_rate  # Probability of winning
-        q = 1 - p  # Probability of losing
-
-        # Step 2: Apply Kelly formula: f* = (bp - q) / b
-        # Equivalent to: f* = p - q/b = p - (1-p)/b
-        # This is the fraction of capital that maximizes log-wealth growth
+        p = win_rate
+        q = 1 - p
         kelly_fraction = (b * p - q) / b if b > 0 else 0
 
-        # Step 3: Handle edge cases
-        # Negative Kelly means negative expected value - don't trade
+        # Step 2: Ensure non-negative
         kelly_fraction = max(0, kelly_fraction)
 
-        # Cap at reasonable maximum - full Kelly is too aggressive in practice
-        # Even with strong edge, >25% allocation creates unacceptable volatility
-        MAX_KELLY = 0.25
-        kelly_fraction = min(kelly_fraction, MAX_KELLY)
+        # IMPROVED Step 3: Cap raw Kelly at 15% (was 25%)
+        # This prevents outsized positions even with seemingly good edge
+        kelly_fraction = min(kelly_fraction, self._max_kelly_raw)
+        logger.debug(f"Kelly: Raw fraction capped at {self._max_kelly_raw}: {kelly_fraction:.4f}")
 
-        # Step 4: Apply fractional Kelly (default: half-Kelly)
-        # Half-Kelly provides 75% of optimal growth rate with 50% of variance
-        # This is standard institutional practice for robustness
-        kelly_fraction *= self._kelly_fraction
+        # IMPROVED Step 4: Apply quarter-Kelly (0.25x) instead of half-Kelly
+        kelly_fraction *= self._kelly_fraction  # Now defaults to 0.25
 
-        # Step 5: Apply sample size discount for estimation uncertainty
-        # Fewer trades = more uncertainty in p and b estimates
-        # Linear ramp: 62.5% at 50 trades, 75% at 100 trades, 100% at 200+ trades
+        # Step 5: Sample size discount
         sample_discount = min(1.0, 0.5 + (perf.total_trades / 400))
         kelly_fraction *= sample_discount
 
-        # Step 6 (PM-06): Apply drawdown adjustment
-        # Reduce position size when portfolio is in drawdown to preserve capital
-        # This implements adaptive risk management: less risk when losing
-        if self._portfolio_drawdown > self._drawdown_kelly_threshold:
-            # Linear reduction from threshold to 15% drawdown, floored at kelly_floor
-            # Example: 5% threshold, 10% drawdown, 50% floor
-            # multiplier = max(0.5, 1.0 - 0.10/0.15) = max(0.5, 0.33) = 0.5
-            drawdown_multiplier = max(
-                self._drawdown_kelly_floor,
-                1.0 - self._portfolio_drawdown / 0.15
-            )
+        # IMPROVED Step 6: More aggressive drawdown adjustment
+        # Start reducing at ANY drawdown, not just above threshold
+        if self._portfolio_drawdown > 0.03:  # Start at 3% drawdown
+            # Tiered reduction:
+            # 3-5% drawdown: reduce to 80%
+            # 5-8% drawdown: reduce to 50%
+            # 8-10% drawdown: reduce to 20%
+            # >10% drawdown: reduce to 10%
+            if self._portfolio_drawdown >= 0.10:
+                drawdown_multiplier = 0.10
+            elif self._portfolio_drawdown >= 0.08:
+                drawdown_multiplier = 0.20
+            elif self._portfolio_drawdown >= 0.05:
+                drawdown_multiplier = 0.50
+            else:  # 3-5% drawdown
+                drawdown_multiplier = 0.80
+
             kelly_fraction *= drawdown_multiplier
             logger.info(
-                f"Kelly: Drawdown adjustment applied ({self._portfolio_drawdown:.1%} drawdown), "
-                f"kelly multiplier reduced to {drawdown_multiplier:.2f}"
+                f"Kelly: Drawdown adjustment ({self._portfolio_drawdown:.1%}): "
+                f"reduced to {drawdown_multiplier*100:.0f}%"
             )
 
-        # Step 7: Calculate position value in currency
+        # Step 7: Calculate position value
         position_value = self._portfolio_value * kelly_fraction
 
-        # Step 8: Apply conviction adjustment based on signal quality
-        # Higher conviction and stronger signals get larger positions
+        # Step 8: Apply conviction adjustment
         conviction_multiplier = agg.weighted_confidence * abs(agg.weighted_strength)
         position_value *= conviction_multiplier
 
-        # Step 9: Apply correlation discount if available
-        # Reduces size for positions correlated with existing holdings
+        # Step 9: Apply correlation discount
         if self._correlation_manager:
             correlation_discount = self._get_correlation_discount(agg.symbol)
             position_value *= correlation_discount
 
-        # Step 10: Convert to shares using market price
+        # IMPROVED Step 10: Apply max position % limit (2.5% of portfolio)
+        max_position_value = self._portfolio_value * (self._max_position_pct / 100)
+        if position_value > max_position_value:
+            position_value = max_position_value
+            logger.debug(
+                f"Kelly: Position capped at {self._max_position_pct}% of portfolio "
+                f"(${max_position_value:,.0f})"
+            )
+
+        # NEW Step 11: Check total exposure limit (50% of portfolio)
+        # Get current gross exposure if broker is available
+        current_exposure_pct = self._get_current_exposure_pct()
+        remaining_exposure_pct = max(0, self._max_total_exposure_pct - current_exposure_pct)
+        max_new_position_value = self._portfolio_value * (remaining_exposure_pct / 100)
+
+        if position_value > max_new_position_value:
+            if max_new_position_value <= 0:
+                logger.warning(
+                    f"Kelly: Total exposure limit reached ({current_exposure_pct:.1f}% >= "
+                    f"{self._max_total_exposure_pct:.0f}%), no new positions allowed"
+                )
+                return 0
+            position_value = max_new_position_value
+            logger.info(
+                f"Kelly: Position limited by total exposure ({current_exposure_pct:.1f}% used, "
+                f"{remaining_exposure_pct:.1f}% remaining)"
+            )
+
+        # Step 12: Convert to shares
         estimated_price = self._price_cache.get(agg.symbol)
         if estimated_price is None or estimated_price <= 0:
             logger.warning(f"CIO: No price data for {agg.symbol}, using conviction sizing")
@@ -1369,14 +2556,43 @@ class CIOAgent(DecisionAgent):
 
         size = int(position_value / estimated_price)
 
-        # Apply limits
+        # Apply max shares limit
         size = min(size, self._max_position_size)
 
-        # Minimum viable order size
+        # NEW: Apply decision mode size cap
+        mode = self._get_effective_decision_mode()
+        mode_cap = POSITION_SIZE_CAPS.get(mode, 1.0)
+        if mode_cap < 1.0:
+            original_size = size
+            size = int(size * mode_cap)
+            logger.info(
+                f"Kelly: Decision mode {mode.value} cap applied: "
+                f"{original_size} -> {size} ({mode_cap*100:.0f}%)"
+            )
+
+        # Minimum viable order
         if size < 10:
             return 0
 
         return size
+
+    def _get_current_exposure_pct(self) -> float:
+        """
+        Get current gross portfolio exposure as % of portfolio value.
+
+        Returns 0.0 if broker is not available or no positions.
+        """
+        if not self._broker:
+            return 0.0
+
+        try:
+            # This is synchronous call - in real implementation would be async
+            # For now, use cached sector positions as proxy for exposure
+            total_exposure = sum(abs(v) for v in self._sector_positions.values())
+            return total_exposure * 100  # Convert to percentage
+        except Exception as e:
+            logger.debug(f"Could not get current exposure: {e}")
+            return 0.0
 
     def _calculate_conviction_size(self, agg: SignalAggregation) -> int:
         """
@@ -1416,6 +2632,17 @@ class CIOAgent(DecisionAgent):
             logger.debug(
                 f"Kelly: Regime allocation adjustment for {self._current_regime.value}: "
                 f"multiplier={regime_multiplier:.2f}"
+            )
+
+        # Apply decision mode size cap
+        mode = self._get_effective_decision_mode()
+        mode_cap = POSITION_SIZE_CAPS.get(mode, 1.0)
+        if mode_cap < 1.0:
+            original_size = size
+            size = int(size * mode_cap)
+            logger.info(
+                f"Conviction: Decision mode {mode.value} cap applied: "
+                f"{original_size} -> {size} ({mode_cap*100:.0f}%)"
             )
 
         if size < 10:
@@ -1534,6 +2761,449 @@ class CIOAgent(DecisionAgent):
         self._broker = broker
         logger.info("CIO: Broker attached for leverage monitoring")
 
+    # =========================================================================
+    # DECISION MODE MANAGEMENT
+    # =========================================================================
+
+    def _get_effective_decision_mode(self) -> DecisionMode:
+        """
+        Get the effective decision mode considering auto-escalation and override.
+
+        Auto-escalation triggers based on portfolio drawdown:
+        - >= 5% drawdown: EMERGENCY mode
+        - >= 3% drawdown: DEFENSIVE mode
+        - < 3% drawdown: NORMAL mode
+
+        Manual override takes precedence over auto-escalation.
+
+        Returns:
+            The effective DecisionMode
+        """
+        # Manual override takes precedence
+        if self._decision_mode_override is not None:
+            return self._decision_mode_override
+
+        # Auto-escalation based on drawdown
+        if self._decision_mode_auto_escalation:
+            if self._portfolio_drawdown >= self._emergency_mode_drawdown_threshold:
+                return DecisionMode.EMERGENCY
+            elif self._portfolio_drawdown >= self._defensive_mode_drawdown_threshold:
+                return DecisionMode.DEFENSIVE
+
+        return self._decision_mode
+
+    def set_decision_mode(self, mode: DecisionMode, reason: str = "manual") -> None:
+        """
+        Set the decision mode with audit trail.
+
+        Args:
+            mode: The decision mode to set
+            reason: Reason for the change
+        """
+        old_mode = self._decision_mode
+        self._decision_mode = mode
+        self._mode_change_history.append((datetime.now(timezone.utc), mode, reason))
+
+        logger.warning(
+            f"CIO: Decision mode changed from {old_mode.value} to {mode.value} "
+            f"(reason: {reason})"
+        )
+
+        self._audit_logger.log_event_dict({
+            "type": "decision_mode_change",
+            "old_mode": old_mode.value,
+            "new_mode": mode.value,
+            "reason": reason,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    def set_decision_mode_override(self, mode: DecisionMode | None, reason: str = "manual") -> None:
+        """
+        Set a manual override for decision mode.
+
+        Pass None to clear the override and return to auto-escalation.
+
+        Args:
+            mode: The mode to force, or None to clear override
+            reason: Reason for the override
+        """
+        old_override = self._decision_mode_override
+        self._decision_mode_override = mode
+
+        if mode is not None:
+            logger.warning(
+                f"CIO: Decision mode OVERRIDE set to {mode.value} "
+                f"(previous override: {old_override.value if old_override else 'none'}) "
+                f"(reason: {reason})"
+            )
+        else:
+            logger.info(
+                f"CIO: Decision mode override CLEARED "
+                f"(previous override: {old_override.value if old_override else 'none'}) "
+                f"(reason: {reason})"
+            )
+
+        self._mode_change_history.append((datetime.now(timezone.utc), mode, f"override: {reason}"))
+
+    def get_decision_mode_info(self) -> dict:
+        """
+        Get detailed information about current decision mode.
+
+        Returns:
+            Dict with mode info, thresholds, and history
+        """
+        effective_mode = self._get_effective_decision_mode()
+
+        return {
+            "current_mode": self._decision_mode.value,
+            "effective_mode": effective_mode.value,
+            "manual_override": self._decision_mode_override.value if self._decision_mode_override else None,
+            "auto_escalation_enabled": self._decision_mode_auto_escalation,
+            "portfolio_drawdown": self._portfolio_drawdown,
+            "defensive_threshold": self._defensive_mode_drawdown_threshold,
+            "emergency_threshold": self._emergency_mode_drawdown_threshold,
+            "position_size_cap": POSITION_SIZE_CAPS.get(effective_mode, 1.0),
+            "allowed_strategies": (
+                list(EMERGENCY_MODE_CORE_STRATEGIES) if effective_mode == DecisionMode.EMERGENCY
+                else "all"
+            ),
+            "recent_changes": [
+                {"time": t.isoformat(), "mode": m.value if m else "cleared", "reason": r}
+                for t, m, r in list(self._mode_change_history)[-5:]
+            ],
+        }
+
+    def is_strategy_allowed_in_current_mode(self, strategy_name: str) -> bool:
+        """
+        Check if a strategy is allowed to contribute signals in current mode.
+
+        In EMERGENCY mode, only core strategies are allowed.
+
+        Args:
+            strategy_name: Name of the strategy agent
+
+        Returns:
+            True if strategy is allowed
+        """
+        mode = self._get_effective_decision_mode()
+
+        if mode == DecisionMode.EMERGENCY:
+            return strategy_name in EMERGENCY_MODE_CORE_STRATEGIES
+
+        return True
+
+    # =========================================================================
+    # HUMAN-IN-THE-LOOP MODE MANAGEMENT
+    # =========================================================================
+
+    def enable_human_cio_mode(self, reason: str = "manual") -> None:
+        """
+        Enable Human-in-the-Loop mode.
+
+        When enabled, all trading decisions require explicit human approval.
+        Decisions are queued and expire after timeout if not acted upon.
+
+        Args:
+            reason: Why human-in-the-loop mode is being activated
+        """
+        self._human_cio_enabled = True
+        self._human_cio_reason = reason
+        self.set_decision_mode_override(DecisionMode.HUMAN_CIO, f"human_cio: {reason}")
+
+        logger.warning(
+            f"HUMAN-IN-THE-LOOP MODE ENABLED. Reason: {reason}. "
+            f"All decisions now require human approval."
+        )
+
+        self._audit_logger.log_event_dict({
+            "type": "human_cio_mode_enabled",
+            "reason": reason,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    def disable_human_cio_mode(self, authorized_by: str) -> None:
+        """
+        Disable Human-in-the-Loop mode and return to normal operation.
+
+        Args:
+            authorized_by: Username of person disabling
+        """
+        self._human_cio_enabled = False
+        old_reason = self._human_cio_reason
+        self._human_cio_reason = ""
+        self.set_decision_mode_override(None, f"human_cio_disabled by {authorized_by}")
+
+        # Cancel all pending decisions
+        pending_count = len(self._pending_human_decisions)
+        for decision_id, pending in list(self._pending_human_decisions.items()):
+            self._record_human_decision(pending, "expired", authorized_by, "mode_disabled")
+        self._pending_human_decisions.clear()
+
+        logger.warning(
+            f"HUMAN-IN-THE-LOOP MODE DISABLED by {authorized_by}. "
+            f"Previous reason: {old_reason}. Cancelled {pending_count} pending decisions. "
+            f"Returning to auto-trading."
+        )
+
+        self._audit_logger.log_event_dict({
+            "type": "human_cio_mode_disabled",
+            "authorized_by": authorized_by,
+            "previous_reason": old_reason,
+            "cancelled_decisions": pending_count,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    def is_human_cio_mode(self) -> bool:
+        """Check if Human-in-the-Loop mode is active."""
+        return self._human_cio_enabled or self._get_effective_decision_mode() == DecisionMode.HUMAN_CIO
+
+    def queue_human_decision(
+        self,
+        symbol: str,
+        direction: SignalDirection,
+        quantity: int,
+        conviction: float,
+        rationale: str,
+        signals: dict,
+        aggregation: Any,
+    ) -> str:
+        """
+        Queue a decision for human approval (thread-safe with bounded queue).
+
+        Args:
+            symbol: Trading symbol
+            direction: Proposed direction
+            quantity: Proposed size
+            conviction: Aggregated conviction
+            rationale: Why this trade is proposed
+            signals: Original signals
+            aggregation: SignalAggregation object
+
+        Returns:
+            Decision ID for tracking
+        """
+        import uuid
+        decision_id = f"HUMAN-{uuid.uuid4().hex[:8].upper()}"
+        now = datetime.now(timezone.utc)
+
+        pending = PendingHumanDecision(
+            decision_id=decision_id,
+            symbol=symbol,
+            direction=direction,
+            quantity=quantity,
+            conviction=conviction,
+            rationale=rationale,
+            signals={k: v.to_audit_dict() if hasattr(v, 'to_audit_dict') else str(v) for k, v in signals.items()},
+            aggregation=aggregation,
+            created_at=now,
+            expires_at=now + timedelta(seconds=self._human_decision_timeout_seconds),
+            status="pending",
+        )
+
+        with self._human_decision_lock:
+            # Issue 4.2: Bounded queue - evict oldest if at max capacity
+            while len(self._pending_human_decisions) >= self._max_pending_human_decisions:
+                # Find oldest decision
+                oldest_id = min(
+                    self._pending_human_decisions.keys(),
+                    key=lambda k: self._pending_human_decisions[k].created_at
+                )
+                evicted = self._pending_human_decisions.pop(oldest_id)
+                logger.warning(
+                    f"Human decision queue full ({self._max_pending_human_decisions}), "
+                    f"evicted oldest: {oldest_id} for {evicted.symbol}"
+                )
+                self._record_human_decision(evicted, "evicted_queue_full", "system", "Queue overflow")
+
+            self._pending_human_decisions[decision_id] = pending
+
+        logger.info(
+            f"HUMAN APPROVAL REQUIRED: {decision_id} | {symbol} {direction.value} "
+            f"qty={quantity} conviction={conviction:.2f} | Expires in {self._human_decision_timeout_seconds}s"
+        )
+
+        # Notify via callback if registered
+        if self._human_decision_callback:
+            try:
+                self._human_decision_callback(pending)
+            except Exception as e:
+                logger.error(f"Human decision callback failed: {e}")
+
+        return decision_id
+
+    def approve_human_decision(
+        self,
+        decision_id: str,
+        approved_by: str,
+        modified_quantity: int | None = None,
+        notes: str = "",
+    ) -> tuple[bool, str]:
+        """
+        Approve a pending human decision (thread-safe).
+
+        Args:
+            decision_id: The pending decision to approve
+            approved_by: Username of person approving
+            modified_quantity: Optionally override the proposed quantity
+            notes: Additional notes about the decision
+
+        Returns:
+            Tuple of (success, message)
+        """
+        with self._human_decision_lock:
+            if decision_id not in self._pending_human_decisions:
+                return False, f"Decision {decision_id} not found or already processed"
+
+            pending = self._pending_human_decisions.pop(decision_id)
+
+        # Check if expired
+        if datetime.now(timezone.utc) > pending.expires_at:
+            self._record_human_decision(pending, "expired", approved_by, "approved_after_expiry")
+            return False, f"Decision {decision_id} has expired"
+
+        # Record approval
+        final_quantity = modified_quantity if modified_quantity is not None else pending.quantity
+        pending.status = "approved"
+
+        self._record_human_decision(
+            pending, "approved", approved_by, notes,
+            modified_quantity=final_quantity
+        )
+
+        logger.warning(
+            f"HUMAN DECISION APPROVED: {decision_id} | {pending.symbol} {pending.direction.value} "
+            f"qty={final_quantity} (original: {pending.quantity}) | By: {approved_by}"
+        )
+
+        return True, f"Decision {decision_id} approved for {pending.symbol} {pending.direction.value} qty={final_quantity}"
+
+    def reject_human_decision(
+        self,
+        decision_id: str,
+        rejected_by: str,
+        reason: str = "",
+    ) -> tuple[bool, str]:
+        """
+        Reject a pending human decision (thread-safe).
+
+        Args:
+            decision_id: The pending decision to reject
+            rejected_by: Username of person rejecting
+            reason: Reason for rejection
+
+        Returns:
+            Tuple of (success, message)
+        """
+        with self._human_decision_lock:
+            if decision_id not in self._pending_human_decisions:
+                return False, f"Decision {decision_id} not found or already processed"
+
+            pending = self._pending_human_decisions.pop(decision_id)
+        pending.status = "rejected"
+
+        self._record_human_decision(pending, "rejected", rejected_by, reason)
+
+        logger.warning(
+            f"HUMAN DECISION REJECTED: {decision_id} | {pending.symbol} {pending.direction.value} "
+            f"qty={pending.quantity} | By: {rejected_by} | Reason: {reason}"
+        )
+
+        return True, f"Decision {decision_id} rejected"
+
+    def _record_human_decision(
+        self,
+        pending: PendingHumanDecision,
+        outcome: str,
+        by: str,
+        notes: str,
+        modified_quantity: int | None = None,
+    ) -> None:
+        """Record human decision to audit history."""
+        record = {
+            "decision_id": pending.decision_id,
+            "symbol": pending.symbol,
+            "direction": pending.direction.value,
+            "proposed_quantity": pending.quantity,
+            "final_quantity": modified_quantity or pending.quantity,
+            "conviction": pending.conviction,
+            "outcome": outcome,  # approved, rejected, expired
+            "by": by,
+            "notes": notes,
+            "created_at": pending.created_at.isoformat(),
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "signals": pending.signals,
+        }
+
+        self._human_decision_history.append(record)
+
+        # Mandatory audit logging
+        self._audit_logger.log_event_dict({
+            "type": "human_decision",
+            **record,
+        })
+
+    def get_pending_human_decisions(self) -> list[dict]:
+        """Get all pending human decisions awaiting approval (thread-safe)."""
+        now = datetime.now(timezone.utc)
+        result = []
+
+        with self._human_decision_lock:
+            for decision_id, pending in self._pending_human_decisions.items():
+                remaining_seconds = (pending.expires_at - now).total_seconds()
+                result.append({
+                    "decision_id": decision_id,
+                    "symbol": pending.symbol,
+                    "direction": pending.direction.value,
+                    "quantity": pending.quantity,
+                    "conviction": pending.conviction,
+                    "rationale": pending.rationale,
+                    "created_at": pending.created_at.isoformat(),
+                    "expires_at": pending.expires_at.isoformat(),
+                    "remaining_seconds": max(0, remaining_seconds),
+                    "expired": remaining_seconds <= 0,
+                })
+
+        return result
+
+    def get_human_decision_history(self, limit: int = 50) -> list[dict]:
+        """Get recent human decision history."""
+        return list(self._human_decision_history)[-limit:]
+
+    def expire_stale_human_decisions(self) -> int:
+        """
+        Expire any pending decisions that have passed their timeout (thread-safe).
+
+        Called periodically by orchestrator or event loop.
+
+        Returns:
+            Number of decisions expired
+        """
+        now = datetime.now(timezone.utc)
+        expired_count = 0
+
+        with self._human_decision_lock:
+            for decision_id, pending in list(self._pending_human_decisions.items()):
+                if now > pending.expires_at:
+                    self._pending_human_decisions.pop(decision_id)
+                    self._record_human_decision(pending, "expired", "system", "timeout")
+                    expired_count += 1
+
+                    logger.warning(
+                        f"HUMAN DECISION EXPIRED: {decision_id} | {pending.symbol} {pending.direction.value} "
+                        f"(no response within {self._human_decision_timeout_seconds}s)"
+                    )
+
+        return expired_count
+
+    def set_human_decision_callback(self, callback: Any) -> None:
+        """
+        Set callback to notify external systems of pending decisions.
+
+        The callback receives a PendingHumanDecision when a new decision is queued.
+        """
+        self._human_decision_callback = callback
+        logger.info("Human decision callback registered")
+
     def set_portfolio_value(self, value: float) -> None:
         """Update portfolio value for position sizing."""
         self._portfolio_value = value
@@ -1571,6 +3241,167 @@ class CIOAgent(DecisionAgent):
 
             if self._use_dynamic_weights:
                 self._update_dynamic_weights()
+
+    # =========================================================================
+    # Phase 2: VIX-BASED REGIME SIGNAL WEIGHTS
+    # =========================================================================
+
+    def update_regime_from_vix(
+        self,
+        vix_current: float,
+        vix_ma: float | None = None,
+    ) -> MarketRegime:
+        """
+        Update market regime based on VIX levels (Phase 2).
+
+        Automatically detects market regime from VIX data and adjusts
+        signal weights accordingly.
+
+        VIX thresholds:
+        - VIX < 15: RISK_ON (complacency, but momentum works)
+        - VIX 15-20: NEUTRAL (normal conditions)
+        - VIX 20-25: TRENDING (moderate uncertainty)
+        - VIX 25-35: VOLATILE (high uncertainty)
+        - VIX > 35: RISK_OFF (crisis conditions)
+
+        Args:
+            vix_current: Current VIX level
+            vix_ma: Optional 20-day VIX MA for spike detection
+
+        Returns:
+            Detected MarketRegime
+        """
+        # Determine base regime from VIX level
+        if vix_current < 15:
+            regime = MarketRegime.RISK_ON
+        elif vix_current < 20:
+            regime = MarketRegime.NEUTRAL
+        elif vix_current < 25:
+            regime = MarketRegime.TRENDING
+        elif vix_current < 35:
+            regime = MarketRegime.VOLATILE
+        else:
+            regime = MarketRegime.RISK_OFF
+
+        # Check for VIX spike (current >> MA)
+        if vix_ma is not None and vix_ma > 0:
+            vix_ratio = vix_current / vix_ma
+            if vix_ratio >= 1.5 and regime != MarketRegime.RISK_OFF:
+                # VIX spike often indicates regime transition
+                regime = MarketRegime.VOLATILE
+                logger.info(f"CIO: VIX spike detected ({vix_ratio:.2f}x MA), regime -> VOLATILE")
+
+        # Update regime
+        self.set_market_regime(regime)
+
+        # Store VIX data for reference
+        self._vix_current = vix_current
+        self._vix_ma = vix_ma
+
+        return regime
+
+    def get_vix_adjusted_weights(self) -> dict[str, float]:
+        """
+        Get signal weights adjusted for current VIX level (Phase 2).
+
+        Additional VIX-based adjustments beyond standard regime weights:
+        - High VIX (>25): Increase macro/sentiment weights (flight-to-quality signals)
+        - Low VIX (<15): Increase momentum weights (trend continuation)
+        - VIX spike: Increase options vol weights (volatility opportunities)
+
+        Returns:
+            Dictionary of VIX-adjusted weights
+        """
+        if not hasattr(self, '_vix_current') or self._vix_current is None:
+            return dict(self._weights)
+
+        vix = self._vix_current
+        weights = dict(self._weights)
+
+        # Additional VIX-specific adjustments
+        if vix > 30:
+            # Crisis: boost macro, reduce momentum
+            if "MacroAgent" in weights:
+                weights["MacroAgent"] *= 1.3
+            if "MomentumAgent" in weights:
+                weights["MomentumAgent"] *= 0.6
+            if "SentimentAgent" in weights:
+                weights["SentimentAgent"] *= 1.2  # Contrarian signals valuable
+            if "MACDvAgent" in weights:
+                weights["MACDvAgent"] *= 1.4  # Vol opportunities
+
+        elif vix > 25:
+            # Elevated: balanced caution
+            if "MACDvAgent" in weights:
+                weights["MACDvAgent"] *= 1.3
+            if "MacroAgent" in weights:
+                weights["MacroAgent"] *= 1.1
+            if "MomentumAgent" in weights:
+                weights["MomentumAgent"] *= 0.8
+
+        elif vix < 12:
+            # Complacency: favor momentum but add caution
+            if "MomentumAgent" in weights:
+                weights["MomentumAgent"] *= 1.2
+            if "MacroAgent" in weights:
+                weights["MacroAgent"] *= 1.1  # Watch for regime change
+
+        # VIX spike adjustment
+        if hasattr(self, '_vix_ma') and self._vix_ma is not None and self._vix_ma > 0:
+            vix_ratio = vix / self._vix_ma
+            if vix_ratio >= 1.3:
+                # Spike: increase contrarian/vol signals
+                if "SentimentAgent" in weights:
+                    weights["SentimentAgent"] *= (1.0 + (vix_ratio - 1.3) * 0.5)
+                if "MACDvAgent" in weights:
+                    weights["MACDvAgent"] *= (1.0 + (vix_ratio - 1.3) * 0.3)
+
+        # Normalize
+        total = sum(weights.values())
+        if total > 0:
+            weights = {k: v / total for k, v in weights.items()}
+
+        return weights
+
+    def get_regime_allocation_multiplier(self) -> float:
+        """
+        Get position size multiplier based on current regime (Phase 2).
+
+        During high volatility/risk-off regimes, reduce overall position sizing.
+
+        Returns:
+            Multiplier for position sizes (0.5 to 1.2)
+        """
+        base_mult = self._regime_allocation_multipliers.get(
+            self._current_regime,
+            1.0
+        )
+
+        # Additional VIX-based adjustment
+        if hasattr(self, '_vix_current') and self._vix_current is not None:
+            vix = self._vix_current
+
+            if vix > 40:
+                # Extreme fear: reduce to minimum
+                return min(base_mult, 0.3)
+            elif vix > 30:
+                # High fear: significant reduction
+                return min(base_mult, 0.5)
+            elif vix > 25:
+                # Elevated: moderate reduction
+                return min(base_mult, 0.7)
+
+        return base_mult
+
+    def get_vix_status(self) -> dict[str, Any]:
+        """Get VIX tracking status for monitoring."""
+        return {
+            "current": getattr(self, '_vix_current', None),
+            "ma": getattr(self, '_vix_ma', None),
+            "regime": self._current_regime.value,
+            "allocation_multiplier": self.get_regime_allocation_multiplier(),
+            "vix_adjusted_weights": self.get_vix_adjusted_weights(),
+        }
 
     def update_strategy_performance(
         self,
@@ -1863,6 +3694,24 @@ class CIOAgent(DecisionAgent):
                 "current_regime": self._current_regime.value,
                 "current_multiplier": self._regime_allocation_multipliers.get(self._current_regime, 1.0),
                 "multipliers": {k.value: v for k, v in self._regime_allocation_multipliers.items()},
+            },
+            # AUTONOMOUS POSITION MANAGEMENT
+            "position_management": {
+                "enabled": self._position_management_enabled,
+                "tracked_positions": len(self._tracked_positions),
+                "last_review": self._last_position_review.isoformat() if self._last_position_review else None,
+                "review_interval_seconds": self._position_review_interval_seconds,
+                "config": self._position_management_config.to_dict(),
+                "stats": dict(self._position_management_stats),
+                "positions": {
+                    symbol: {
+                        "pnl_pct": pos.pnl_pct,
+                        "holding_hours": pos.holding_hours,
+                        "conviction": pos.current_conviction,
+                        "is_long": pos.is_long,
+                    }
+                    for symbol, pos in self._tracked_positions.items()
+                },
             },
         })
 

@@ -12,7 +12,8 @@ Does NOT make trading decisions or send orders.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from collections import deque
+from typing import TYPE_CHECKING, Any
 
 from core.agent_base import SignalAgent, AgentConfig
 from core.events import (
@@ -22,6 +23,43 @@ from core.events import (
     SignalEvent,
     SignalDirection,
 )
+
+# Import HMM regime detection
+try:
+    from core.hmm_regime import (
+        HMMRegimeDetector,
+        MarketState,
+        create_hmm_detector,
+    )
+    HAS_HMM = True
+except ImportError:
+    HAS_HMM = False
+    HMMRegimeDetector = None  # type: ignore
+    MarketState = None  # type: ignore
+
+# Import yield curve analyzer
+try:
+    from core.yield_curve import (
+        YieldCurveAnalyzer,
+        YieldCurveState,
+    )
+    HAS_YIELD_CURVE = True
+except ImportError:
+    HAS_YIELD_CURVE = False
+    YieldCurveAnalyzer = None  # type: ignore
+    YieldCurveState = None  # type: ignore
+
+# Import DXY analyzer
+try:
+    from core.dxy_analyzer import (
+        DXYAnalyzer,
+        DXYState,
+    )
+    HAS_DXY = True
+except ImportError:
+    HAS_DXY = False
+    DXYAnalyzer = None  # type: ignore
+    DXYState = None  # type: ignore
 
 if TYPE_CHECKING:
     from core.event_bus import EventBus
@@ -58,13 +96,101 @@ class MacroAgent(SignalAgent):
         super().__init__(config, event_bus, audit_logger)
 
         # Configuration
-        self._indicators = config.parameters.get("indicators", ["yield_curve", "vix", "dxy"])
+        self._indicators = config.parameters.get("indicators", ["yield_curve", "vix", "dxy", "hmm"])
         self._rebalance_frequency = config.parameters.get("rebalance_frequency", "daily")
+        self._hmm_min_samples = config.parameters.get("hmm_min_samples", 50)
+        self._hmm_n_states = config.parameters.get("hmm_n_states", 3)
+
+        # Minimum confidence threshold for signal generation
+        self._min_confidence = config.parameters.get("min_confidence", 0.75)
 
         # State (minimal - agent should be mostly stateless)
         self._last_vix: float | None = None
         self._last_yield_spread: float | None = None
         self._current_regime: str = "neutral"
+
+        # HMM regime detector (bounded to prevent memory leak)
+        self._hmm_detector: HMMRegimeDetector | None = None
+        self._hmm_returns: deque[float] = deque(maxlen=500)
+        self._last_hmm_state: MarketState | None = None
+        if HAS_HMM:
+            self._hmm_detector = create_hmm_detector(
+                n_states=self._hmm_n_states,
+                min_samples=self._hmm_min_samples,
+            )
+
+        # Yield curve analyzer
+        self._yield_curve_analyzer: YieldCurveAnalyzer | None = None
+        if HAS_YIELD_CURVE:
+            self._yield_curve_analyzer = YieldCurveAnalyzer()
+
+        # DXY analyzer
+        self._dxy_analyzer: DXYAnalyzer | None = None
+        if HAS_DXY:
+            self._dxy_analyzer = DXYAnalyzer()
+
+        # Position-level risk parameters
+        self._position_sl_pct = config.parameters.get("position_stop_loss_pct", 2.0) / 100  # 2% default
+        self._position_tp_pct = config.parameters.get("position_take_profit_pct", 4.0) / 100  # 4% default
+        self._min_rr_ratio = config.parameters.get("min_reward_risk_ratio", 2.0)  # 2:1 R:R minimum
+
+    def _get_reference_price(self, symbol: str, default: float = 500.0) -> float:
+        """
+        Get reference price for a symbol from stored price history.
+
+        Args:
+            symbol: Symbol to get price for
+            default: Default price if no history available
+
+        Returns:
+            Latest price from history or default
+        """
+        if hasattr(self, "_price_history") and symbol in self._price_history:
+            prices = self._price_history[symbol]
+            if prices:
+                return prices[-1]
+        return default
+
+    def _calculate_position_stops(
+        self,
+        price: float,
+        direction: SignalDirection,
+        sl_pct: float | None = None,
+        tp_pct: float | None = None,
+    ) -> tuple[float | None, float | None, float, bool]:
+        """
+        Calculate position-level stop-loss and take-profit.
+
+        Args:
+            price: Entry/reference price
+            direction: Signal direction (LONG/SHORT/FLAT)
+            sl_pct: Stop-loss percentage (optional, uses default if None)
+            tp_pct: Take-profit percentage (optional, uses default if None)
+
+        Returns:
+            Tuple of (stop_loss, target_price, rr_ratio, is_valid_rr)
+        """
+        if price <= 0 or direction == SignalDirection.FLAT:
+            return None, None, 0.0, False
+
+        sl = sl_pct if sl_pct is not None else self._position_sl_pct
+        tp = tp_pct if tp_pct is not None else self._position_tp_pct
+
+        if direction == SignalDirection.LONG:
+            stop_loss = round(price * (1 - sl), 2)
+            target_price = round(price * (1 + tp), 2)
+            sl_distance = price - stop_loss
+            tp_distance = target_price - price
+        else:  # SHORT
+            stop_loss = round(price * (1 + sl), 2)
+            target_price = round(price * (1 - tp), 2)
+            sl_distance = stop_loss - price
+            tp_distance = price - target_price
+
+        rr_ratio = tp_distance / sl_distance if sl_distance > 0 else 0.0
+        is_valid_rr = rr_ratio >= self._min_rr_ratio
+
+        return stop_loss, target_price, rr_ratio, is_valid_rr
 
     async def initialize(self) -> None:
         """Initialize macro data feeds."""
@@ -101,6 +227,23 @@ class MacroAgent(SignalAgent):
                 data_sources=("ib_market_data", "macro_indicator"),
             )
 
+        # Filter weak signals by confidence threshold
+        if signal.direction != SignalDirection.FLAT and signal.confidence < self._min_confidence:
+            logger.debug(
+                f"Signal filtered: confidence {signal.confidence:.2f} < threshold {self._min_confidence}"
+            )
+            # Still publish a neutral signal for barrier satisfaction
+            signal = SignalEvent(
+                source_agent=self.name,
+                strategy_name="macro_low_confidence",
+                symbol=signal.symbol,
+                direction=SignalDirection.FLAT,
+                strength=0.0,
+                confidence=signal.confidence,
+                rationale=f"Macro signal confidence too low: {signal.confidence:.2f} < {self._min_confidence}",
+                data_sources=("ib_market_data", "macro_indicator"),
+            )
+
         await self._event_bus.publish_signal(signal)
         self._audit_logger.log_event(signal)
 
@@ -111,34 +254,56 @@ class MacroAgent(SignalAgent):
         """
         Analyze macroeconomic conditions.
 
-        TODO: Implement real macro models:
-        1. Yield curve analysis (inversion = risk-off)
-        2. VIX regime detection (>20 = elevated, >30 = crisis)
-        3. Dollar strength impact on EM/commodities
-        4. Credit spread analysis
+        Implemented macro models:
+        1. VIX regime detection (>20 = elevated, >30 = crisis)
+        2. HMM-based regime detection (bull/bear/sideways)
+        3. Yield curve analysis (via YieldCurveAnalyzer)
+        4. Dollar strength analysis (via DXYAnalyzer)
         """
-
-        # Placeholder logic - replace with actual macro models
         symbol = market_data.symbol
 
         # Process macro-relevant symbols
         # VIX for volatility regime, SPY/QQQ for broad market, GLD for risk-off, TLT for rates
-        macro_symbols = {"VIX", "TLT", "UUP", "SPY", "QQQ", "GLD", "USO", "IWM"}
+        # UUP for DXY tracking
+        macro_symbols = {"VIX", "TLT", "UUP", "SPY", "QQQ", "GLD", "USO", "IWM", "DX"}
 
         if symbol not in macro_symbols:
             return None
+
+        price = market_data.last or market_data.mid
+        if price and price > 0:
+            # Update HMM with SPY/QQQ data (broad market)
+            if symbol in ("SPY", "QQQ"):
+                self.update_hmm_regime(price)
+
+            # Update DXY analyzer if we have dollar data
+            if symbol in ("UUP", "DX") and HAS_DXY and self._dxy_analyzer:
+                # UUP is dollar ETF, approximate DXY from it
+                # UUP ~= 28 when DXY = 100, so multiply by ~3.5
+                approx_dxy = price * 3.5 if symbol == "UUP" else price
+                self._dxy_analyzer.update(approx_dxy)
 
         # VIX-based regime detection
         if symbol == "VIX":
             return await self._process_vix_signal(market_data)
 
-        # SPY/QQQ momentum for regime
+        # SPY/QQQ momentum for regime + HMM signal
         if symbol in ("SPY", "QQQ"):
+            # Try HMM signal first (more sophisticated)
+            hmm_signal = self.get_hmm_regime_signal()
+            if hmm_signal is not None:
+                return hmm_signal
+
+            # Fall back to simple momentum
             return await self._process_equity_regime_signal(market_data)
 
         # GLD/TLT for risk-off detection
         if symbol in ("GLD", "TLT"):
             return await self._process_safe_haven_signal(market_data)
+
+        # UUP/DX for dollar strength
+        if symbol in ("UUP", "DX"):
+            return await self._analyze_dollar_strength()
 
         return None
 
@@ -149,11 +314,16 @@ class MacroAgent(SignalAgent):
         """
         Process VIX data for regime signal.
 
-        TODO: Implement proper VIX regime model:
+        VIX-based regime detection:
         - VIX < 15: Low vol, risk-on
         - VIX 15-20: Normal
         - VIX 20-30: Elevated, reduce risk
         - VIX > 30: Crisis, risk-off
+
+        Position-level risk controls:
+        - 2% stop-loss per position (configurable)
+        - 4% take-profit per position (configurable)
+        - 2:1 minimum R:R ratio (configurable)
         """
         vix_level = market_data.last
 
@@ -186,15 +356,34 @@ class MacroAgent(SignalAgent):
 
         self._current_regime = regime
 
+        # Get SPY price from history if available
+        spy_price = self._get_reference_price("SPY", default=500.0)
+
+        # Calculate position-level stop-loss and take-profit
+        stop_loss, target_price, rr_ratio, is_valid_rr = self._calculate_position_stops(
+            price=spy_price,
+            direction=direction,
+        )
+
+        # RISK FILTER: Reject poor R:R trades
+        if direction != SignalDirection.FLAT and not is_valid_rr:
+            logger.info(
+                f"MacroAgent VIX: Rejecting signal - R:R ratio {rr_ratio:.2f} "
+                f"< minimum {self._min_rr_ratio:.2f}"
+            )
+            return None
+
         return SignalEvent(
             source_agent=self.name,
             strategy_name="macro_vix_regime",
             symbol="SPY",  # Signal applies to broad market
             direction=direction,
             strength=strength,
-            confidence=0.6,  # TODO: Calculate based on model confidence
-            rationale=f"VIX regime change to {regime} (VIX={vix_level:.1f})",
+            confidence=0.6,
+            rationale=f"VIX regime change to {regime} (VIX={vix_level:.1f}) | SL={stop_loss}, TP={target_price}, R:R={rr_ratio:.2f}",
             data_sources=("ib_market_data", "macro_indicator", "vix_indicator"),
+            target_price=target_price,
+            stop_loss=stop_loss,
         )
 
     async def _process_equity_regime_signal(
@@ -205,6 +394,11 @@ class MacroAgent(SignalAgent):
         Process SPY/QQQ data for equity regime detection.
 
         Uses price momentum as a simple regime indicator.
+
+        Position-level risk controls:
+        - 2% stop-loss per position (configurable)
+        - 4% take-profit per position (configurable)
+        - 2:1 minimum R:R ratio (configurable)
         """
         symbol = market_data.symbol
         price = market_data.last or market_data.mid
@@ -212,24 +406,20 @@ class MacroAgent(SignalAgent):
         if price <= 0:
             return None
 
-        # Store price history (simple approach using instance variable)
+        # Store price history (bounded deque to prevent memory leak)
         if not hasattr(self, "_price_history"):
-            self._price_history: dict[str, list[float]] = {}
+            self._price_history: dict[str, deque[float]] = {}
 
         if symbol not in self._price_history:
-            self._price_history[symbol] = []
+            self._price_history[symbol] = deque(maxlen=50)
 
         self._price_history[symbol].append(price)
-
-        # Keep last 50 prices
-        if len(self._price_history[symbol]) > 50:
-            self._price_history[symbol] = self._price_history[symbol][-50:]
 
         # Need at least 5 prices for signal (fast startup)
         if len(self._price_history[symbol]) < 5:
             return None
 
-        prices = self._price_history[symbol]
+        prices = list(self._price_history[symbol])  # Convert deque to list for slicing
         n = len(prices)
 
         # Adaptive SMA based on available data
@@ -253,6 +443,21 @@ class MacroAgent(SignalAgent):
             regime = "neutral"
             strength = 0.0
 
+        # Calculate position-level stop-loss and take-profit
+        current_price = prices[-1]
+        stop_loss, target_price, rr_ratio, is_valid_rr = self._calculate_position_stops(
+            price=current_price,
+            direction=direction,
+        )
+
+        # RISK FILTER: Reject poor R:R trades
+        if direction != SignalDirection.FLAT and not is_valid_rr:
+            logger.info(
+                f"MacroAgent Equity: Rejecting {symbol} signal - R:R ratio {rr_ratio:.2f} "
+                f"< minimum {self._min_rr_ratio:.2f}"
+            )
+            return None
+
         return SignalEvent(
             source_agent=self.name,
             strategy_name="macro_equity_regime",
@@ -260,8 +465,10 @@ class MacroAgent(SignalAgent):
             direction=direction,
             strength=strength,
             confidence=0.55,
-            rationale=f"Equity regime {regime}: {symbol} SMA10/SMA20 momentum={momentum:.2f}%",
+            rationale=f"Equity regime {regime}: {symbol} SMA5/SMA10 momentum={momentum:.2f}% | SL={stop_loss}, TP={target_price}, R:R={rr_ratio:.2f}",
             data_sources=("ib_market_data", "macro_indicator", "momentum_indicator"),
+            target_price=target_price,
+            stop_loss=stop_loss,
         )
 
     async def _process_safe_haven_signal(
@@ -272,6 +479,11 @@ class MacroAgent(SignalAgent):
         Process GLD/TLT for safe haven demand (risk-off indicator).
 
         Rising GLD/TLT suggests risk-off environment.
+
+        Position-level risk controls:
+        - 2% stop-loss per position (configurable)
+        - 4% take-profit per position (configurable)
+        - 2:1 minimum R:R ratio (configurable)
         """
         symbol = market_data.symbol
         price = market_data.last or market_data.mid
@@ -306,7 +518,23 @@ class MacroAgent(SignalAgent):
         change_pct = (recent_avg - older_avg) / older_avg * 100
 
         if change_pct > 0.3:
-            # Risk-off: safe havens rising
+            # Risk-off: safe havens rising - SHORT signal with SL/TP
+            spy_price = self._get_reference_price("SPY", default=500.0)
+
+            # Calculate position-level stop-loss and take-profit
+            stop_loss, target_price, rr_ratio, is_valid_rr = self._calculate_position_stops(
+                price=spy_price,
+                direction=SignalDirection.SHORT,
+            )
+
+            # RISK FILTER: Reject poor R:R trades
+            if not is_valid_rr:
+                logger.info(
+                    f"MacroAgent SafeHaven: Rejecting signal - R:R ratio {rr_ratio:.2f} "
+                    f"< minimum {self._min_rr_ratio:.2f}"
+                )
+                return None
+
             return SignalEvent(
                 source_agent=self.name,
                 strategy_name="macro_safe_haven",
@@ -314,8 +542,10 @@ class MacroAgent(SignalAgent):
                 direction=SignalDirection.SHORT,
                 strength=-0.3,
                 confidence=0.5,
-                rationale=f"Risk-off: {symbol} rising {change_pct:.2f}% (safe haven demand)",
+                rationale=f"Risk-off: {symbol} rising {change_pct:.2f}% (safe haven demand) | SL={stop_loss}, TP={target_price}, R:R={rr_ratio:.2f}",
                 data_sources=("ib_market_data", "macro_indicator", "safe_haven_indicator"),
+                target_price=target_price,
+                stop_loss=stop_loss,
             )
 
         return None
@@ -324,21 +554,280 @@ class MacroAgent(SignalAgent):
         """
         Analyze yield curve for recession signals.
 
-        TODO: Implement yield curve analysis:
+        Uses YieldCurveAnalyzer for:
         - 2s10s spread
         - 3m10y spread (Fed preferred)
         - Full curve shape analysis
+
+        Position-level risk controls:
+        - 2% stop-loss per position (configurable)
+        - 4% take-profit per position (configurable)
+        - 2:1 minimum R:R ratio (configurable)
         """
-        # Placeholder
-        return None
+        if not HAS_YIELD_CURVE or self._yield_curve_analyzer is None:
+            return None
+
+        try:
+            result = self._yield_curve_analyzer.analyze()
+            signal, rationale = self._yield_curve_analyzer.get_trading_signal()
+
+            if abs(signal) < 0.15:
+                return None  # Not strong enough signal
+
+            direction = SignalDirection.LONG if signal > 0 else SignalDirection.SHORT
+            strength = signal
+
+            # Get SPY price from history
+            spy_price = self._get_reference_price("SPY", default=500.0)
+
+            # Calculate position-level stop-loss and take-profit
+            stop_loss, target_price, rr_ratio, is_valid_rr = self._calculate_position_stops(
+                price=spy_price,
+                direction=direction,
+            )
+
+            # RISK FILTER: Reject poor R:R trades
+            if not is_valid_rr:
+                logger.info(
+                    f"MacroAgent YieldCurve: Rejecting signal - R:R ratio {rr_ratio:.2f} "
+                    f"< minimum {self._min_rr_ratio:.2f}"
+                )
+                return None
+
+            return SignalEvent(
+                source_agent=self.name,
+                strategy_name="macro_yield_curve",
+                symbol="SPY",
+                direction=direction,
+                strength=strength,
+                confidence=0.6 if result.is_warning else 0.5,
+                rationale=f"{rationale} | SL={stop_loss}, TP={target_price}, R:R={rr_ratio:.2f}",
+                data_sources=("ib_market_data", "yield_curve_indicator"),
+                target_price=target_price,
+                stop_loss=stop_loss,
+            )
+        except Exception as e:
+            logger.exception(f"Error in yield curve analysis: {e}")
+            return None
 
     async def _analyze_dollar_strength(self) -> SignalEvent | None:
         """
         Analyze dollar strength for sector rotation.
 
-        TODO: Implement DXY analysis:
+        Uses DXYAnalyzer for:
         - Strong dollar = headwind for multinationals, EM
         - Weak dollar = tailwind for commodities, EM
+
+        Position-level risk controls:
+        - 2% stop-loss per position (configurable)
+        - 4% take-profit per position (configurable)
+        - 2:1 minimum R:R ratio (configurable)
         """
-        # Placeholder
-        return None
+        if not HAS_DXY or self._dxy_analyzer is None:
+            return None
+
+        try:
+            result = self._dxy_analyzer.analyze()
+            signal = result.signal_for_risk_assets
+
+            if abs(signal) < 0.2:
+                return None  # Not strong enough
+
+            direction = SignalDirection.LONG if signal > 0 else SignalDirection.SHORT
+            strength = signal
+
+            # Get SPY price from history
+            spy_price = self._get_reference_price("SPY", default=500.0)
+
+            # Calculate position-level stop-loss and take-profit
+            stop_loss, target_price, rr_ratio, is_valid_rr = self._calculate_position_stops(
+                price=spy_price,
+                direction=direction,
+            )
+
+            # RISK FILTER: Reject poor R:R trades
+            if not is_valid_rr:
+                logger.info(
+                    f"MacroAgent DXY: Rejecting signal - R:R ratio {rr_ratio:.2f} "
+                    f"< minimum {self._min_rr_ratio:.2f}"
+                )
+                return None
+
+            rationale = (
+                f"DXY {result.state.value} ({result.current_level:.1f}), "
+                f"momentum {result.momentum_score:+.2f} | SL={stop_loss}, TP={target_price}, R:R={rr_ratio:.2f}"
+            )
+
+            return SignalEvent(
+                source_agent=self.name,
+                strategy_name="macro_dxy",
+                symbol="SPY",
+                direction=direction,
+                strength=strength,
+                confidence=0.55,
+                rationale=rationale,
+                data_sources=("ib_market_data", "dxy_indicator"),
+                target_price=target_price,
+                stop_loss=stop_loss,
+            )
+        except Exception as e:
+            logger.exception(f"Error in DXY analysis: {e}")
+            return None
+
+    # =========================================================================
+    # HMM REGIME DETECTION METHODS
+    # =========================================================================
+
+    def update_hmm_regime(self, price: float) -> None:
+        """
+        Update HMM regime detector with new price observation.
+
+        Called when new price data arrives. Calculates returns and
+        updates the HMM model.
+
+        Args:
+            price: Latest price observation
+        """
+        if not HAS_HMM or self._hmm_detector is None:
+            return
+
+        # Store price for return calculation (bounded deque)
+        if not hasattr(self, "_hmm_prices"):
+            self._hmm_prices: deque[float] = deque(maxlen=300)
+
+        self._hmm_prices.append(price)
+
+        # Calculate return if we have at least 2 prices
+        if len(self._hmm_prices) >= 2:
+            prev_price = self._hmm_prices[-2]
+            if prev_price > 0:
+                ret = (price - prev_price) / prev_price
+                self._hmm_returns.append(ret)
+
+                # Update HMM detector
+                self._hmm_detector.update(ret)
+
+        # Try to fit HMM if we have enough data and not fitted
+        if (
+            len(self._hmm_returns) >= self._hmm_min_samples
+            and not self._hmm_detector._is_fitted
+        ):
+            try:
+                self._hmm_detector.fit(self._hmm_returns)
+                logger.info("HMM regime detector fitted successfully")
+            except Exception as e:
+                logger.warning(f"Could not fit HMM: {e}")
+
+    def get_hmm_regime_signal(self) -> SignalEvent | None:
+        """
+        Get trading signal based on HMM regime detection.
+
+        Position-level risk controls:
+        - 2% stop-loss per position (configurable)
+        - 4% take-profit per position (configurable)
+        - 2:1 minimum R:R ratio (configurable)
+
+        Returns:
+            SignalEvent if regime signal is actionable, None otherwise
+        """
+        if not HAS_HMM or self._hmm_detector is None:
+            return None
+
+        if not self._hmm_detector._is_fitted:
+            return None
+
+        try:
+            # Get regime analysis
+            result = self._hmm_detector.analyze()
+            signal_strength, rationale = self._hmm_detector.get_regime_signal()
+
+            # Check for regime change
+            current_state = result.current_state
+            if current_state == self._last_hmm_state:
+                return None  # No regime change
+
+            self._last_hmm_state = current_state
+
+            # Only signal on meaningful strength
+            if abs(signal_strength) < 0.2:
+                return None
+
+            # Determine direction
+            if signal_strength > 0:
+                direction = SignalDirection.LONG
+            elif signal_strength < 0:
+                direction = SignalDirection.SHORT
+            else:
+                direction = SignalDirection.FLAT
+
+            # Get SPY price from history
+            spy_price = self._get_reference_price("SPY", default=500.0)
+
+            # Calculate position-level stop-loss and take-profit
+            stop_loss, target_price, rr_ratio, is_valid_rr = self._calculate_position_stops(
+                price=spy_price,
+                direction=direction,
+            )
+
+            # RISK FILTER: Reject poor R:R trades
+            if direction != SignalDirection.FLAT and not is_valid_rr:
+                logger.info(
+                    f"MacroAgent HMM: Rejecting signal - R:R ratio {rr_ratio:.2f} "
+                    f"< minimum {self._min_rr_ratio:.2f}"
+                )
+                return None
+
+            return SignalEvent(
+                source_agent=self.name,
+                strategy_name="macro_hmm_regime",
+                symbol="SPY",
+                direction=direction,
+                strength=signal_strength,
+                confidence=result.confidence,
+                rationale=f"HMM: {rationale} [state: {current_state.value}] | SL={stop_loss}, TP={target_price}, R:R={rr_ratio:.2f}",
+                data_sources=("ib_market_data", "hmm_regime_detector"),
+                target_price=target_price,
+                stop_loss=stop_loss,
+            )
+        except Exception as e:
+            logger.exception(f"Error in HMM regime signal: {e}")
+            return None
+
+    def get_hmm_regime_probabilities(self) -> dict[str, float] | None:
+        """
+        Get current HMM regime probabilities.
+
+        Returns:
+            Dictionary of regime -> probability, or None if not fitted
+        """
+        if not HAS_HMM or self._hmm_detector is None:
+            return None
+
+        if not self._hmm_detector._is_fitted:
+            return None
+
+        try:
+            probs = self._hmm_detector.get_regime_probabilities()
+            return {k.value: v for k, v in probs.items()}
+        except Exception as e:
+            logger.warning(f"Could not get HMM probabilities: {e}")
+            return None
+
+    def get_hmm_transition_matrix(self) -> dict[str, dict[str, float]] | None:
+        """
+        Get HMM state transition probability matrix.
+
+        Returns:
+            Nested dict of transition probabilities, or None if not fitted
+        """
+        if not HAS_HMM or self._hmm_detector is None:
+            return None
+
+        if not self._hmm_detector._is_fitted:
+            return None
+
+        try:
+            return self._hmm_detector.get_transition_matrix()
+        except Exception as e:
+            logger.warning(f"Could not get transition matrix: {e}")
+            return None

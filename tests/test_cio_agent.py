@@ -1297,3 +1297,321 @@ class TestDecisionConsistency:
         # Directions should be independent
         assert agg_aapl.consensus_direction == SignalDirection.LONG
         assert agg_googl.consensus_direction == SignalDirection.SHORT
+
+
+# ============================================================================
+# AUTONOMOUS POSITION MANAGEMENT TESTS
+# ============================================================================
+
+class TestPositionManagement:
+    """Test autonomous position management functionality."""
+
+    def test_register_position(self, cio_agent):
+        """Test position registration for CIO tracking."""
+        cio_agent.register_position(
+            symbol="AAPL",
+            quantity=100,
+            entry_price=150.0,
+            is_long=True,
+            conviction=0.75,
+            stop_loss=145.0,
+            take_profit=165.0,
+            contributing_strategies=["MomentumAgent"],
+        )
+
+        positions = cio_agent.get_tracked_positions()
+        assert "AAPL" in positions
+        assert positions["AAPL"]["quantity"] == 100
+        assert positions["AAPL"]["entry_price"] == 150.0
+        assert positions["AAPL"]["is_long"] is True
+        assert positions["AAPL"]["original_conviction"] == 0.75
+
+    def test_position_pnl_calculation(self, cio_agent):
+        """Test P&L calculation for tracked positions."""
+        from agents.cio_agent import TrackedPosition
+
+        # Long position - profit
+        pos_long = TrackedPosition(
+            symbol="AAPL",
+            quantity=100,
+            entry_price=100.0,
+            entry_time=datetime.now(timezone.utc),
+            is_long=True,
+            current_price=110.0,
+        )
+        assert pos_long.pnl_pct == 10.0  # 10% gain
+
+        # Long position - loss
+        pos_long.current_price = 95.0
+        pos_long.update_price(95.0)
+        assert pos_long.pnl_pct == -5.0  # 5% loss
+
+        # Short position - profit
+        pos_short = TrackedPosition(
+            symbol="MSFT",
+            quantity=50,
+            entry_price=200.0,
+            entry_time=datetime.now(timezone.utc),
+            is_long=False,
+            current_price=190.0,
+        )
+        assert pos_short.pnl_pct == 5.0  # 5% gain on short
+
+    def test_position_management_config_defaults(self, cio_agent):
+        """Test position management configuration defaults."""
+        config = cio_agent._position_management_config
+        assert config.max_loss_pct == 5.0
+        assert config.extended_loss_pct == 8.0
+        assert config.profit_target_pct == 15.0
+        assert config.trailing_profit_pct == 3.0
+        assert config.min_conviction_to_hold == 0.4
+
+    def test_position_management_stats_tracking(self, cio_agent):
+        """Test position management statistics tracking."""
+        stats = cio_agent.get_position_management_stats()
+        assert "tracked_positions" in stats
+        assert "management_enabled" in stats
+        assert "config" in stats
+        assert "stats" in stats
+        assert stats["stats"]["losers_closed"] == 0
+        assert stats["stats"]["profits_taken"] == 0
+
+    def test_create_close_loser_decision(self, cio_agent):
+        """Test creation of close loser decision."""
+        from agents.cio_agent import TrackedPosition
+        from core.events import DecisionAction
+
+        pos = TrackedPosition(
+            symbol="AAPL",
+            quantity=100,
+            entry_price=100.0,
+            entry_time=datetime.now(timezone.utc),
+            is_long=True,
+            current_price=92.0,  # -8% loss
+            original_conviction=0.8,
+            current_conviction=0.3,
+            contributing_strategies=["MomentumAgent"],
+        )
+        pos.update_price(92.0)
+
+        decision = cio_agent._create_close_loser_decision(
+            pos,
+            reason="Loss exceeds threshold",
+            is_emergency=True,
+        )
+
+        assert decision.symbol == "AAPL"
+        assert decision.action == OrderSide.SELL  # Closing long = sell
+        assert decision.quantity == 100
+        assert decision.decision_action == DecisionAction.CLOSE_LOSER
+        assert decision.position_pnl_pct == -8.0
+
+    def test_create_take_profit_decision(self, cio_agent):
+        """Test creation of take profit decision."""
+        from agents.cio_agent import TrackedPosition
+        from core.events import DecisionAction
+
+        pos = TrackedPosition(
+            symbol="MSFT",
+            quantity=50,
+            entry_price=200.0,
+            entry_time=datetime.now(timezone.utc),
+            is_long=True,
+            current_price=235.0,  # +17.5% gain
+            original_conviction=0.7,
+            current_conviction=0.6,
+            contributing_strategies=["StatArbAgent"],
+        )
+        pos.update_price(235.0)
+
+        decision = cio_agent._create_take_profit_decision(
+            pos,
+            reason="Profit target reached",
+            partial_exit=False,
+        )
+
+        assert decision.symbol == "MSFT"
+        assert decision.action == OrderSide.SELL
+        assert decision.quantity == 50
+        assert decision.decision_action == DecisionAction.TAKE_PROFIT
+        assert decision.position_pnl_pct == 17.5
+
+    def test_create_reduce_position_decision(self, cio_agent):
+        """Test creation of reduce position decision."""
+        from agents.cio_agent import TrackedPosition
+        from core.events import DecisionAction
+
+        pos = TrackedPosition(
+            symbol="GOOGL",
+            quantity=100,
+            entry_price=150.0,
+            entry_time=datetime.now(timezone.utc),
+            is_long=True,
+            current_price=155.0,
+            original_conviction=0.9,
+            current_conviction=0.5,  # Conviction dropped
+            contributing_strategies=["MomentumAgent"],
+        )
+        pos.update_price(155.0)
+
+        decision = cio_agent._create_reduce_position_decision(
+            pos,
+            reduction_pct=50.0,
+            reason="Conviction dropped",
+        )
+
+        assert decision.symbol == "GOOGL"
+        assert decision.action == OrderSide.SELL
+        assert decision.quantity == 50  # 50% of 100
+        assert decision.decision_action == DecisionAction.REDUCE_POSITION
+
+    def test_regime_adjusted_loss_threshold(self, cio_agent):
+        """Test that loss thresholds adjust for market regime."""
+        # Default regime (NEUTRAL)
+        assert cio_agent._get_regime_adjusted_loss_threshold(MarketRegime.NEUTRAL) == 5.0
+
+        # Volatile regime - should be tighter
+        assert cio_agent._get_regime_adjusted_loss_threshold(MarketRegime.VOLATILE) == 3.0
+
+        # Risk-off regime - should be tighter
+        threshold = cio_agent._get_regime_adjusted_loss_threshold(MarketRegime.RISK_OFF)
+        assert threshold == 4.0  # 5.0 * 0.8
+
+    def test_regime_adjusted_profit_threshold(self, cio_agent):
+        """Test that profit thresholds adjust for market regime."""
+        # Default regime (NEUTRAL)
+        assert cio_agent._get_regime_adjusted_profit_threshold(MarketRegime.NEUTRAL) == 15.0
+
+        # Trending regime - should let profits run longer
+        threshold = cio_agent._get_regime_adjusted_profit_threshold(MarketRegime.TRENDING)
+        assert threshold == 22.5  # 15.0 * 1.5
+
+        # Volatile regime - should take profits earlier
+        threshold = cio_agent._get_regime_adjusted_profit_threshold(MarketRegime.VOLATILE)
+        assert threshold == 10.5  # 15.0 * 0.7
+
+    @pytest.mark.asyncio
+    async def test_evaluate_position_emergency_loss(self, cio_agent):
+        """Test that emergency loss triggers immediate close."""
+        from agents.cio_agent import TrackedPosition
+
+        pos = TrackedPosition(
+            symbol="AAPL",
+            quantity=100,
+            entry_price=100.0,
+            entry_time=datetime.now(timezone.utc),
+            is_long=True,
+            current_price=91.0,  # -9% loss > extended_loss_pct (8%)
+            original_conviction=0.8,
+            current_conviction=0.6,
+        )
+        pos.update_price(91.0)
+
+        decision = await cio_agent._evaluate_position_for_management(pos)
+
+        assert decision is not None
+        assert "EMERGENCY" in decision.rationale
+        assert decision.order_type.value == "market"  # Emergency uses market order
+
+    @pytest.mark.asyncio
+    async def test_evaluate_position_take_profit_with_trailing(self, cio_agent):
+        """Test take profit with trailing stop logic."""
+        from agents.cio_agent import TrackedPosition
+
+        pos = TrackedPosition(
+            symbol="MSFT",
+            quantity=50,
+            entry_price=100.0,
+            entry_time=datetime.now(timezone.utc),
+            is_long=True,
+            highest_price=120.0,  # Hit 20% peak
+            current_price=115.0,  # Now 15%, drawdown 4.2% from peak
+            original_conviction=0.7,
+            current_conviction=0.6,
+        )
+        pos.update_price(115.0)
+
+        # Should trigger take profit (15% gain > 15% target, 4.2% drawdown > 3% trailing)
+        decision = await cio_agent._evaluate_position_for_management(pos)
+
+        assert decision is not None
+        assert "Take profit" in decision.rationale
+
+    def test_get_tracked_positions(self, cio_agent):
+        """Test getting all tracked positions."""
+        cio_agent.register_position(
+            symbol="AAPL",
+            quantity=100,
+            entry_price=150.0,
+            is_long=True,
+            conviction=0.75,
+        )
+        cio_agent.register_position(
+            symbol="MSFT",
+            quantity=50,
+            entry_price=200.0,
+            is_long=False,  # Short position
+            conviction=0.65,
+        )
+
+        positions = cio_agent.get_tracked_positions()
+
+        assert len(positions) == 2
+        assert "AAPL" in positions
+        assert "MSFT" in positions
+        assert positions["AAPL"]["is_long"] is True
+        assert positions["MSFT"]["is_long"] is False
+
+    def test_position_management_in_status(self, cio_agent):
+        """Test that position management info is in status."""
+        cio_agent.register_position(
+            symbol="AAPL",
+            quantity=100,
+            entry_price=150.0,
+            is_long=True,
+            conviction=0.75,
+        )
+
+        status = cio_agent.get_status()
+
+        assert "position_management" in status
+        assert status["position_management"]["enabled"] is True
+        assert status["position_management"]["tracked_positions"] == 1
+        assert "config" in status["position_management"]
+        assert "stats" in status["position_management"]
+
+
+class TestDecisionActionEnum:
+    """Test DecisionAction enum functionality."""
+
+    def test_decision_action_values(self):
+        """Test that all decision action values are defined."""
+        from core.events import DecisionAction
+
+        assert DecisionAction.BUY.value == "buy"
+        assert DecisionAction.SELL.value == "sell"
+        assert DecisionAction.CLOSE_LOSER.value == "close_loser"
+        assert DecisionAction.TAKE_PROFIT.value == "take_profit"
+        assert DecisionAction.REDUCE_POSITION.value == "reduce_position"
+        assert DecisionAction.INCREASE_POSITION.value == "increase_position"
+        assert DecisionAction.HOLD.value == "hold"
+
+    def test_is_closing_action(self):
+        """Test is_closing_action helper method."""
+        from core.events import DecisionAction
+
+        assert DecisionAction.is_closing_action(DecisionAction.CLOSE_LOSER) is True
+        assert DecisionAction.is_closing_action(DecisionAction.TAKE_PROFIT) is True
+        assert DecisionAction.is_closing_action(DecisionAction.REDUCE_POSITION) is True
+        assert DecisionAction.is_closing_action(DecisionAction.BUY) is False
+        assert DecisionAction.is_closing_action(DecisionAction.HOLD) is False
+
+    def test_is_opening_action(self):
+        """Test is_opening_action helper method."""
+        from core.events import DecisionAction
+
+        assert DecisionAction.is_opening_action(DecisionAction.BUY) is True
+        assert DecisionAction.is_opening_action(DecisionAction.SELL) is True
+        assert DecisionAction.is_opening_action(DecisionAction.INCREASE_POSITION) is True
+        assert DecisionAction.is_opening_action(DecisionAction.CLOSE_LOSER) is False
+        assert DecisionAction.is_opening_action(DecisionAction.HOLD) is False

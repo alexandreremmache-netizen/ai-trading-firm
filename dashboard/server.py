@@ -25,7 +25,7 @@ import logging
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Coroutine, TYPE_CHECKING
@@ -46,11 +46,63 @@ from dashboard.components.agent_status import (
 # Import SignalAggregator for comprehensive signal tracking and consensus
 from dashboard.components.signal_aggregation import SignalAggregator
 
+# Import contract specs for proper price display (divide by multiplier)
+from core.contract_specs import CONTRACT_SPECS
+
+# Import Advanced Analytics components (Phase 8)
+from dashboard.components.advanced_analytics import (
+    RollingMetricsCalculator,
+    RollingPeriod,
+    SessionPerformanceTracker,
+    StrategyComparisonTracker,
+    RiskHeatmapGenerator,
+    TradeJournal,
+    SignalConsensusTracker,
+    create_all_analytics_components,
+)
+
 if TYPE_CHECKING:
     from core.event_bus import EventBus
     from core.events import Event
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def get_contract_multiplier(symbol: str) -> float:
+    """
+    Get contract multiplier for a symbol.
+
+    IB returns avg_cost as notional per contract (price × multiplier).
+    We need to divide by multiplier to show actual price.
+
+    For stocks, multiplier is 1.0.
+    For futures like CL, multiplier is 1000 (1 contract = 1000 barrels).
+
+    Args:
+        symbol: Contract symbol (e.g., "CL", "ES", "AAPL")
+
+    Returns:
+        Contract multiplier (1.0 for stocks, varies for futures)
+    """
+    # Extract base symbol (handle "ESZ4" -> "ES", "CLF25" -> "CL")
+    base_symbol = symbol.upper().strip()
+    for length in [2, 3]:
+        if len(base_symbol) >= length:
+            candidate = base_symbol[:length]
+            if candidate in CONTRACT_SPECS:
+                base_symbol = candidate
+                break
+
+    spec = CONTRACT_SPECS.get(base_symbol)
+    if spec:
+        return spec.multiplier
+
+    # Default to 1.0 for stocks and unknown symbols
+    return 1.0
 
 
 # =============================================================================
@@ -114,6 +166,11 @@ class PositionInfo:
     pnl: float = 0.0
     pnl_pct: float = 0.0
     market_value: float = 0.0
+    entry_time: datetime | None = None  # When position was opened
+    conviction: float = 0.0  # Conviction at entry
+    signal: str = ""  # Signal direction at entry (LONG/SHORT/FLAT)
+    regime: str = ""  # Market regime at entry (risk_on, risk_off, volatile, etc.)
+    session: str = ""  # Trading session at entry (Asian, London, NY, Overlap)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -125,6 +182,11 @@ class PositionInfo:
             "pnl": round(self.pnl, 2),
             "pnl_pct": round(self.pnl_pct, 2),
             "market_value": round(self.market_value, 2),
+            "entry_time": self.entry_time.isoformat() if self.entry_time else None,
+            "conviction": round(self.conviction, 2),
+            "signal": self.signal,
+            "regime": self.regime,
+            "session": self.session,
         }
 
 
@@ -164,6 +226,8 @@ class DecisionInfo:
     rationale: str
     pnl: float = 0.0
     status: str = "pending"
+    rejection_reason: str = ""  # Reason for rejection if status is REJECTED
+    estimated_value: float = 0.0  # Estimated trade value (price * quantity)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -177,6 +241,8 @@ class DecisionInfo:
             "rationale": self.rationale,
             "pnl": round(self.pnl, 2),
             "status": self.status,
+            "rejection_reason": self.rejection_reason,
+            "estimated_value": round(self.estimated_value, 2),
         }
 
 
@@ -203,8 +269,11 @@ class RiskLimit:
 @dataclass
 class Metrics:
     """Portfolio metrics for dashboard display."""
-    total_pnl: float = 0.0
-    today_pnl: float = 0.0
+    total_pnl: float = 0.0          # Total account P&L (realized + unrealized)
+    today_pnl: float = 0.0          # Today's P&L (unrealized + today's realized)
+    unrealized_pnl: float = 0.0     # Unrealized P&L from open positions
+    realized_pnl: float = 0.0       # Realized P&L from ALL closed positions
+    today_realized_pnl: float = 0.0 # Realized P&L from positions closed TODAY only
     sharpe_ratio: float = 0.0
     win_rate: float = 0.0
     drawdown: float = 0.0
@@ -215,8 +284,11 @@ class Metrics:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
-            "total_pnl": round(self.total_pnl, 2),
-            "today_pnl": round(self.today_pnl, 2),
+            "total_pnl": round(self.total_pnl, 2),              # Total = realized + unrealized
+            "today_pnl": round(self.today_pnl, 2),              # Today's running P&L
+            "unrealized_pnl": round(self.unrealized_pnl, 2),    # Open positions P&L
+            "realized_pnl": round(self.realized_pnl, 2),        # Closed positions P&L (all time)
+            "today_realized_pnl": round(self.today_realized_pnl, 2),  # Closed positions P&L (today)
             "sharpe_ratio": round(self.sharpe_ratio, 3),
             "win_rate": round(self.win_rate, 3),
             "drawdown": round(self.drawdown, 4),
@@ -224,6 +296,50 @@ class Metrics:
             "total_trades": self.total_trades,
             "avg_latency_ms": round(self.avg_latency_ms, 2),
         }
+
+
+# =============================================================================
+# Session Detection Helper
+# =============================================================================
+
+def get_current_trading_session(ts: datetime | None = None) -> str:
+    """
+    Determine the current trading session based on UTC time.
+
+    Sessions (all times UTC):
+    - Asian: 00:00-08:00 UTC (Tokyo/Sydney)
+    - London: 08:00-12:00 UTC (European open)
+    - Overlap: 12:00-17:00 UTC (London/NY overlap)
+    - NY: 17:00-21:00 UTC (US afternoon)
+    - After Hours: 21:00-00:00 UTC
+
+    Args:
+        ts: Timestamp to check, defaults to current UTC time
+
+    Returns:
+        Session name string
+    """
+    if ts is None:
+        ts = datetime.now(timezone.utc)
+
+    # Ensure we're working with UTC
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    else:
+        ts = ts.astimezone(timezone.utc)
+
+    hour = ts.hour
+
+    if 0 <= hour < 8:
+        return "Asian"
+    elif 8 <= hour < 12:
+        return "London"
+    elif 12 <= hour < 17:
+        return "Overlap"
+    elif 17 <= hour < 21:
+        return "NY"
+    else:
+        return "After Hours"
 
 
 # =============================================================================
@@ -353,8 +469,45 @@ class DashboardState:
     def __init__(self, event_bus: "EventBus | None" = None):
         self._event_bus = event_bus
 
-        # Agent tracking
+        # Agent tracking - pre-populate with all expected agents (including disabled ones)
         self._agents: dict[str, AgentInfo] = {}
+
+        # Define all expected agents (15 signal + 6 core = 21 total)
+        all_expected_agents = [
+            # Core agents
+            ("CIOAgent", "Decision"),
+            ("RiskAgent", "Validation"),
+            ("ComplianceAgent", "Validation"),
+            ("ExecutionAgent", "Execution"),
+            ("SurveillanceAgent", "Surveillance"),
+            ("TransactionReportingAgent", "Reporting"),
+            # Signal agents - Core (always enabled)
+            ("MacroAgent", "Signal"),
+            ("StatArbAgent", "Signal"),
+            ("MomentumAgent", "Signal"),
+            ("MarketMakingAgent", "Signal"),
+            # Signal agents - LLM (may be disabled)
+            ("SentimentAgent", "Signal"),
+            ("ChartAnalysisAgent", "Signal"),
+            ("ForecastingAgent", "Signal"),
+            # Signal agents - Phase 6
+            ("SessionAgent", "Signal"),
+            ("IndexSpreadAgent", "Signal"),
+            ("TTMSqueezeAgent", "Signal"),
+            ("EventDrivenAgent", "Signal"),
+            ("MeanReversionAgent", "Signal"),
+            ("MACDvAgent", "Signal"),
+        ]
+
+        # Pre-populate all agents with STOPPED status (will be updated when they start)
+        for agent_name, agent_type in all_expected_agents:
+            self._agents[agent_name] = AgentInfo(
+                name=agent_name,
+                type=agent_type,
+                status=AgentStatus.STOPPED,
+                event_count=0,
+                error_count=0,
+            )
 
         # Position tracking
         self._positions: dict[str, PositionInfo] = {}
@@ -374,26 +527,86 @@ class DashboardState:
         # Portfolio metrics
         self._metrics = Metrics()
 
-        # Equity curve data
-        self._equity_curve: deque[tuple[str, float]] = deque(maxlen=500)
+        # Equity curve data (stores ISO timestamp, value, unix_ms)
+        self._equity_curve: deque[tuple[str, float, int]] = deque(maxlen=10000)
+        # Use absolute path for equity history file
+        project_root = Path(__file__).parent.parent
+        self._equity_file_path = project_root / "logs" / "equity_history.json"
+        self._equity_save_counter = 0
+        self._load_equity_history()
 
         # Kill switch state
         self._kill_switch_active = False
 
+        # Agent enabled/disabled state (runtime toggle)
+        # Key: agent_name, Value: enabled (True/False)
+        self._agent_enabled_state: dict[str, bool] = {}
+
+        # LLM agents list (marked for cost awareness)
+        self._llm_agents = {"SentimentAgent", "ChartAnalysisAgent", "ForecastingAgent"}
+
+        # Essential agents that cannot be disabled (critical for system operation)
+        self._essential_agents = {
+            "CIOAgent",
+            "RiskAgent",
+            "ComplianceAgent",
+            "ExecutionAgent",
+            "ReconciliationAgent",
+            "SurveillanceAgent",
+        }
+
+        # Mapping from agent names to config keys for reading enabled state
+        self._agent_config_key_map = {
+            "MacroAgent": "macro",
+            "StatArbAgent": "stat_arb",
+            "MomentumAgent": "momentum",
+            "MarketMakingAgent": "market_making",
+            "SentimentAgent": "sentiment",
+            "ChartAnalysisAgent": "chart_analysis",
+            "ForecastingAgent": "forecasting",
+            "SessionAgent": "session",
+            "IndexSpreadAgent": "index_spread",
+            "TTMSqueezeAgent": "ttm_squeeze",
+            "EventDrivenAgent": "event_driven",
+            "MeanReversionAgent": "mean_reversion",
+            "MACDvAgent": "macdv",
+            "SurveillanceAgent": "surveillance",
+            "TransactionReportingAgent": "transaction_reporting",
+        }
+
         # Alerts
         self._alerts: deque[dict] = deque(maxlen=100)
 
-        # Closed positions history
-        self._closed_positions: deque[dict] = deque(maxlen=100)
+        # Closed positions history (increased capacity for full history)
+        self._closed_positions: deque[dict] = deque(maxlen=1000)
 
         # Track broker positions for closed position detection
         self._broker_positions: dict[str, dict] = {}
+
+        # Historical position metadata from audit logs (entry_time, conviction, signal)
+        self._position_history: dict[str, dict] = {}
+        self._load_position_history()
+
+        # Load historical closed positions from trades log
+        self._load_closed_positions_history()
 
         # Lock for thread safety
         self._lock = asyncio.Lock()
 
         # Latest event record for broadcasting (set by _handle_event)
         self._latest_event_record: dict | None = None
+
+        # Advanced Analytics Components (Phase 8)
+        analytics = create_all_analytics_components()
+        self._rolling_metrics: RollingMetricsCalculator = analytics["rolling_metrics"]
+        self._session_performance: SessionPerformanceTracker = analytics["session_performance"]
+        self._strategy_comparison: StrategyComparisonTracker = analytics["strategy_comparison"]
+        self._risk_heatmap: RiskHeatmapGenerator = analytics["risk_heatmap"]
+        self._trade_journal: TradeJournal = analytics["trade_journal"]
+        self._signal_consensus: SignalConsensusTracker = analytics["signal_consensus"]
+
+        # Populate analytics from closed positions history
+        self._populate_analytics_from_history()
 
         # Callback for broadcasting events to WebSocket clients
         self._broadcast_callback: Callable[[dict], None] | None = None
@@ -406,6 +619,9 @@ class DashboardState:
         self._signal_agents: list[Any] = []
         self._execution_agent: Any = None
         self._compliance_agent: Any = None
+
+        # Current market regime (updated from CIO agent events)
+        self._current_regime: str = "neutral"
 
         # Comprehensive agent status tracker for advanced health monitoring
         self._agent_tracker = AgentStatusTracker(idle_threshold_seconds=30.0)
@@ -499,27 +715,9 @@ class DashboardState:
             "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
         })
 
-        # Add sample closed positions for demo (will be replaced by real data)
-        self._closed_positions.appendleft({
-            "symbol": "GOOGL",
-            "quantity": 50,
-            "entry_price": 175.50,
-            "exit_price": 178.25,
-            "pnl": 137.50,
-            "pnl_pct": 1.57,
-            "closed_at": datetime.now(timezone.utc).isoformat(),
-            "side": "LONG",
-        })
-        self._closed_positions.appendleft({
-            "symbol": "AMZN",
-            "quantity": -25,
-            "entry_price": 185.00,
-            "exit_price": 182.50,
-            "pnl": 62.50,
-            "pnl_pct": 1.35,
-            "closed_at": datetime.now(timezone.utc).isoformat(),
-            "side": "SHORT",
-        })
+        # Historical closed positions are loaded from trades.jsonl in __init__
+        # Real-time closes are detected via broker position changes
+        logger.info(f"[CLOSED_POSITIONS] At initialize(): deque has {len(self._closed_positions)} positions")
 
         logger.info("Dashboard state initialized")
 
@@ -576,6 +774,8 @@ class DashboardState:
                     self._handle_signal_event(event)
                 elif event.event_type == EventType.DECISION:
                     self._handle_decision_event(event)
+                elif event.event_type == EventType.VALIDATED_DECISION:
+                    self._handle_validated_decision_event(event)
                 elif event.event_type == EventType.FILL:
                     self._handle_fill_event(event)
                 elif event.event_type == EventType.RISK_ALERT:
@@ -601,6 +801,9 @@ class DashboardState:
             return f"{audit_dict.get('symbol', '?')} {audit_dict.get('direction', '?')} ({audit_dict.get('confidence', 0):.0%})"
         elif event.event_type == EventType.DECISION:
             return f"{audit_dict.get('symbol', '?')} {audit_dict.get('action', '?')} x{audit_dict.get('quantity', 0)}"
+        elif event.event_type == EventType.VALIDATED_DECISION:
+            status = "APPROVED" if audit_dict.get('approved', False) else "REJECTED"
+            return f"{audit_dict.get('symbol', '?')} {status} by {event.source_agent}"
         elif event.event_type == EventType.FILL:
             return f"{audit_dict.get('symbol', '?')} filled {audit_dict.get('filled_quantity', 0)} @ {audit_dict.get('fill_price', 0):.2f}"
         elif event.event_type == EventType.RISK_ALERT:
@@ -648,6 +851,19 @@ class DashboardState:
         agent.last_event_time = event.timestamp
         agent.event_count += 1
 
+        # Calculate latency (time from event creation to now)
+        if event.timestamp:
+            now = datetime.now(timezone.utc)
+            event_time = event.timestamp
+            if event_time.tzinfo is None:
+                event_time = event_time.replace(tzinfo=timezone.utc)
+            latency = (now - event_time).total_seconds() * 1000  # ms
+            # Rolling average of latency (weighted toward recent)
+            if agent.latency_ms > 0:
+                agent.latency_ms = agent.latency_ms * 0.8 + latency * 0.2
+            else:
+                agent.latency_ms = latency
+
     def _handle_signal_event(self, event: "Event") -> None:
         """Handle signal event."""
         audit_dict = event.to_audit_dict()
@@ -665,16 +881,36 @@ class DashboardState:
     def _handle_decision_event(self, event: "Event") -> None:
         """Handle decision event."""
         audit_dict = event.to_audit_dict()
+        quantity = audit_dict.get("quantity", 0)
+        target_price = audit_dict.get("target_price") or audit_dict.get("price") or 0.0
+        estimated_value = abs(quantity) * target_price if target_price else 0.0
+
         decision = DecisionInfo(
             decision_id=event.event_id,
             symbol=audit_dict.get("symbol", ""),
             direction=audit_dict.get("action", "").upper() if audit_dict.get("action") else "HOLD",
-            quantity=audit_dict.get("quantity", 0),
+            quantity=quantity,
             conviction=audit_dict.get("conviction_score", 0.0),
             timestamp=event.timestamp,
             rationale=audit_dict.get("rationale", ""),
+            estimated_value=estimated_value,
         )
         self._decisions.appendleft(decision)
+
+    def _handle_validated_decision_event(self, event: "Event") -> None:
+        """Handle validated decision event - update decision status."""
+        audit_dict = event.to_audit_dict()
+        decision_id = audit_dict.get("original_decision_id", "")
+        approved = audit_dict.get("approved", False)
+        rejection_reason = audit_dict.get("rejection_reason", "")
+
+        # Update the status of the matching decision
+        for dec in self._decisions:
+            if dec.decision_id == decision_id:
+                dec.status = "APPROVED" if approved else "REJECTED"
+                if not approved and rejection_reason:
+                    dec.rejection_reason = rejection_reason
+                break
 
     def _handle_fill_event(self, event: "Event") -> None:
         """Handle fill event - update positions and track closed positions."""
@@ -718,19 +954,41 @@ class DashboardState:
                     "exit_price": round(fill_price, 2),
                     "pnl": round(realized_pnl, 2),
                     "pnl_pct": round((realized_pnl / (pos.entry_price * abs(old_qty))) * 100, 2) if pos.entry_price != 0 else 0,
+                    "entry_time": pos.entry_time.isoformat() if pos.entry_time else None,
                     "closed_at": event.timestamp.isoformat(),
                     "side": "LONG" if old_qty > 0 else "SHORT",
+                    "conviction": round(pos.conviction, 2) if pos.conviction else 0,
+                    "signal": pos.signal or "",
+                    # Regime/Session attribution for performance analysis
+                    "entry_regime": pos.regime or "unknown",
+                    "exit_regime": self._get_current_regime(),
+                    "entry_session": pos.session or "unknown",
+                    "exit_session": get_current_trading_session(event.timestamp),
                 })
 
                 # Remove fully closed position
                 if pos.quantity == 0:
                     del self._positions[symbol]
         else:
+            # Try to get conviction and signal from recent decisions
+            entry_conviction = 0.0
+            entry_signal = "LONG" if side == "buy" else "SHORT"
+            for dec in self._decisions:
+                if dec.symbol == symbol:
+                    entry_conviction = dec.conviction
+                    entry_signal = dec.direction
+                    break
+
             self._positions[symbol] = PositionInfo(
                 symbol=symbol,
                 quantity=fill_qty if side == "buy" else -fill_qty,
                 entry_price=fill_price,
                 current_price=fill_price,
+                entry_time=event.timestamp,
+                conviction=entry_conviction,
+                signal=entry_signal,
+                regime=self._get_current_regime(),
+                session=get_current_trading_session(event.timestamp),
             )
 
         # Update metrics
@@ -814,8 +1072,529 @@ class DashboardState:
         self._metrics.position_count = len(self._positions)
 
     def update_equity_curve(self, timestamp: str, value: float) -> None:
-        """Add a point to the equity curve."""
-        self._equity_curve.append((timestamp, value))
+        """Add a point to the equity curve with full timestamp."""
+        # Convert to full ISO timestamp if only time provided
+        now = datetime.now(timezone.utc)
+        if 'T' not in timestamp and len(timestamp) <= 8:  # HH:MM:SS format
+            iso_timestamp = now.strftime("%Y-%m-%dT") + timestamp + "Z"
+        else:
+            iso_timestamp = timestamp
+
+        # Calculate unix milliseconds
+        try:
+            if iso_timestamp.endswith('Z'):
+                dt = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
+            else:
+                dt = datetime.fromisoformat(iso_timestamp)
+            unix_ms = int(dt.timestamp() * 1000)
+        except ValueError:
+            unix_ms = int(now.timestamp() * 1000)
+
+        self._equity_curve.append((iso_timestamp, value, unix_ms))
+
+        # Save to file periodically (every 10 updates) - non-blocking
+        self._equity_save_counter += 1
+        if self._equity_save_counter >= 10:
+            self._schedule_equity_save()
+            self._equity_save_counter = 0
+
+    def _schedule_equity_save(self) -> None:
+        """Schedule equity history save to run in executor (non-blocking)."""
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, self._save_equity_history_sync)
+        except RuntimeError:
+            # No running loop (e.g., during shutdown), save synchronously
+            self._save_equity_history_sync()
+
+    def _save_equity_history_sync(self) -> None:
+        """Synchronous save method to run in executor."""
+        try:
+            self._equity_file_path.parent.mkdir(parents=True, exist_ok=True)
+            history = [
+                {"timestamp": ts, "value": val, "unix_ms": unix_ms}
+                for ts, val, unix_ms in self._equity_curve
+            ]
+            with open(self._equity_file_path, 'w') as f:
+                json.dump({"history": history, "updated": datetime.now(timezone.utc).isoformat()}, f)
+        except Exception as e:
+            logger.warning(f"Could not save equity history: {e}")
+
+    def _load_equity_history(self) -> None:
+        """Load equity history from file on startup."""
+        try:
+            if self._equity_file_path.exists():
+                with open(self._equity_file_path, 'r') as f:
+                    data = json.load(f)
+                    for item in data.get("history", []):
+                        ts = item.get("timestamp", "")
+                        val = item.get("value", 0.0)
+                        unix_ms = item.get("unix_ms", 0)
+                        self._equity_curve.append((ts, val, unix_ms))
+                logger.info(f"Loaded {len(self._equity_curve)} equity history points")
+        except Exception as e:
+            logger.warning(f"Could not load equity history: {e}")
+
+    def _load_position_history(self) -> None:
+        """Load position entry metadata from audit logs (decisions.jsonl, trades.jsonl).
+
+        This allows displaying entry_time, conviction, and signal direction for
+        positions that were opened before the current dashboard session.
+        """
+        try:
+            # Use absolute path based on project root (parent of dashboard/)
+            project_root = Path(__file__).parent.parent
+            logs_dir = project_root / "logs"
+
+            # Load from decisions.jsonl - contains conviction scores
+            decisions_file = logs_dir / "decisions.jsonl"
+            if decisions_file.exists():
+                with open(decisions_file, 'r') as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line.strip())
+                            if entry.get("entry_type") == "decision":
+                                details = entry.get("details", {})
+                                symbol = details.get("symbol", "")
+                                action = details.get("action", "")
+                                conviction = details.get("conviction_score", 0.0)
+                                timestamp = entry.get("timestamp", "")
+
+                                if symbol:
+                                    # Determine signal direction from action
+                                    signal = "LONG" if action == "buy" else "SHORT" if action == "sell" else "FLAT"
+
+                                    # Keep most recent decision per symbol
+                                    self._position_history[symbol] = {
+                                        "entry_time": timestamp,
+                                        "conviction": conviction,
+                                        "signal": signal,
+                                        "action": action,
+                                        "target_price": None,
+                                        "stop_loss": None,
+                                    }
+                        except json.JSONDecodeError:
+                            continue
+                logger.info(f"Loaded position history for {len(self._position_history)} symbols from decisions.jsonl")
+
+            # Also check trades.jsonl for actual fill times
+            trades_file = logs_dir / "trades.jsonl"
+            if trades_file.exists():
+                with open(trades_file, 'r') as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line.strip())
+                            if entry.get("entry_type") == "trade":
+                                details = entry.get("details", {})
+                                symbol = details.get("symbol", "")
+                                side = details.get("side", "")
+                                timestamp = entry.get("timestamp", "")
+
+                                if symbol and symbol in self._position_history:
+                                    # Update entry_time with actual fill time if available
+                                    self._position_history[symbol]["entry_time"] = timestamp
+                                elif symbol:
+                                    signal = "LONG" if side == "buy" else "SHORT" if side == "sell" else "FLAT"
+                                    self._position_history[symbol] = {
+                                        "entry_time": timestamp,
+                                        "conviction": 0.0,
+                                        "signal": signal,
+                                        "action": side,
+                                        "target_price": None,
+                                        "stop_loss": None,
+                                    }
+                        except json.JSONDecodeError:
+                            continue
+                logger.info(f"Updated position history with trade timestamps")
+
+            # Load TP/SL and source_agent from audit.jsonl (signal events)
+            audit_file = logs_dir / "audit.jsonl"
+            if audit_file.exists():
+                with open(audit_file, 'r') as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line.strip())
+                            if entry.get("entry_type") == "event":
+                                details = entry.get("details", {})
+                                event_type = details.get("event_type", "")
+                                if event_type == "signal":
+                                    symbol = details.get("symbol", "")
+                                    target_price = details.get("target_price")
+                                    stop_loss = details.get("stop_loss")
+                                    source_agent = details.get("source_agent", "")
+                                    direction = details.get("direction", "")
+
+                                    if symbol and symbol in self._position_history:
+                                        # Get the position's direction from stored signal
+                                        pos_signal = self._position_history[symbol].get("signal", "")
+                                        pos_action = self._position_history[symbol].get("action", "")
+
+                                        # Determine position direction (LONG or SHORT)
+                                        pos_direction = ""
+                                        if "LONG" in pos_signal.upper() or pos_action == "buy":
+                                            pos_direction = "LONG"
+                                        elif "SHORT" in pos_signal.upper() or pos_action == "sell":
+                                            pos_direction = "SHORT"
+
+                                        # Only update TP/SL if signal direction MATCHES position direction
+                                        # This prevents LONG positions from getting SHORT signal TP/SL
+                                        signal_direction = direction.upper() if direction else ""
+                                        directions_match = (
+                                            (pos_direction == "LONG" and signal_direction == "LONG") or
+                                            (pos_direction == "SHORT" and signal_direction == "SHORT")
+                                        )
+
+                                        if directions_match:
+                                            if target_price is not None:
+                                                self._position_history[symbol]["target_price"] = target_price
+                                            if stop_loss is not None:
+                                                self._position_history[symbol]["stop_loss"] = stop_loss
+                                            # Update signal with agent name and direction
+                                            if source_agent and direction:
+                                                # Format: "AgentName: DIRECTION"
+                                                agent_short = source_agent.replace("Agent", "")
+                                                self._position_history[symbol]["signal"] = f"{agent_short}: {direction.upper()}"
+                                                self._position_history[symbol]["source_agent"] = source_agent
+                        except json.JSONDecodeError:
+                            continue
+                logger.info(f"Updated position history with TP/SL and agent info from signals")
+        except Exception as e:
+            logger.warning(f"Could not load position history: {e}")
+
+    def _load_closed_positions_history(self) -> None:
+        """Load historical closed positions from trades.jsonl.
+
+        Analyzes trade history to detect position closes by tracking
+        running positions per symbol and identifying when they go to zero
+        or flip direction.
+        """
+        try:
+            # Use absolute path based on project root (parent of dashboard/)
+            project_root = Path(__file__).parent.parent
+            trades_file = project_root / "logs" / "trades.jsonl"
+            decisions_file = project_root / "logs" / "decisions.jsonl"
+            logger.info(f"[CLOSED_POSITIONS] Loading from: {trades_file}")
+            logger.info(f"[CLOSED_POSITIONS] Current deque size before load: {len(self._closed_positions)}")
+
+            if not trades_file.exists():
+                logger.warning(f"[CLOSED_POSITIONS] trades.jsonl not found at {trades_file}")
+                return
+
+            logger.info(f"[CLOSED_POSITIONS] File found, starting parse...")
+
+            # First, load decisions keyed by event_id to get agent info
+            # Key: decision_id (event_id) -> {agent, conviction, action}
+            import re
+            decision_lookup: dict[str, dict] = {}
+            if decisions_file.exists():
+                with open(decisions_file, 'r') as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line.strip())
+                            if entry.get("entry_type") != "decision":
+                                continue
+                            details = entry.get("details", {})
+                            decision_id = entry.get("event_id", "")
+                            conviction = details.get("conviction_score", 0.0)
+                            rationale = details.get("rationale", "")
+                            action = details.get("action", "")
+
+                            # Extract primary agent from rationale (e.g., "MomentumAgent (20%): short")
+                            agent_match = re.search(r'-\s*(\w+Agent)\s*\(\d+%\)', rationale)
+                            primary_agent = agent_match.group(1) if agent_match else ""
+
+                            if decision_id:
+                                decision_lookup[decision_id] = {
+                                    "agent": primary_agent,
+                                    "conviction": conviction,
+                                    "action": action,
+                                    "rationale": rationale,
+                                }
+                        except (json.JSONDecodeError, Exception):
+                            continue
+                logger.info(f"[CLOSED_POSITIONS] Loaded {len(decision_lookup)} decisions")
+
+            # Track running positions per symbol: {symbol: {"qty": int, "avg_cost": float, "decision_id": str}}
+            running_positions: dict[str, dict] = {}
+            closed_positions_raw: list[dict] = []
+
+            def get_decision_info(decision_id: str) -> dict:
+                """Get agent and conviction from decision lookup."""
+                info = decision_lookup.get(decision_id, {"agent": "", "conviction": 0.0, "action": "", "rationale": ""}).copy()
+                # If no agent found, check if it's a special decision type
+                if not info.get("agent"):
+                    rationale = info.get("rationale", "")
+                    if "EMERGENCY DELEVERAGING" in rationale:
+                        info["agent"] = "Risk"
+                        info["conviction"] = 0.0  # No signal conviction for risk decisions
+                    elif "STOP LOSS" in rationale.upper():
+                        info["agent"] = "StopLoss"
+                        info["conviction"] = 0.0
+                return info
+
+            with open(trades_file, 'r') as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line.strip())
+                        if entry.get("entry_type") != "trade":
+                            continue
+
+                        details = entry.get("details", {})
+                        symbol = details.get("symbol", "")
+                        side = details.get("side", "")
+                        quantity = details.get("quantity", 0)
+                        price = details.get("price", 0)
+                        timestamp = entry.get("timestamp", "")
+
+                        decision_id = details.get("decision_id", "")
+
+                        if not symbol or not side or quantity <= 0:
+                            continue
+
+                        # Initialize tracking for new symbol
+                        if symbol not in running_positions:
+                            running_positions[symbol] = {
+                                "qty": 0,
+                                "avg_cost": 0.0,
+                                "entry_time": None,
+                                "side": None,
+                                "decision_id": "",
+                            }
+
+                        pos = running_positions[symbol]
+                        old_qty = pos["qty"]
+
+                        # Update position
+                        if side == "buy":
+                            if pos["qty"] >= 0:
+                                # Adding to long or opening long
+                                total_cost = pos["avg_cost"] * pos["qty"] + price * quantity
+                                pos["qty"] += quantity
+                                pos["avg_cost"] = total_cost / pos["qty"] if pos["qty"] > 0 else 0
+                                if pos["entry_time"] is None:
+                                    pos["entry_time"] = timestamp
+                                    pos["side"] = "LONG"
+                                    pos["decision_id"] = decision_id
+                            else:
+                                # Covering short
+                                pos["qty"] += quantity
+                                if pos["qty"] >= 0:
+                                    # Position closed or flipped
+                                    pnl = (pos["avg_cost"] - price) * abs(old_qty)
+                                    pnl_pct = (pnl / (pos["avg_cost"] * abs(old_qty))) * 100 if pos["avg_cost"] > 0 else 0
+                                    # Get agent info from decision
+                                    dec_info = get_decision_info(pos["decision_id"])
+                                    agent_name = dec_info["agent"].replace("Agent", "") if dec_info["agent"] else ""
+                                    signal_str = f"{agent_name}: SHORT" if agent_name else "SHORT"
+                                    closed_positions_raw.append({
+                                        "symbol": symbol,
+                                        "side": "SHORT",
+                                        "signal": signal_str,
+                                        "entry_price": round(pos["avg_cost"], 2),
+                                        "exit_price": round(price, 2),
+                                        "quantity": -abs(old_qty),  # Negative for shorts
+                                        "pnl": round(pnl, 2),
+                                        "pnl_pct": round(pnl_pct, 2),
+                                        "entry_time": pos["entry_time"],
+                                        "closed_at": timestamp,
+                                        "conviction": dec_info["conviction"],
+                                        "target_price": None,
+                                        "stop_loss": None,
+                                    })
+                                    if pos["qty"] > 0:
+                                        # Flipped to long
+                                        pos["avg_cost"] = price
+                                        pos["entry_time"] = timestamp
+                                        pos["side"] = "LONG"
+                                        pos["decision_id"] = decision_id
+                                    else:
+                                        # Fully closed
+                                        pos["entry_time"] = None
+                                        pos["side"] = None
+                                        pos["decision_id"] = ""
+                        else:  # sell
+                            if pos["qty"] <= 0:
+                                # Adding to short or opening short
+                                total_cost = abs(pos["avg_cost"] * pos["qty"]) + price * quantity
+                                pos["qty"] -= quantity
+                                pos["avg_cost"] = total_cost / abs(pos["qty"]) if pos["qty"] != 0 else 0
+                                if pos["entry_time"] is None:
+                                    pos["entry_time"] = timestamp
+                                    pos["side"] = "SHORT"
+                                    pos["decision_id"] = decision_id
+                            else:
+                                # Selling long
+                                pos["qty"] -= quantity
+                                if pos["qty"] <= 0:
+                                    # Position closed or flipped
+                                    pnl = (price - pos["avg_cost"]) * old_qty
+                                    pnl_pct = (pnl / (pos["avg_cost"] * old_qty)) * 100 if pos["avg_cost"] > 0 else 0
+                                    # Get agent info from decision
+                                    dec_info = get_decision_info(pos["decision_id"])
+                                    agent_name = dec_info["agent"].replace("Agent", "") if dec_info["agent"] else ""
+                                    signal_str = f"{agent_name}: LONG" if agent_name else "LONG"
+                                    closed_positions_raw.append({
+                                        "symbol": symbol,
+                                        "side": "LONG",
+                                        "signal": signal_str,
+                                        "entry_price": round(pos["avg_cost"], 2),
+                                        "exit_price": round(price, 2),
+                                        "quantity": old_qty,
+                                        "pnl": round(pnl, 2),
+                                        "pnl_pct": round(pnl_pct, 2),
+                                        "entry_time": pos["entry_time"],
+                                        "closed_at": timestamp,
+                                        "conviction": dec_info["conviction"],
+                                        "target_price": None,
+                                        "stop_loss": None,
+                                    })
+                                    if pos["qty"] < 0:
+                                        # Flipped to short
+                                        pos["avg_cost"] = price
+                                        pos["entry_time"] = timestamp
+                                        pos["side"] = "SHORT"
+                                        pos["decision_id"] = decision_id
+                                    else:
+                                        # Fully closed
+                                        pos["entry_time"] = None
+                                        pos["side"] = None
+                                        pos["decision_id"] = ""
+
+                    except json.JSONDecodeError:
+                        continue
+                    except Exception as e:
+                        logger.debug(f"Error processing trade: {e}")
+                        continue
+
+            # Sort by close time (most recent first) and add to closed_positions
+            closed_positions_raw.sort(key=lambda x: x.get("closed_at", ""), reverse=True)
+
+            logger.info(f"[CLOSED_POSITIONS] Found {len(closed_positions_raw)} closed positions to load")
+
+            for pos in closed_positions_raw:
+                self._closed_positions.append(pos)
+
+            logger.info(f"[CLOSED_POSITIONS] Deque size after load: {len(self._closed_positions)}")
+
+            # Log first few positions for verification
+            if self._closed_positions:
+                sample = list(self._closed_positions)[:3]
+                for i, pos in enumerate(sample):
+                    logger.info(f"[CLOSED_POSITIONS] Sample {i+1}: {pos.get('symbol')} {pos.get('side')} closed_at={pos.get('closed_at')}")
+
+        except Exception as e:
+            logger.exception(f"[CLOSED_POSITIONS] Failed to load history: {e}")
+
+    def _populate_analytics_from_history(self) -> None:
+        """Populate analytics components from closed positions history.
+
+        This feeds historical trades to:
+        - RollingMetricsCalculator (for Sharpe, Sortino, drawdown)
+        - SessionPerformanceTracker (for win rate by session)
+        - StrategyComparisonTracker (for strategy performance)
+        """
+        try:
+            if not self._closed_positions:
+                logger.info("[ANALYTICS] No closed positions to populate analytics from")
+                return
+
+            # Sort positions by close time (oldest first) for proper equity curve building
+            sorted_positions = sorted(
+                self._closed_positions,
+                key=lambda x: x.get("closed_at", ""),
+                reverse=False  # Oldest first
+            )
+
+            # Build equity curve from closed positions
+            # Start with a base equity value (100k as reference)
+            base_equity = 100000.0
+            running_equity = base_equity
+            equity_points_added = 0
+
+            populated_count = 0
+            for pos in sorted_positions:
+                try:
+                    symbol = pos.get("symbol", "")
+                    pnl = pos.get("pnl", 0.0)
+
+                    # Parse entry and exit times
+                    entry_time_str = pos.get("entry_time", "")
+                    exit_time_str = pos.get("closed_at", "")
+
+                    if not entry_time_str or not exit_time_str:
+                        continue
+
+                    # Parse timestamps
+                    entry_time = datetime.fromisoformat(entry_time_str.replace("Z", "+00:00"))
+                    exit_time = datetime.fromisoformat(exit_time_str.replace("Z", "+00:00"))
+
+                    # Ensure timezone awareness
+                    if entry_time.tzinfo is None:
+                        entry_time = entry_time.replace(tzinfo=timezone.utc)
+                    if exit_time.tzinfo is None:
+                        exit_time = exit_time.replace(tzinfo=timezone.utc)
+
+                    # Update running equity and add equity point
+                    running_equity += pnl
+                    self._rolling_metrics.add_equity_point(exit_time, running_equity)
+                    equity_points_added += 1
+
+                    # Extract strategy/agent from signal field (e.g., "Momentum: LONG")
+                    signal = pos.get("signal", "")
+                    strategy = signal.split(":")[0].strip() if ":" in signal else "Unknown"
+                    if strategy and not strategy.endswith("Agent"):
+                        strategy = f"{strategy}Agent"
+
+                    # Record in rolling metrics
+                    self._rolling_metrics.add_trade({
+                        "pnl": pnl,
+                        "close_time": exit_time,
+                        "open_time": entry_time,
+                        "symbol": symbol,
+                    })
+
+                    # Record in session performance
+                    self._session_performance.record_trade(
+                        open_time=entry_time,
+                        close_time=exit_time,
+                        pnl=pnl,
+                        symbol=symbol,
+                    )
+
+                    # Calculate holding hours
+                    holding_hours = (exit_time - entry_time).total_seconds() / 3600.0
+
+                    # Record in strategy comparison
+                    self._strategy_comparison.record_trade(
+                        strategy=strategy,
+                        symbol=symbol,
+                        pnl=pnl,
+                        holding_hours=holding_hours,
+                        timestamp=exit_time,
+                    )
+
+                    populated_count += 1
+
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"[ANALYTICS] Error parsing position for analytics: {e}")
+                    continue
+
+            logger.info(f"[ANALYTICS] Populated {populated_count} trades into analytics components")
+            logger.info(f"[ANALYTICS] Added {equity_points_added} equity points for Sharpe calculation")
+
+        except Exception as e:
+            logger.exception(f"[ANALYTICS] Failed to populate analytics from history: {e}")
+
+    def get_position_metadata(self, symbol: str) -> dict:
+        """Get historical metadata for a position (entry_time, conviction, signal, TP, SL, agent)."""
+        return self._position_history.get(symbol, {
+            "entry_time": None,
+            "conviction": 0.0,
+            "signal": "",
+            "source_agent": "",
+            "target_price": None,
+            "stop_loss": None,
+        })
 
     def get_agents(self) -> list[dict]:
         """
@@ -900,7 +1679,141 @@ class DashboardState:
             self._agents.values(),
             key=lambda a: (type_order.get(a.type, 99), a.name)
         )
-        return [agent.to_dict() for agent in sorted_agents]
+
+        # Add enabled state, LLM flag, and essential flag to each agent
+        result = []
+        for agent in sorted_agents:
+            agent_dict = agent.to_dict()
+            agent_name = agent.name
+
+            # Check if this is an essential agent (cannot be disabled)
+            is_essential = agent_name in self._essential_agents
+
+            # Default enabled state: check if it's set, otherwise use orchestrator state
+            if agent_name not in self._agent_enabled_state:
+                # Essential agents are always enabled
+                if is_essential:
+                    self._agent_enabled_state[agent_name] = True
+                # Initialize from orchestrator config if available
+                elif self._orchestrator:
+                    try:
+                        agent_config = self._orchestrator._config.get("agents", {})
+                        # Use config key mapping to find the right config section
+                        config_key = self._agent_config_key_map.get(agent_name)
+                        if config_key and config_key in agent_config:
+                            cfg = agent_config[config_key]
+                            if isinstance(cfg, dict):
+                                self._agent_enabled_state[agent_name] = cfg.get("enabled", True)
+                            else:
+                                self._agent_enabled_state[agent_name] = True
+                        else:
+                            # Fallback: default to True for unknown agents
+                            self._agent_enabled_state[agent_name] = True
+                    except Exception:
+                        self._agent_enabled_state[agent_name] = True
+                else:
+                    self._agent_enabled_state[agent_name] = True
+
+            agent_dict["enabled"] = self._agent_enabled_state.get(agent_name, True)
+            agent_dict["uses_llm"] = agent_name in self._llm_agents
+            agent_dict["is_essential"] = is_essential
+            result.append(agent_dict)
+
+        return result
+
+    async def toggle_agent(self, agent_name: str, enabled: bool) -> dict:
+        """
+        Toggle an agent's enabled state at runtime.
+
+        Args:
+            agent_name: Name of the agent to toggle
+            enabled: Whether to enable (True) or disable (False) the agent
+
+        Returns:
+            Dict with the new state and any error message
+        """
+        # Check if this is an essential agent - cannot be disabled
+        if agent_name in self._essential_agents and not enabled:
+            logger.warning(f"Attempted to disable essential agent {agent_name} - rejected")
+            return {
+                "agent_name": agent_name,
+                "enabled": True,  # Essential agents stay enabled
+                "success": False,
+                "message": f"Cannot disable essential agent {agent_name} - it is required for system operation",
+                "uses_llm": agent_name in self._llm_agents,
+                "is_essential": True,
+            }
+
+        # Update the state tracking
+        self._agent_enabled_state[agent_name] = enabled
+
+        # Try to actually enable/disable the agent in the orchestrator
+        success = False
+        message = ""
+
+        if self._orchestrator:
+            try:
+                # Find the agent in signal_agents
+                for agent in self._signal_agents:
+                    if hasattr(agent, 'name') and agent.name == agent_name:
+                        if enabled:
+                            # Re-enable: start the agent
+                            if hasattr(agent, '_enabled'):
+                                agent._enabled = True
+                            if hasattr(agent, 'start') and not agent._running:
+                                await agent.start()
+                            success = True
+                            message = f"Agent {agent_name} enabled"
+                        else:
+                            # Disable: stop the agent
+                            if hasattr(agent, '_enabled'):
+                                agent._enabled = False
+                            if hasattr(agent, 'stop') and agent._running:
+                                await agent.stop()
+                            success = True
+                            message = f"Agent {agent_name} disabled"
+                        break
+
+                # Check core agents
+                for core_agent in [self._cio_agent, self._risk_agent, self._execution_agent, self._compliance_agent]:
+                    if core_agent and hasattr(core_agent, 'name') and core_agent.name == agent_name:
+                        if enabled:
+                            if hasattr(core_agent, '_enabled'):
+                                core_agent._enabled = True
+                            success = True
+                            message = f"Agent {agent_name} enabled"
+                        else:
+                            if hasattr(core_agent, '_enabled'):
+                                core_agent._enabled = False
+                            success = True
+                            message = f"Agent {agent_name} disabled (core agents cannot be fully stopped)"
+                        break
+
+                if not success:
+                    message = f"Agent {agent_name} state tracked but not found in orchestrator"
+                    success = True  # Still mark as success since we tracked the state
+
+            except Exception as e:
+                logger.exception(f"Error toggling agent {agent_name}: {e}")
+                message = f"Error: {str(e)}"
+        else:
+            message = "Orchestrator not connected, state tracked locally"
+            success = True
+
+        logger.info(f"Agent toggle: {agent_name} -> enabled={enabled}, success={success}, message={message}")
+
+        return {
+            "agent_name": agent_name,
+            "enabled": enabled,
+            "success": success,
+            "message": message,
+            "uses_llm": agent_name in self._llm_agents,
+            "is_essential": agent_name in self._essential_agents,
+        }
+
+    def get_agent_states(self) -> dict[str, bool]:
+        """Get all agent enabled states."""
+        return dict(self._agent_enabled_state)
 
     async def get_positions_async(self) -> list[dict]:
         """Get all positions from broker asynchronously."""
@@ -917,24 +1830,77 @@ class DashboardState:
                     if pos.avg_cost > 0:
                         pnl_pct = ((pos.market_value / (pos.avg_cost * pos.quantity)) - 1) * 100 if pos.quantity != 0 else 0
 
-                    current_price = pos.market_value / pos.quantity if pos.quantity != 0 else 0
+                    # IB returns avg_cost and market_value as notional (price × multiplier)
+                    # Divide by multiplier to get actual per-unit price
+                    multiplier = get_contract_multiplier(symbol)
+                    notional_per_contract = pos.market_value / pos.quantity if pos.quantity != 0 else 0
+                    entry_price_actual = pos.avg_cost / multiplier
+                    current_price_actual = notional_per_contract / multiplier
+
+                    # Get historical metadata from audit logs
+                    history = self.get_position_metadata(symbol)
+
+                    # Get TP/SL from history, or calculate defaults based on position direction
+                    target_price = history.get("target_price")
+                    stop_loss = history.get("stop_loss")
+
+                    # VALIDATION: Check if existing TP/SL makes sense for position direction
+                    # If values are inverted (from old signals with wrong direction), reset them
+                    if entry_price_actual > 0 and target_price is not None and stop_loss is not None:
+                        if pos.quantity > 0:  # LONG position
+                            # For LONG: TP must be > entry, SL must be < entry
+                            if target_price <= entry_price_actual or stop_loss >= entry_price_actual:
+                                # Inverted values - recalculate
+                                target_price = None
+                                stop_loss = None
+                        elif pos.quantity < 0:  # SHORT position
+                            # For SHORT: TP must be < entry, SL must be > entry
+                            if target_price >= entry_price_actual or stop_loss <= entry_price_actual:
+                                # Inverted values - recalculate
+                                target_price = None
+                                stop_loss = None
+
+                    # If TP/SL missing, calculate defaults based on position direction
+                    # LONG (qty > 0): TP = +4%, SL = -2%
+                    # SHORT (qty < 0): TP = -4%, SL = +2%
+                    if target_price is None and entry_price_actual > 0:
+                        if pos.quantity > 0:  # LONG
+                            target_price = entry_price_actual * 1.04
+                        elif pos.quantity < 0:  # SHORT
+                            target_price = entry_price_actual * 0.96
+
+                    if stop_loss is None and entry_price_actual > 0:
+                        if pos.quantity > 0:  # LONG
+                            stop_loss = entry_price_actual * 0.98
+                        elif pos.quantity < 0:  # SHORT
+                            stop_loss = entry_price_actual * 1.02
 
                     positions.append({
                         "symbol": symbol,
                         "quantity": pos.quantity,
-                        "entry_price": pos.avg_cost,
-                        "current_price": current_price,
+                        "entry_price": entry_price_actual,
+                        "current_price": current_price_actual,
                         "pnl": round(pos.unrealized_pnl, 2),
                         "pnl_pct": round(pnl_pct, 2),
                         "market_value": round(pos.market_value, 2),
+                        "entry_time": history.get("entry_time"),
+                        "conviction": history.get("conviction", 0),  # Raw 0-1 value, frontend converts to %
+                        "signal": history.get("signal", ""),
+                        "target_price": target_price,
+                        "stop_loss": stop_loss,
                     })
 
-                    # Track position for closed position detection
+                    # Track position for closed position detection (include historical metadata)
                     self._broker_positions[symbol] = {
                         "quantity": pos.quantity,
-                        "entry_price": pos.avg_cost,
-                        "current_price": current_price,
+                        "entry_price": entry_price_actual,
+                        "current_price": current_price_actual,
                         "pnl": round(pos.unrealized_pnl, 2),
+                        "entry_time": history.get("entry_time"),
+                        "conviction": history.get("conviction", 0),  # Raw 0-1 value
+                        "signal": history.get("signal", ""),
+                        "target_price": target_price,  # Use calculated value
+                        "stop_loss": stop_loss,  # Use calculated value
                     }
 
                 # Detect closed positions (symbols that were in previous update but not in current)
@@ -953,8 +1919,18 @@ class DashboardState:
                         "exit_price": round(prev_pos.get("current_price", entry_price), 2),
                         "pnl": round(realized_pnl, 2),
                         "pnl_pct": round((realized_pnl / (entry_price * abs(qty))) * 100, 2) if entry_price and qty else 0,
+                        "entry_time": prev_pos.get("entry_time"),
                         "closed_at": datetime.now(timezone.utc).isoformat(),
                         "side": "LONG" if qty > 0 else "SHORT",
+                        "conviction": prev_pos.get("conviction", 0),
+                        "signal": prev_pos.get("signal", ""),
+                        "target_price": prev_pos.get("target_price"),
+                        "stop_loss": prev_pos.get("stop_loss"),
+                        # Regime/Session attribution for performance analysis
+                        "entry_regime": prev_pos.get("regime", "unknown"),
+                        "exit_regime": self._get_current_regime(),
+                        "entry_session": prev_pos.get("session", "unknown"),
+                        "exit_session": get_current_trading_session(),
                     })
                     logger.info(f"Position closed: {symbol} qty={qty} P&L={realized_pnl}")
 
@@ -988,26 +1964,50 @@ class DashboardState:
         """
         metrics = self._metrics.to_dict()
 
-        # If positions provided, calculate P&L from them (ensures consistency with display)
+        # Calculate realized P&L from ALL closed positions
+        realized_pnl = sum(pos.get("pnl", 0) for pos in self._closed_positions)
+        metrics["realized_pnl"] = round(realized_pnl, 2)
+
+        # Calculate TODAY's realized P&L (only positions closed today)
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_realized_pnl = 0.0
+        for pos in self._closed_positions:
+            closed_at_str = pos.get("closed_at", "")
+            if closed_at_str:
+                try:
+                    closed_at = datetime.fromisoformat(closed_at_str.replace("Z", "+00:00"))
+                    if closed_at >= today_start:
+                        today_realized_pnl += pos.get("pnl", 0)
+                except (ValueError, TypeError):
+                    pass
+
+        # If positions provided, calculate unrealized P&L from them
+        unrealized_pnl = 0.0
         if positions:
-            total_pnl = sum(pos.get("pnl", 0) for pos in positions)
-            metrics["total_pnl"] = round(total_pnl, 2)
+            unrealized_pnl = sum(pos.get("pnl", 0) for pos in positions)
+            metrics["unrealized_pnl"] = round(unrealized_pnl, 2)
+            metrics["total_pnl"] = round(unrealized_pnl + realized_pnl, 2)  # Total = open + closed
             metrics["position_count"] = len(positions)
+
+        # Today's P&L = unrealized (current open) + realized from today's closed positions
+        metrics["today_pnl"] = round(unrealized_pnl + today_realized_pnl, 2)
+        metrics["today_realized_pnl"] = round(today_realized_pnl, 2)
 
         # Try to get real metrics from broker
         if self._broker and hasattr(self._broker, 'is_connected') and self._broker.is_connected:
             try:
                 portfolio_state = await self._broker.get_portfolio_state()
 
-                # Update with real data
-                metrics["today_pnl"] = round(portfolio_state.daily_pnl, 2)
-
                 # Only use broker P&L if we didn't get positions passed in
                 if not positions:
                     metrics["position_count"] = len(portfolio_state.positions)
-                    # Calculate total unrealized P&L
-                    total_pnl = sum(pos.unrealized_pnl for pos in portfolio_state.positions.values())
-                    metrics["total_pnl"] = round(total_pnl, 2)
+                    # Calculate unrealized P&L from open positions
+                    unrealized_pnl = sum(pos.unrealized_pnl for pos in portfolio_state.positions.values())
+                    metrics["unrealized_pnl"] = round(unrealized_pnl, 2)
+                    # Total P&L = unrealized (open) + realized (closed)
+                    metrics["total_pnl"] = round(unrealized_pnl + realized_pnl, 2)
+                    # Today's P&L = unrealized (current) + today's realized
+                    metrics["today_pnl"] = round(unrealized_pnl + today_realized_pnl, 2)
 
             except Exception as e:
                 logger.warning(f"Error getting metrics from broker: {e}")
@@ -1021,6 +2021,26 @@ class DashboardState:
                     metrics["drawdown"] = round(risk_state.get("max_drawdown_pct", 0), 4)
             except Exception as e:
                 logger.warning(f"Error getting metrics from risk agent: {e}")
+
+        # Calculate win rate and other metrics from closed positions
+        if self._closed_positions:
+            closed_list = list(self._closed_positions)
+            metrics["total_trades"] = len(closed_list)
+
+            # Win rate calculation
+            winning_trades = [pos for pos in closed_list if pos.get("pnl", 0) > 0]
+            metrics["win_rate"] = round(len(winning_trades) / len(closed_list), 3) if closed_list else 0.0
+
+        # Get Sharpe ratio and drawdown from rolling metrics calculator (which has been populated from history)
+        try:
+            rolling_metrics = self._rolling_metrics.calculate_metrics(RollingPeriod.MONTH_1)
+            if rolling_metrics.sharpe_ratio is not None:
+                metrics["sharpe_ratio"] = round(rolling_metrics.sharpe_ratio, 3)
+            # Use drawdown from rolling metrics if not available from risk agent
+            if metrics.get("drawdown", 0) == 0 and rolling_metrics.max_drawdown_pct > 0:
+                metrics["drawdown"] = round(rolling_metrics.max_drawdown_pct / 100, 4)  # Convert % to decimal
+        except Exception as e:
+            logger.debug(f"Could not get metrics from rolling metrics calculator: {e}")
 
         return metrics
 
@@ -1109,13 +2129,46 @@ class DashboardState:
         return [limit.to_dict() for limit in self._risk_limits.values()]
 
     def get_equity_curve(self) -> dict:
-        """Get equity curve data."""
+        """Get equity curve data with timestamps for filtering."""
         labels = []
         values = []
-        for ts, val in self._equity_curve:
-            labels.append(ts)
-            values.append(val)
-        return {"labels": labels, "values": values}
+        timestamps = []
+        for item in self._equity_curve:
+            # Handle both old 2-tuple and new 3-tuple format
+            if len(item) == 3:
+                ts, val, unix_ms = item
+                # Format label for display (convert UTC to local time)
+                try:
+                    if 'T' in ts:
+                        dt_utc = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                        # Convert to local time for display
+                        dt_local = dt_utc.astimezone()
+                        labels.append(dt_local.strftime("%H:%M"))
+                    else:
+                        labels.append(ts[:5] if len(ts) >= 5 else ts)
+                except ValueError:
+                    labels.append(ts[:5] if len(ts) >= 5 else ts)
+                values.append(val)
+                timestamps.append(unix_ms)
+            else:
+                ts, val = item
+                labels.append(ts[:5] if len(ts) >= 5 else ts)
+                values.append(val)
+                # Fallback timestamp calculation
+                try:
+                    if 'T' in ts:
+                        dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                    else:
+                        today = datetime.now(timezone.utc).date()
+                        time_parts = ts.split(':')
+                        dt = datetime(today.year, today.month, today.day,
+                                      int(time_parts[0]), int(time_parts[1]),
+                                      int(time_parts[2]) if len(time_parts) > 2 else 0,
+                                      tzinfo=timezone.utc)
+                    timestamps.append(int(dt.timestamp() * 1000))
+                except (ValueError, IndexError):
+                    timestamps.append(int(datetime.now(timezone.utc).timestamp() * 1000))
+        return {"labels": labels, "values": values, "timestamps": timestamps}
 
     def get_events(self) -> list[dict]:
         """Get recent events."""
@@ -1125,9 +2178,166 @@ class DashboardState:
         """Get recent alerts."""
         return list(self._alerts)
 
+    def _get_current_regime(self) -> str:
+        """
+        Get the current market regime from CIO agent or default.
+
+        Returns:
+            Current regime string (e.g., 'risk_on', 'risk_off', 'volatile', etc.)
+        """
+        # Try to get regime from CIO agent if available
+        if self._cio_agent is not None:
+            try:
+                if hasattr(self._cio_agent, '_current_regime'):
+                    regime = self._cio_agent._current_regime
+                    if hasattr(regime, 'value'):
+                        return regime.value
+                    return str(regime)
+            except Exception:
+                pass
+
+        return self._current_regime
+
+    def update_regime(self, regime: str) -> None:
+        """Update the current market regime (called by orchestrator or CIO agent)."""
+        self._current_regime = regime
+
     def get_closed_positions(self) -> list[dict]:
         """Get recently closed positions with realized P&L."""
-        return list(self._closed_positions)
+        result = list(self._closed_positions)
+        logger.debug(f"[CLOSED_POSITIONS] get_closed_positions() returning {len(result)} positions")
+        return result
+
+    # =========================================================================
+    # Advanced Analytics Getters (Phase 8)
+    # =========================================================================
+
+    def get_rolling_metrics(self) -> dict:
+        """Get rolling Sharpe/Sortino ratios across time periods."""
+        return self._rolling_metrics.get_all_periods()
+
+    def get_session_performance(self) -> dict:
+        """Get performance breakdown by trading session."""
+        return self._session_performance.get_all_sessions()
+
+    def get_strategy_comparison(self) -> dict:
+        """Get all strategy performance data."""
+        return self._strategy_comparison.get_all_strategies()
+
+    def get_strategy_ranking(self) -> list[dict]:
+        """Get strategies ranked by specified metric."""
+        ranking = self._strategy_comparison.get_ranking(metric="total_pnl")
+        return ranking[:10]  # Limit to top 10
+
+    def get_risk_heatmap(self) -> list[dict]:
+        """Get risk heatmap data for all positions."""
+        # Build positions list from current positions
+        positions = []
+        for symbol, pos in self._positions.items():
+            if pos.get("quantity", 0) != 0:
+                entry_price = pos.get("entry_price", pos.get("avg_price", 100))
+                quantity = abs(pos.get("quantity", 0))
+                current_price = pos.get("current_price", entry_price)
+                positions.append({
+                    "symbol": symbol,
+                    "value": abs(quantity * current_price),
+                    "var_contribution": pos.get("var_contribution", 5.0),
+                    "entry_date": pos.get("entry_time", datetime.now(timezone.utc) - timedelta(days=1)),
+                })
+
+        # Get portfolio value from latest equity point or default
+        portfolio_value = 100000
+        if self._equity_curve:
+            _, latest_equity, _ = self._equity_curve[-1]
+            portfolio_value = latest_equity if latest_equity > 0 else 100000
+        return self._risk_heatmap.get_heatmap_data(positions, portfolio_value)
+
+    def get_signal_consensus(self) -> dict:
+        """Get signal consensus data for all symbols."""
+        result = {}
+        for symbol in self._signal_consensus.get_all_symbols():
+            consensus = self._signal_consensus.get_consensus(symbol)
+            if consensus:
+                result[symbol] = consensus
+        return result
+
+    def get_high_disagreement_alerts(self) -> list[dict]:
+        """Get alerts for symbols with high signal disagreement."""
+        return self._signal_consensus.get_high_disagreement_alerts()
+
+    def get_trade_journal_entries(self, limit: int = 50) -> list[dict]:
+        """Get recent trade journal entries."""
+        return self._trade_journal.get_entries(limit=limit)
+
+    def get_trade_quality_stats(self) -> dict:
+        """Get trade quality statistics."""
+        return self._trade_journal.get_quality_stats()
+
+    def record_trade_for_analytics(
+        self,
+        symbol: str,
+        strategy: str,
+        pnl: float,
+        entry_time: datetime,
+        exit_time: datetime,
+    ) -> None:
+        """Record a completed trade in analytics systems."""
+        # Record in rolling metrics (uses add_trade with dict)
+        self._rolling_metrics.add_trade({
+            "pnl": pnl,
+            "close_time": exit_time,
+            "open_time": entry_time,
+            "symbol": symbol,
+        })
+
+        # Record in session performance (uses record_trade with open_time, close_time, pnl, symbol)
+        self._session_performance.record_trade(
+            open_time=entry_time,
+            close_time=exit_time,
+            pnl=pnl,
+            symbol=symbol,
+        )
+
+        # Calculate holding hours for strategy comparison
+        holding_hours = (exit_time - entry_time).total_seconds() / 3600.0 if entry_time and exit_time else 0
+
+        # Record in strategy comparison (uses record_trade with strategy, symbol, pnl, holding_hours, timestamp)
+        self._strategy_comparison.record_trade(
+            strategy=strategy,
+            symbol=symbol,
+            pnl=pnl,
+            holding_hours=holding_hours,
+            timestamp=exit_time,
+        )
+
+    def record_signal_for_analytics(
+        self,
+        symbol: str,
+        agent: str,
+        direction: str,
+        confidence: float,
+    ) -> None:
+        """Record a signal in analytics systems."""
+        # Record in signal consensus
+        self._signal_consensus.record_signal(symbol, agent, direction, confidence)
+
+        # Record in strategy comparison
+        self._strategy_comparison.record_signal(agent, symbol, direction, confidence)
+
+    def update_position_risk(
+        self,
+        symbol: str,
+        position_value: float,
+        var_contribution: float,
+        portfolio_weight: float,
+    ) -> None:
+        """Update position risk data for heatmap."""
+        self._risk_heatmap.update_position(
+            symbol=symbol,
+            position_value=position_value,
+            var_contribution=var_contribution,
+            portfolio_weight=portfolio_weight,
+        )
 
     def is_kill_switch_active(self) -> bool:
         """Check if kill switch is active."""
@@ -1409,16 +2619,63 @@ class DashboardServer:
         @app.get("/api/status")
         async def get_status():
             """Get full dashboard status."""
+            # Fetch positions from broker asynchronously
+            positions = await self._state.get_positions_async()
+            # Get metrics with position data for consistent P&L calculation
+            metrics = await self._state.get_metrics_async(positions)
             return JSONResponse({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "metrics": self._state.get_metrics(),
+                "metrics": metrics,
                 "agents": self._state.get_agents(),
-                "positions": self._state.get_positions(),
+                "positions": positions,
                 "signals": self._state.get_signals(),
                 "risk": {
                     "limits": self._state.get_risk_limits(),
                     "kill_switch_active": self._state.is_kill_switch_active(),
                 },
+            })
+
+        # =================================================================
+        # Advanced Analytics Endpoints (Phase 8)
+        # =================================================================
+
+        @app.get("/api/analytics/rolling-metrics")
+        async def get_rolling_metrics():
+            """Get rolling Sharpe/Sortino ratios across time periods."""
+            return JSONResponse({"rolling_metrics": self._state.get_rolling_metrics()})
+
+        @app.get("/api/analytics/session-performance")
+        async def get_session_performance():
+            """Get performance breakdown by trading session."""
+            return JSONResponse({"session_performance": self._state.get_session_performance()})
+
+        @app.get("/api/analytics/strategy-comparison")
+        async def get_strategy_comparison():
+            """Get strategy performance comparison and rankings."""
+            return JSONResponse({
+                "strategies": self._state.get_strategy_comparison(),
+                "ranking": self._state.get_strategy_ranking(),
+            })
+
+        @app.get("/api/analytics/risk-heatmap")
+        async def get_risk_heatmap():
+            """Get risk heatmap data for positions."""
+            return JSONResponse({"risk_heatmap": self._state.get_risk_heatmap()})
+
+        @app.get("/api/analytics/signal-consensus")
+        async def get_signal_consensus():
+            """Get signal consensus and disagreement data."""
+            return JSONResponse({
+                "consensus": self._state.get_signal_consensus(),
+                "high_disagreement": self._state.get_high_disagreement_alerts(),
+            })
+
+        @app.get("/api/analytics/trade-journal")
+        async def get_trade_journal():
+            """Get trade journal entries."""
+            return JSONResponse({
+                "entries": self._state.get_trade_journal_entries(),
+                "quality_stats": self._state.get_trade_quality_stats(),
             })
 
         # =================================================================
@@ -1431,25 +2688,54 @@ class DashboardServer:
             await self._connection_manager.connect(websocket)
 
             try:
+                # CRITICAL FIX: Wrap broker data fetching in try-except to handle disconnects
                 # Send initial state (use async methods for broker data)
                 # Fetch positions first, then calculate metrics from them for consistency
-                initial_positions = await self._state.get_positions_async()
-                initial_metrics = await self._state.get_metrics_async(positions=initial_positions)
+                initial_positions = []
+                initial_metrics = {}
+                broker_error = None
+
+                try:
+                    initial_positions = await self._state.get_positions_async()
+                    initial_metrics = await self._state.get_metrics_async(positions=initial_positions)
+                except Exception as e:
+                    logger.warning(f"Error fetching broker data for initial state: {e}")
+                    broker_error = str(e)
+                    # Use empty defaults - client will see loading skeleton
+                    initial_positions = []
+                    initial_metrics = {
+                        "total_pnl": 0, "today_pnl": 0, "unrealized_pnl": 0,
+                        "realized_pnl": 0, "sharpe_ratio": 0, "win_rate": 0,
+                        "drawdown": 0, "position_count": 0
+                    }
+
+                initial_payload = {
+                    "metrics": initial_metrics,
+                    "agents": self._state.get_agents(),
+                    "positions": initial_positions,
+                    "closed_positions": self._state.get_closed_positions(),
+                    "signals": self._state.get_signals(),
+                    "decisions": self._state.get_decisions(),
+                    "alerts": self._state.get_alerts(),
+                    "risk": {
+                        "limits": self._state.get_risk_limits(),
+                    },
+                    "equity": self._state.get_equity_curve(),
+                    # Advanced analytics data (Phase 8)
+                    "rolling_metrics": self._state.get_rolling_metrics(),
+                    "session_performance": self._state.get_session_performance(),
+                    "strategy_comparison": self._state.get_strategy_comparison(),
+                    "strategy_ranking": self._state.get_strategy_ranking(),
+                    "signal_consensus": self._state.get_signal_consensus(),
+                }
+
+                # Add broker error indicator if there was a problem
+                if broker_error:
+                    initial_payload["broker_error"] = broker_error
+
                 await websocket.send_json({
                     "type": "initial",
-                    "payload": {
-                        "metrics": initial_metrics,
-                        "agents": self._state.get_agents(),
-                        "positions": initial_positions,
-                        "closed_positions": self._state.get_closed_positions(),
-                        "signals": self._state.get_signals(),
-                        "decisions": self._state.get_decisions(),
-                        "alerts": self._state.get_alerts(),
-                        "risk": {
-                            "limits": self._state.get_risk_limits(),
-                        },
-                        "equity": self._state.get_equity_curve(),
-                    }
+                    "payload": initial_payload
                 })
 
                 # Listen for client messages (e.g., kill switch commands)
@@ -1475,6 +2761,50 @@ class DashboardServer:
                 "kill_switch_active": active,
             })
 
+        @app.post("/api/agent/toggle")
+        async def toggle_agent(agent_name: str, enabled: bool):
+            """
+            Toggle an agent's enabled state at runtime.
+
+            Args:
+                agent_name: Name of the agent to toggle
+                enabled: Whether to enable (True) or disable (False)
+
+            Returns:
+                JSON response with the result
+            """
+            result = await self._state.toggle_agent(agent_name, enabled)
+
+            # Broadcast agent state change to all clients
+            await self._connection_manager.broadcast({
+                "type": "agent_toggle",
+                "payload": result
+            })
+
+            # Also broadcast an alert
+            action_word = "enabled" if enabled else "disabled"
+            llm_warning = " (LLM agent - uses API tokens)" if result.get("uses_llm") else ""
+            await self._connection_manager.broadcast({
+                "type": "alert",
+                "payload": {
+                    "title": "Agent Toggle",
+                    "message": f"Agent {agent_name} {action_word}{llm_warning}",
+                    "severity": "info" if enabled else "warning",
+                    "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                }
+            })
+
+            return JSONResponse(result)
+
+        @app.get("/api/agent/states")
+        async def get_agent_states():
+            """Get all agent enabled/disabled states."""
+            return JSONResponse({
+                "states": self._state.get_agent_states(),
+                "llm_agents": list(self._state._llm_agents),
+                "essential_agents": list(self._state._essential_agents),
+            })
+
     async def _handle_client_message(self, data: dict) -> None:
         """Handle incoming WebSocket messages from clients."""
         action = data.get("action")
@@ -1494,6 +2824,32 @@ class DashboardServer:
                     "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
                 }
             })
+
+        elif action == "toggle_agent":
+            agent_name = data.get("agent_name")
+            enabled = data.get("enabled", True)
+            if agent_name:
+                result = await self._state.toggle_agent(agent_name, enabled)
+                logger.info(f"Agent toggled via WebSocket: {agent_name} -> enabled={enabled}")
+
+                # Broadcast agent state change
+                await self._connection_manager.broadcast({
+                    "type": "agent_toggle",
+                    "payload": result
+                })
+
+                # Broadcast alert
+                action_word = "enabled" if enabled else "disabled"
+                llm_warning = " (LLM agent)" if result.get("uses_llm") else ""
+                await self._connection_manager.broadcast({
+                    "type": "alert",
+                    "payload": {
+                        "title": "Agent Toggle",
+                        "message": f"{agent_name} {action_word}{llm_warning}",
+                        "severity": "info" if enabled else "warning",
+                        "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                    }
+                })
 
     async def _startup(self) -> None:
         """Handle server startup."""

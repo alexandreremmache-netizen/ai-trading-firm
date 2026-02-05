@@ -10,7 +10,14 @@ from agents.macro_agent import MacroAgent
 from agents.stat_arb_agent import StatArbAgent
 from agents.momentum_agent import MomentumAgent
 from agents.market_making_agent import MarketMakingAgent
-from agents.options_vol_agent import OptionsVolAgent
+from agents.macdv_agent import MACDvAgent
+# Phase 6 agents
+from agents.session_agent import SessionAgent
+from agents.index_spread_agent import IndexSpreadAgent
+from agents.ttm_squeeze_agent import TTMSqueezeAgent
+from agents.event_driven_agent import EventDrivenAgent
+from agents.mean_reversion_agent import MeanReversionAgent
+# Core agents
 from agents.cio_agent import CIOAgent
 from agents.risk_agent import RiskAgent
 from agents.compliance_agent import ComplianceAgent
@@ -25,7 +32,13 @@ __all__ = [
     "StatArbAgent",
     "MomentumAgent",
     "MarketMakingAgent",
-    "OptionsVolAgent",
+    "MACDvAgent",
+    # Phase 6 Signal Agents
+    "SessionAgent",
+    "IndexSpreadAgent",
+    "TTMSqueezeAgent",
+    "EventDrivenAgent",
+    "MeanReversionAgent",
     # Decision Agent (single authority per CLAUDE.md)
     "CIOAgent",
     # Validation Agents (sequential after CIO)

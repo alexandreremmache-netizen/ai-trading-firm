@@ -138,6 +138,9 @@ class StatArbAgent(SignalAgent):
         self._min_pair_quality = config.parameters.get("min_pair_quality_score", 0.4)
         self._pair_ranking_enabled = config.parameters.get("pair_ranking_enabled", True)
 
+        # Minimum confidence threshold for signal generation
+        self._min_confidence = config.parameters.get("min_confidence", 0.75)
+
         # Correlation divergence detection (MoonDev-inspired)
         self._divergence_enabled = config.parameters.get("divergence_enabled", True)
         self._divergence_pairs = config.parameters.get("divergence_pairs", [
@@ -208,8 +211,13 @@ class StatArbAgent(SignalAgent):
                 if signal:
                     signals.append(signal)
 
-        # Publish signals
+        # Publish signals (filter by confidence threshold)
         for signal in signals:
+            if signal.confidence < self._min_confidence:
+                logger.debug(
+                    f"Signal filtered: confidence {signal.confidence:.2f} < threshold {self._min_confidence}"
+                )
+                continue
             await self._event_bus.publish_signal(signal)
             self._audit_logger.log_event(signal)
 
@@ -230,6 +238,8 @@ class StatArbAgent(SignalAgent):
                         confidence=0.3,
                         rationale=f"Pair {pair_key} monitoring: data={data_status}, zscore={pair_state.zscore:.2f}",
                         data_sources=("ib_market_data", "stat_arb_indicator"),
+                        target_price=None,
+                        stop_loss=None,
                     )
                     await self._event_bus.publish_signal(neutral_signal)
                     break  # Only need one signal per event
@@ -244,6 +254,11 @@ class StatArbAgent(SignalAgent):
         if self._divergence_enabled:
             div_signals = await self._check_divergence_signals(symbol, price)
             for div_signal in div_signals:
+                if div_signal.confidence < self._min_confidence:
+                    logger.debug(
+                        f"Divergence signal filtered: confidence {div_signal.confidence:.2f} < threshold {self._min_confidence}"
+                    )
+                    continue
                 await self._event_bus.publish_signal(div_signal)
                 self._audit_logger.log_event(div_signal)
 
@@ -347,6 +362,11 @@ class StatArbAgent(SignalAgent):
         if zscore > self._zscore_entry and current_signal != SignalDirection.SHORT:
             # Spread too high - short A, long B
             pair_state.last_signal = SignalDirection.SHORT
+            # Calculate stop_loss and target_price based on spread
+            # For SHORT: spread should decrease, so target is lower, stop is higher
+            current_spread = list(pair_state.spread_history)[-1] if pair_state.spread_history else 0
+            stop_loss_spread = current_spread * 1.02  # 2% above (adverse move)
+            target_spread = current_spread * 0.96  # 4% below (favorable move)
             return SignalEvent(
                 source_agent=self.name,
                 strategy_name="stat_arb_pairs",
@@ -354,7 +374,8 @@ class StatArbAgent(SignalAgent):
                 direction=SignalDirection.SHORT,
                 strength=-min(1.0, zscore / 3.0),
                 confidence=max(0.1, self._calculate_confidence(zscore, pair_state) - confidence_penalty),
-                target_price=None,
+                target_price=target_spread,
+                stop_loss=stop_loss_spread,
                 rationale=(
                     f"Pair {pair_key} spread z-score={zscore:.2f} > {self._zscore_entry}. "
                     f"Short {pair_state.symbol_a}, Long {pair_state.symbol_b}. "
@@ -366,6 +387,11 @@ class StatArbAgent(SignalAgent):
         elif zscore < -self._zscore_entry and current_signal != SignalDirection.LONG:
             # Spread too low - long A, short B
             pair_state.last_signal = SignalDirection.LONG
+            # Calculate stop_loss and target_price based on spread
+            # For LONG: spread should increase, so target is higher, stop is lower
+            current_spread = list(pair_state.spread_history)[-1] if pair_state.spread_history else 0
+            stop_loss_spread = current_spread * 0.98  # 2% below (adverse move)
+            target_spread = current_spread * 1.04  # 4% above (favorable move)
             return SignalEvent(
                 source_agent=self.name,
                 strategy_name="stat_arb_pairs",
@@ -373,7 +399,8 @@ class StatArbAgent(SignalAgent):
                 direction=SignalDirection.LONG,
                 strength=min(1.0, abs(zscore) / 3.0),
                 confidence=max(0.1, self._calculate_confidence(zscore, pair_state) - confidence_penalty),
-                target_price=None,
+                target_price=target_spread,
+                stop_loss=stop_loss_spread,
                 rationale=(
                     f"Pair {pair_key} spread z-score={zscore:.2f} < -{self._zscore_entry}. "
                     f"Long {pair_state.symbol_a}, Short {pair_state.symbol_b}. "
@@ -394,6 +421,8 @@ class StatArbAgent(SignalAgent):
                 confidence=0.8,
                 rationale=f"Pair {pair_key} spread reverted, z-score={zscore:.2f}. Exit position.",
                 data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+                target_price=None,
+                stop_loss=None,
             )
 
         return None
@@ -973,6 +1002,8 @@ class StatArbAgent(SignalAgent):
                         f"Z-score={state.divergence_zscore:.2f}, corr={state.current_correlation:.2f}"
                     ),
                     data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+                    target_price=None,
+                    stop_loss=None,
                 )
             return None
 
@@ -986,6 +1017,12 @@ class StatArbAgent(SignalAgent):
                 confidence = min(0.85, 0.5 + abs_zscore * 0.1)
                 if correlation_dropped:
                     confidence = min(0.9, confidence + 0.1)  # Higher confidence on correlation breakdown
+
+                # Calculate stop_loss and target_price based on divergence z-score
+                # For SHORT: divergence should decrease, target is lower z-score, stop is higher
+                current_div = state.divergence_zscore
+                stop_loss_div = current_div * 1.02  # 2% above (adverse move)
+                target_div = current_div * 0.96  # 4% below (favorable move)
 
                 return SignalEvent(
                     source_agent=self.name,
@@ -1001,6 +1038,8 @@ class StatArbAgent(SignalAgent):
                         f"Strategy: Short {state.symbol_a}, Long {state.symbol_b}"
                     ),
                     data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+                    target_price=target_div,
+                    stop_loss=stop_loss_div,
                 )
 
         elif state.divergence_zscore < -self._divergence_threshold:
@@ -1012,6 +1051,12 @@ class StatArbAgent(SignalAgent):
                 confidence = min(0.85, 0.5 + abs_zscore * 0.1)
                 if correlation_dropped:
                     confidence = min(0.9, confidence + 0.1)
+
+                # Calculate stop_loss and target_price based on divergence z-score
+                # For LONG: divergence should increase (less negative), target is higher z-score, stop is lower
+                current_div = state.divergence_zscore
+                stop_loss_div = current_div * 1.02  # 2% more negative (adverse move)
+                target_div = current_div * 0.96  # 4% less negative (favorable move)
 
                 return SignalEvent(
                     source_agent=self.name,
@@ -1027,6 +1072,8 @@ class StatArbAgent(SignalAgent):
                         f"Strategy: Long {state.symbol_a}, Short {state.symbol_b}"
                     ),
                     data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+                    target_price=target_div,
+                    stop_loss=stop_loss_div,
                 )
 
         return None

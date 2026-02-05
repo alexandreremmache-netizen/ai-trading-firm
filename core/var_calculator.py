@@ -52,6 +52,21 @@ class VaRMethod(Enum):
     MONTE_CARLO = "monte_carlo"
 
 
+class VolatilityRegime(Enum):
+    """
+    Volatility regime classification for regime-conditional VaR (Phase 2).
+
+    Based on VIX levels and research findings:
+    - Low vol periods often precede corrections (complacency)
+    - High vol reduces VaR predictive accuracy
+    - Crisis regimes require correlation adjustments
+    """
+    LOW = "low"          # VIX < 15 - complacency, tighter estimates
+    NORMAL = "normal"    # VIX 15-20 - standard parameters
+    HIGH = "high"        # VIX 20-30 - increased uncertainty
+    CRISIS = "crisis"    # VIX > 30 - correlation breakdown
+
+
 @dataclass
 class VaRResult:
     """Result of VaR calculation."""
@@ -75,6 +90,44 @@ class VaRResult:
             "expected_shortfall": self.expected_shortfall,
             "timestamp": self.timestamp.isoformat(),
             "details": self.details,
+        }
+
+
+@dataclass
+class RegimeConditionalVaRResult:
+    """
+    Result of regime-conditional VaR calculation (Phase 2).
+
+    Provides VaR adjusted for current volatility regime with:
+    - Regime-specific volatility scaling
+    - Correlation floor adjustments
+    - Confidence level adjustments
+    """
+    base_var: VaRResult
+    regime: VolatilityRegime
+    regime_adjusted_var: float
+    regime_adjusted_es: float | None
+    volatility_multiplier: float
+    correlation_floor: float | None
+    confidence_adjustment: float
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "base_var": self.base_var.to_dict(),
+            "regime": self.regime.value,
+            "regime_adjusted_var": self.regime_adjusted_var,
+            "regime_adjusted_es": self.regime_adjusted_es,
+            "volatility_multiplier": self.volatility_multiplier,
+            "correlation_floor": self.correlation_floor,
+            "confidence_adjustment": self.confidence_adjustment,
+            "timestamp": self.timestamp.isoformat(),
+            "var_increase_pct": (
+                (self.regime_adjusted_var - self.base_var.var_absolute)
+                / self.base_var.var_absolute * 100
+                if self.base_var.var_absolute > 0 else 0
+            ),
         }
 
 
@@ -688,13 +741,62 @@ class VaRCalculator:
         cov_matrix = self._build_covariance_matrix()
 
         # Step 2: Build position weights vector (w_i = position_value_i / total_value)
+        # CRITICAL: Validate portfolio_value to prevent division by zero
+        if portfolio_value <= 0:
+            logger.warning(f"VaR calculation skipped: portfolio_value={portfolio_value} is <= 0")
+            return VaRResult(
+                method=VaRMethod.PARAMETRIC,
+                confidence_level=confidence_level,
+                horizon_days=horizon_days,
+                var_absolute=0.0,
+                var_pct=0.0,
+                expected_shortfall=0.0,
+                details={"error": "invalid_portfolio_value", "portfolio_value": portfolio_value},
+            )
+
         symbols = self._symbols
         weights = np.array([positions.get(s, 0) / portfolio_value for s in symbols])
 
         # Step 3: Calculate portfolio variance using matrix form: Var(Rp) = w' * Cov * w
         # This captures all pairwise correlations between positions
+
+        # Validate array shapes to prevent dimension mismatch crashes
+        if len(weights) == 0:
+            logger.warning("VaR calculation skipped: no position weights available")
+            return VaRResult(
+                method=VaRMethod.PARAMETRIC,
+                confidence_level=confidence_level,
+                horizon_days=horizon_days,
+                var_absolute=0.0,
+                var_pct=0.0,
+                expected_shortfall=0.0,
+                details={"error": "no_positions"},
+            )
+
+        if cov_matrix.shape[0] != len(weights) or cov_matrix.shape[1] != len(weights):
+            logger.warning(
+                f"VaR calculation skipped: shape mismatch - "
+                f"cov_matrix={cov_matrix.shape}, weights={len(weights)}"
+            )
+            return VaRResult(
+                method=VaRMethod.PARAMETRIC,
+                confidence_level=confidence_level,
+                horizon_days=horizon_days,
+                var_absolute=0.0,
+                var_pct=0.0,
+                expected_shortfall=0.0,
+                details={"error": "shape_mismatch"},
+            )
+
         portfolio_variance = np.dot(weights, np.dot(cov_matrix, weights))
         # Guard against numerical precision issues (should never be negative)
+        # If variance IS negative, it indicates covariance matrix instability - LOG WARNING
+        if portfolio_variance < 0:
+            logger.warning(
+                f"NUMERICAL ISSUE: Portfolio variance is negative ({portfolio_variance:.6f}). "
+                "Clamping to 0. This may indicate covariance matrix instability - "
+                "consider triggering matrix rebuild."
+            )
         portfolio_variance = max(0.0, float(portfolio_variance))
         portfolio_std = np.sqrt(portfolio_variance)
 
@@ -782,6 +884,19 @@ class VaRCalculator:
             confidence_level = self._confidence_level
         if horizon_days is None:
             horizon_days = self._horizon_days
+
+        # CRITICAL: Validate portfolio_value to prevent division by zero
+        if portfolio_value <= 0:
+            logger.warning(f"Historical VaR calculation skipped: portfolio_value={portfolio_value} is <= 0")
+            return VaRResult(
+                method=VaRMethod.HISTORICAL,
+                confidence_level=confidence_level,
+                horizon_days=horizon_days,
+                var_absolute=0.0,
+                var_pct=0.0,
+                expected_shortfall=0.0,
+                details={"error": "invalid_portfolio_value", "portfolio_value": portfolio_value},
+            )
 
         # Step 1: Build portfolio returns series using current position weights
         symbols = self._symbols
@@ -1353,6 +1468,7 @@ class VaRCalculator:
             "supports_backtesting": True,  # P2: Kupiec test
             "supports_component_var": True,  # P2: Component VaR breakdown
             "supports_marginal_var": True,  # P2: Marginal VaR
+            "supports_regime_conditional": True,  # Phase 2: Regime-conditional VaR
         }
 
     # =========================================================================
@@ -2087,3 +2203,580 @@ class VaRCalculator:
                 else "LOW"
             ),
         }
+
+    # =========================================================================
+    # REGIME-CONDITIONAL VAR (Phase 2: Risk Management Enhancement)
+    # =========================================================================
+
+    # Regime-specific parameters based on research
+    REGIME_PARAMETERS = {
+        VolatilityRegime.LOW: {
+            "volatility_multiplier": 1.3,  # Complacency adjustment - actual vol often higher
+            "correlation_floor": None,      # No floor in low vol
+            "confidence_boost": 0.02,       # Use 97% instead of 95%
+            "description": "Low volatility - potential complacency, tighten estimates",
+        },
+        VolatilityRegime.NORMAL: {
+            "volatility_multiplier": 1.0,   # Standard parameters
+            "correlation_floor": None,
+            "confidence_boost": 0.0,        # Standard 95%
+            "description": "Normal volatility - use standard VaR parameters",
+        },
+        VolatilityRegime.HIGH: {
+            "volatility_multiplier": 1.2,   # Increased uncertainty
+            "correlation_floor": 0.5,       # Correlations tend to increase in stress
+            "confidence_boost": 0.01,       # Use 96%
+            "description": "High volatility - increase VaR estimates",
+        },
+        VolatilityRegime.CRISIS: {
+            "volatility_multiplier": 1.5,   # Significant increase
+            "correlation_floor": 0.7,       # Correlation breakdown (all assets move together)
+            "confidence_boost": 0.04,       # Use 99%
+            "description": "Crisis conditions - maximum VaR adjustments",
+        },
+    }
+
+    def detect_volatility_regime(
+        self,
+        vix_current: float | None = None,
+        realized_vol: float | None = None,
+    ) -> VolatilityRegime:
+        """
+        Detect current volatility regime.
+
+        Uses VIX if available, otherwise falls back to realized volatility.
+
+        Args:
+            vix_current: Current VIX level (preferred)
+            realized_vol: Realized portfolio volatility (fallback)
+
+        Returns:
+            VolatilityRegime classification
+        """
+        # Use VIX if available
+        if vix_current is not None:
+            if vix_current < 15:
+                return VolatilityRegime.LOW
+            elif vix_current < 20:
+                return VolatilityRegime.NORMAL
+            elif vix_current < 30:
+                return VolatilityRegime.HIGH
+            else:
+                return VolatilityRegime.CRISIS
+
+        # Fallback to realized volatility (annualized)
+        if realized_vol is not None:
+            # Map realized vol to VIX-equivalent
+            # Rough mapping: VIX ~= annualized vol * 100
+            vol_pct = realized_vol * 100 * np.sqrt(252)  # Annualize if daily
+
+            if vol_pct < 12:
+                return VolatilityRegime.LOW
+            elif vol_pct < 18:
+                return VolatilityRegime.NORMAL
+            elif vol_pct < 25:
+                return VolatilityRegime.HIGH
+            else:
+                return VolatilityRegime.CRISIS
+
+        # Default to normal if no volatility info
+        return VolatilityRegime.NORMAL
+
+    def calculate_regime_conditional_var(
+        self,
+        positions: dict[str, float],
+        portfolio_value: float,
+        current_regime: VolatilityRegime | None = None,
+        vix_current: float | None = None,
+        confidence_level: float | None = None,
+        horizon_days: int | None = None,
+        method: VaRMethod = VaRMethod.PARAMETRIC,
+    ) -> RegimeConditionalVaRResult:
+        """
+        Calculate VaR adjusted for current volatility regime (Phase 2).
+
+        Implements regime-conditional risk adjustments based on research:
+        - Low volatility: Increase VaR estimates (complacency risk)
+        - High volatility: Widen confidence, increase correlations
+        - Crisis: Maximum adjustments, correlation floor
+
+        Based on research findings:
+        - Daniel & Moskowitz (2016): Momentum crash protection
+        - VIX-based regime detection from RISK_ENHANCEMENTS.md
+        - Correlation breakdown in crisis from CORRELATIONS_RISK.md
+
+        Args:
+            positions: Dictionary of symbol to position value
+            portfolio_value: Total portfolio value
+            current_regime: Override regime (auto-detect if None)
+            vix_current: Current VIX level (for auto-detection)
+            confidence_level: Base confidence level
+            horizon_days: Time horizon
+            method: VaR calculation method
+
+        Returns:
+            RegimeConditionalVaRResult with regime-adjusted VaR
+        """
+        if confidence_level is None:
+            confidence_level = self._confidence_level
+        if horizon_days is None:
+            horizon_days = self._horizon_days
+
+        # Detect regime if not provided
+        if current_regime is None:
+            # Try to estimate realized vol from returns
+            realized_vol = None
+            if self._returns_data:
+                symbols = self._symbols
+                weights = np.array([positions.get(s, 0) / portfolio_value for s in symbols])
+
+                if len(symbols) > 0 and all(len(self._returns_data.get(s, [])) > 0 for s in symbols):
+                    min_len = min(len(self._returns_data[s]) for s in symbols)
+                    if min_len > 0:
+                        returns_matrix = np.array([
+                            self._returns_data[s][-min_len:] for s in symbols
+                        ])
+                        portfolio_returns = np.dot(weights, returns_matrix)
+                        if len(portfolio_returns) > 0:
+                            realized_vol = np.std(portfolio_returns)
+
+            current_regime = self.detect_volatility_regime(vix_current, realized_vol)
+
+        # Get regime parameters
+        regime_params = self.REGIME_PARAMETERS.get(
+            current_regime,
+            self.REGIME_PARAMETERS[VolatilityRegime.NORMAL]
+        )
+
+        vol_multiplier = regime_params["volatility_multiplier"]
+        corr_floor = regime_params["correlation_floor"]
+        conf_boost = regime_params["confidence_boost"]
+
+        # Adjust confidence level
+        adjusted_confidence = min(0.99, confidence_level + conf_boost)
+
+        # Calculate base VaR first
+        if method == VaRMethod.PARAMETRIC:
+            base_result = self.calculate_parametric_var(
+                positions, portfolio_value, confidence_level, horizon_days
+            )
+        elif method == VaRMethod.HISTORICAL:
+            base_result = self.calculate_historical_var(
+                positions, portfolio_value, confidence_level, horizon_days
+            )
+        else:
+            base_result = self.calculate_monte_carlo_var(
+                positions, portfolio_value, confidence_level, horizon_days
+            )
+
+        # For regime-adjusted VaR, use stress_test_var with regime parameters
+        if corr_floor is not None or vol_multiplier != 1.0:
+            # Use stress test infrastructure with regime-specific parameters
+            stressed_result = self.stress_test_var(
+                positions,
+                portfolio_value,
+                volatility_multiplier=vol_multiplier,
+                correlation_override=corr_floor,
+            )
+            regime_var = stressed_result.var_absolute
+
+            # Recalculate with adjusted confidence if different
+            if adjusted_confidence != confidence_level:
+                # Scale VaR by ratio of z-scores
+                z_base = stats.norm.ppf(confidence_level)
+                z_adjusted = stats.norm.ppf(adjusted_confidence)
+                regime_var = regime_var * (z_adjusted / z_base) if z_base > 0 else regime_var
+        else:
+            # Just scale base VaR
+            regime_var = base_result.var_absolute * vol_multiplier
+
+            # Apply confidence adjustment
+            if adjusted_confidence != confidence_level:
+                z_base = stats.norm.ppf(confidence_level)
+                z_adjusted = stats.norm.ppf(adjusted_confidence)
+                regime_var = regime_var * (z_adjusted / z_base) if z_base > 0 else regime_var
+
+        # Calculate adjusted Expected Shortfall
+        regime_es = None
+        if base_result.expected_shortfall is not None:
+            # ES typically scales similarly to VaR
+            var_ratio = regime_var / base_result.var_absolute if base_result.var_absolute > 0 else 1.0
+            regime_es = base_result.expected_shortfall * var_ratio
+
+        logger.info(
+            f"Regime-conditional VaR [{current_regime.value}]: "
+            f"base=${base_result.var_absolute:,.0f} -> regime=${regime_var:,.0f} "
+            f"(vol_mult={vol_multiplier}, corr_floor={corr_floor}, "
+            f"conf={confidence_level:.0%}->{adjusted_confidence:.0%})"
+        )
+
+        return RegimeConditionalVaRResult(
+            base_var=base_result,
+            regime=current_regime,
+            regime_adjusted_var=regime_var,
+            regime_adjusted_es=regime_es,
+            volatility_multiplier=vol_multiplier,
+            correlation_floor=corr_floor,
+            confidence_adjustment=conf_boost,
+        )
+
+    def get_regime_risk_parameters(
+        self,
+        regime: VolatilityRegime
+    ) -> dict[str, Any]:
+        """
+        Get risk parameters for a given volatility regime.
+
+        Useful for position sizing and risk limit adjustments.
+
+        Args:
+            regime: Volatility regime
+
+        Returns:
+            Dictionary of regime-specific parameters
+        """
+        params = self.REGIME_PARAMETERS.get(
+            regime,
+            self.REGIME_PARAMETERS[VolatilityRegime.NORMAL]
+        )
+
+        # Add derived parameters useful for trading decisions
+        return {
+            **params,
+            "regime": regime.value,
+            "position_size_multiplier": 1.0 / params["volatility_multiplier"],
+            "max_leverage_reduction": (
+                0.0 if regime == VolatilityRegime.LOW
+                else 0.0 if regime == VolatilityRegime.NORMAL
+                else 0.25 if regime == VolatilityRegime.HIGH
+                else 0.50  # Crisis
+            ),
+            "new_positions_allowed": regime != VolatilityRegime.CRISIS,
+            "stop_loss_multiplier": (
+                0.8 if regime == VolatilityRegime.LOW  # Tighter stops
+                else 1.0 if regime == VolatilityRegime.NORMAL
+                else 1.3 if regime == VolatilityRegime.HIGH  # Wider stops
+                else 1.5  # Crisis - very wide to avoid whipsaws
+            ),
+        }
+
+    # =========================================================================
+    # Phase 5.3: Cornish-Fisher VaR Adjustment
+    # =========================================================================
+
+    def calculate_cornish_fisher_var(
+        self,
+        positions: dict[str, float],
+        portfolio_value: float,
+        confidence_level: float | None = None,
+        horizon_days: int | None = None,
+    ) -> VaRResult:
+        """
+        Calculate Cornish-Fisher adjusted VaR (Phase 5.3).
+
+        The Cornish-Fisher expansion adjusts the normal distribution quantile
+        to account for skewness and kurtosis in the return distribution.
+
+        Standard parametric VaR assumes returns are normally distributed,
+        but financial returns typically have:
+        - Negative skewness (larger losses than gains)
+        - Excess kurtosis (fat tails, more extreme events)
+
+        The Cornish-Fisher expansion modifies the z-score:
+        z_cf = z + (z² - 1)S/6 + (z³ - 3z)(K-3)/24 - (2z³ - 5z)S²/36
+
+        Where:
+        - z = normal z-score for confidence level
+        - S = skewness of returns
+        - K = kurtosis of returns
+
+        Research finding: Cornish-Fisher VaR can be 20-40% higher than
+        normal VaR during periods of market stress.
+
+        Args:
+            positions: Dictionary of symbol -> position value
+            portfolio_value: Total portfolio value
+            confidence_level: Confidence level (default: from config)
+            horizon_days: Time horizon in days (default: from config)
+
+        Returns:
+            VaRResult with Cornish-Fisher adjusted values
+        """
+        if not HAS_NUMPY or not HAS_SCIPY:
+            logger.error("NumPy/SciPy not available for Cornish-Fisher VaR")
+            return VaRResult(
+                method=VaRMethod.PARAMETRIC,
+                confidence_level=confidence_level or self._confidence_level,
+                horizon_days=horizon_days or self._horizon_days,
+                var_absolute=0.0,
+                var_pct=0.0,
+                details={"error": "dependencies_not_available"},
+            )
+
+        if confidence_level is None:
+            confidence_level = self._confidence_level
+        if horizon_days is None:
+            horizon_days = self._horizon_days
+
+        # First calculate standard parametric VaR to get portfolio statistics
+        base_result = self.calculate_parametric_var(
+            positions, portfolio_value, confidence_level, horizon_days
+        )
+
+        if "error" in base_result.details:
+            return base_result
+
+        # Get historical returns for the portfolio
+        symbols = list(positions.keys())
+        weights = np.array([positions[s] / portfolio_value for s in symbols])
+
+        # Build portfolio returns from individual asset returns
+        portfolio_returns = []
+        for date_idx in range(len(self._returns_cache.get(symbols[0], []))):
+            port_return = 0.0
+            valid = True
+            for i, symbol in enumerate(symbols):
+                asset_returns = self._returns_cache.get(symbol, [])
+                if date_idx < len(asset_returns):
+                    port_return += weights[i] * asset_returns[date_idx]
+                else:
+                    valid = False
+                    break
+            if valid:
+                portfolio_returns.append(port_return)
+
+        if len(portfolio_returns) < 30:
+            # Insufficient data for higher moments, return standard VaR
+            logger.warning(
+                f"Insufficient data for Cornish-Fisher ({len(portfolio_returns)} < 30), "
+                "using standard parametric VaR"
+            )
+            base_result.details["cornish_fisher_note"] = "insufficient_data"
+            return base_result
+
+        returns_array = np.array(portfolio_returns)
+
+        # Calculate higher moments
+        skewness = stats.skew(returns_array)
+        kurtosis = stats.kurtosis(returns_array, fisher=True)  # Excess kurtosis
+
+        # Normal z-score
+        z = stats.norm.ppf(confidence_level)
+
+        # Cornish-Fisher expansion
+        # For VaR (measuring losses), we negate skewness because:
+        # - Returns with negative skew → Losses with positive skew
+        # - We want the upper tail of the loss distribution
+        z_cf = self._cornish_fisher_quantile(z, -skewness, kurtosis)
+
+        # Calculate adjusted VaR
+        portfolio_std = base_result.details.get("portfolio_volatility", 0.0)
+        portfolio_std_scaled = portfolio_std * np.sqrt(horizon_days)
+
+        var_cf_pct = z_cf * portfolio_std_scaled
+        var_cf_absolute = var_cf_pct * portfolio_value
+
+        # Adjusted Expected Shortfall using Cornish-Fisher
+        # Use trapezoidal integration for ES beyond CF-adjusted VaR
+        # Note: we use -skewness for VaR/ES calculation (loss perspective)
+        es_cf = self._calculate_cornish_fisher_es(
+            z, -skewness, kurtosis, portfolio_std_scaled, portfolio_value, confidence_level
+        )
+
+        # Calculate adjustment factor for monitoring
+        adjustment_factor = var_cf_absolute / base_result.var_absolute if base_result.var_absolute > 0 else 1.0
+
+        logger.info(
+            f"Cornish-Fisher VaR: normal=${base_result.var_absolute:,.0f} -> "
+            f"CF=${var_cf_absolute:,.0f} (adjustment={adjustment_factor:.2f}x), "
+            f"skew={skewness:.3f}, excess_kurt={kurtosis:.3f}"
+        )
+
+        return VaRResult(
+            method=VaRMethod.PARAMETRIC,  # Still parametric, just with adjustment
+            confidence_level=confidence_level,
+            horizon_days=horizon_days,
+            var_absolute=var_cf_absolute,
+            var_pct=var_cf_pct,
+            expected_shortfall=es_cf,
+            details={
+                "method_variant": "cornish_fisher",
+                "portfolio_volatility": portfolio_std,
+                "z_score_normal": z,
+                "z_score_cf": z_cf,
+                "skewness": skewness,
+                "excess_kurtosis": kurtosis,
+                "adjustment_factor": adjustment_factor,
+                "normal_var_absolute": base_result.var_absolute,
+            }
+        )
+
+    def _cornish_fisher_quantile(
+        self,
+        z: float,
+        skewness: float,
+        excess_kurtosis: float,
+    ) -> float:
+        """
+        Calculate the Cornish-Fisher adjusted quantile.
+
+        The expansion corrects the normal quantile for non-normality:
+        z_cf = z + (z²-1)S/6 + (z³-3z)(K-3)/24 - (2z³-5z)S²/36
+
+        Args:
+            z: Normal distribution quantile
+            skewness: Sample skewness
+            excess_kurtosis: Excess kurtosis (kurtosis - 3)
+
+        Returns:
+            Adjusted quantile incorporating skewness and kurtosis
+        """
+        S = skewness
+        K = excess_kurtosis
+
+        # Cornish-Fisher expansion terms
+        term1 = (z ** 2 - 1) * S / 6
+        term2 = (z ** 3 - 3 * z) * K / 24
+        term3 = -(2 * z ** 3 - 5 * z) * (S ** 2) / 36
+
+        z_cf = z + term1 + term2 + term3
+
+        # Sanity check: CF adjustment should not reduce z below zero
+        # or increase it by more than 3x (numerical stability)
+        z_cf = max(z_cf, z * 0.5)  # At least 50% of normal
+        z_cf = min(z_cf, z * 3.0)  # At most 3x normal
+
+        return z_cf
+
+    def _calculate_cornish_fisher_es(
+        self,
+        z: float,
+        skewness: float,
+        excess_kurtosis: float,
+        portfolio_std_scaled: float,
+        portfolio_value: float,
+        confidence_level: float,
+    ) -> float:
+        """
+        Calculate Expected Shortfall with Cornish-Fisher adjustment.
+
+        Uses numerical integration over the tail to compute ES.
+
+        Args:
+            z: Normal z-score
+            skewness: Skewness
+            excess_kurtosis: Excess kurtosis
+            portfolio_std_scaled: Scaled portfolio volatility
+            portfolio_value: Portfolio value
+            confidence_level: Confidence level
+
+        Returns:
+            Cornish-Fisher adjusted Expected Shortfall
+        """
+        # Simple approximation: use ratio of CF-VaR to normal VaR
+        # and apply same ratio to ES
+        z_cf = self._cornish_fisher_quantile(z, skewness, excess_kurtosis)
+
+        # Normal ES
+        es_normal_mult = stats.norm.pdf(z) / (1 - confidence_level)
+        es_normal = es_normal_mult * portfolio_std_scaled * portfolio_value
+
+        # Scale ES by same ratio as VaR
+        ratio = z_cf / z if z > 0 else 1.0
+        es_cf = es_normal * ratio
+
+        return es_cf
+
+    def get_cornish_fisher_adjustment_factor(
+        self,
+        positions: dict[str, float],
+        portfolio_value: float,
+        confidence_level: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        Get the Cornish-Fisher adjustment factor without full VaR calculation.
+
+        Useful for quick assessment of how much non-normality affects VaR.
+
+        Args:
+            positions: Portfolio positions
+            portfolio_value: Portfolio value
+            confidence_level: Confidence level
+
+        Returns:
+            Dictionary with skewness, kurtosis, and adjustment factor
+        """
+        if confidence_level is None:
+            confidence_level = self._confidence_level
+
+        symbols = list(positions.keys())
+        weights = np.array([positions[s] / portfolio_value for s in symbols])
+
+        # Build portfolio returns
+        portfolio_returns = []
+        for date_idx in range(len(self._returns_cache.get(symbols[0], []))):
+            port_return = 0.0
+            valid = True
+            for i, symbol in enumerate(symbols):
+                asset_returns = self._returns_cache.get(symbol, [])
+                if date_idx < len(asset_returns):
+                    port_return += weights[i] * asset_returns[date_idx]
+                else:
+                    valid = False
+                    break
+            if valid:
+                portfolio_returns.append(port_return)
+
+        if len(portfolio_returns) < 30:
+            return {
+                "skewness": 0.0,
+                "excess_kurtosis": 0.0,
+                "adjustment_factor": 1.0,
+                "sample_size": len(portfolio_returns),
+                "warning": "insufficient_data",
+            }
+
+        returns_array = np.array(portfolio_returns)
+        skewness = stats.skew(returns_array)
+        kurtosis = stats.kurtosis(returns_array, fisher=True)
+
+        z = stats.norm.ppf(confidence_level)
+        # For VaR adjustment, use -skewness (loss perspective)
+        z_cf = self._cornish_fisher_quantile(z, -skewness, kurtosis)
+
+        return {
+            "skewness": skewness,  # Report actual return skewness
+            "excess_kurtosis": kurtosis,
+            "z_normal": z,
+            "z_cornish_fisher": z_cf,
+            "adjustment_factor": z_cf / z if z > 0 else 1.0,
+            "sample_size": len(portfolio_returns),
+            "interpretation": self._interpret_cf_adjustment(skewness, kurtosis),
+        }
+
+    def _interpret_cf_adjustment(
+        self,
+        skewness: float,
+        excess_kurtosis: float,
+    ) -> str:
+        """Provide interpretation of the Cornish-Fisher adjustment."""
+        messages = []
+
+        if skewness < -0.5:
+            messages.append("Strong negative skew: large losses more likely than gains")
+        elif skewness < -0.2:
+            messages.append("Moderate negative skew: slight left tail risk")
+        elif skewness > 0.5:
+            messages.append("Positive skew: upside surprises more likely")
+
+        if excess_kurtosis > 3:
+            messages.append("Very fat tails: extreme events significantly more likely")
+        elif excess_kurtosis > 1:
+            messages.append("Fat tails: extreme events more likely than normal")
+        elif excess_kurtosis < -0.5:
+            messages.append("Thin tails: extreme events less likely than normal")
+
+        if not messages:
+            messages.append("Distribution close to normal")
+
+        return "; ".join(messages)

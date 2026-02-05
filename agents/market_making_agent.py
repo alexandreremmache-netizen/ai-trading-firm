@@ -82,6 +82,9 @@ class MarketMakingAgent(SignalAgent):
         self._max_inventory = config.parameters.get("max_inventory", 1000)
         self._quote_refresh_ms = config.parameters.get("quote_refresh_ms", 1000)  # IB compatible
 
+        # Minimum confidence threshold for signal generation
+        self._min_confidence = config.parameters.get("min_confidence", 0.75)
+
         # State per symbol
         self._symbols: dict[str, MarketMakingState] = {}
         self._lookback = 100  # Rolling window size
@@ -155,6 +158,12 @@ class MarketMakingAgent(SignalAgent):
         if len(state.mid_prices) >= 10:
             signal = self._generate_mm_signal(state, mid, spread)
             if signal:
+                # Filter weak signals by confidence threshold (skip FLAT signals from filter)
+                if signal.direction != SignalDirection.FLAT and signal.confidence < self._min_confidence:
+                    logger.debug(
+                        f"Signal filtered: confidence {signal.confidence:.2f} < threshold {self._min_confidence}"
+                    )
+                    return
                 await self._event_bus.publish_signal(signal)
                 self._audit_logger.log_event(signal)
 
@@ -245,14 +254,23 @@ class MarketMakingAgent(SignalAgent):
             # Long inventory - prefer to sell
             direction = SignalDirection.SHORT
             strength = -0.3
+            # SHORT: stop_loss above (1%), target_price below (2%)
+            stop_loss = mid * 1.01
+            target_price = mid * 0.98
         elif state.inventory < 0:
             # Short inventory - prefer to buy
             direction = SignalDirection.LONG
             strength = 0.3
+            # LONG: stop_loss below (1%), target_price above (2%)
+            stop_loss = mid * 0.99
+            target_price = mid * 1.02
         else:
             # Neutral - market make both sides
             direction = SignalDirection.FLAT
             strength = 0.0
+            # FLAT: no stop_loss or target_price
+            stop_loss = None
+            target_price = None
 
         current_spread_bps = (spread / mid) * 10000 if mid > 0 else 0
 
@@ -263,7 +281,8 @@ class MarketMakingAgent(SignalAgent):
             direction=direction,
             strength=strength,
             confidence=0.5,
-            target_price=state.fair_value,
+            target_price=target_price,
+            stop_loss=stop_loss,
             rationale=(
                 f"MM opportunity: spread={spread:.4f} "
                 f"({current_spread_bps:.1f}bps), "
@@ -282,6 +301,7 @@ class MarketMakingAgent(SignalAgent):
         """Generate neutral market making signal for activity."""
         current_spread_bps = (spread / mid) * 10000 if mid > 0 else 0
 
+        # FLAT signals: no stop_loss or target_price
         return SignalEvent(
             source_agent=self.name,
             strategy_name="market_making",
@@ -289,7 +309,8 @@ class MarketMakingAgent(SignalAgent):
             direction=SignalDirection.FLAT,
             strength=0.0,
             confidence=0.4,
-            target_price=state.fair_value,
+            target_price=None,
+            stop_loss=None,
             rationale=(
                 f"MM neutral: spread={current_spread_bps:.1f}bps, "
                 f"optimal={optimal_spread:.1f}bps, vol={state.volatility:.1%}"
@@ -307,10 +328,16 @@ class MarketMakingAgent(SignalAgent):
             direction = SignalDirection.SHORT
             strength = -0.7
             action = "reduce long"
+            # SHORT: stop_loss above (1%), target_price below (2%)
+            stop_loss = mid * 1.01
+            target_price = mid * 0.98
         else:
             direction = SignalDirection.LONG
             strength = 0.7
             action = "reduce short"
+            # LONG: stop_loss below (1%), target_price above (2%)
+            stop_loss = mid * 0.99
+            target_price = mid * 1.02
 
         return SignalEvent(
             source_agent=self.name,
@@ -319,7 +346,8 @@ class MarketMakingAgent(SignalAgent):
             direction=direction,
             strength=strength,
             confidence=0.7,
-            target_price=mid,
+            target_price=target_price,
+            stop_loss=stop_loss,
             rationale=(
                 f"Inventory management: {action} inventory "
                 f"({state.inventory}/{self._max_inventory})"

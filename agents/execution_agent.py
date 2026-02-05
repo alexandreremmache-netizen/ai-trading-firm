@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING, Any
@@ -388,15 +389,18 @@ class ExecutionAgentImpl(ExecutionAgentBase):
         self._algo_timeout_seconds = config.parameters.get("algo_timeout_seconds", 3600)  # 1 hour for TWAP/VWAP
         self._timeout_check_interval = config.parameters.get("timeout_check_interval_seconds", 10)
         self._order_timeout_monitor_task: asyncio.Task | None = None
-        self._timed_out_orders: list[str] = []  # Track timed out order IDs
+        self._timed_out_orders: deque[str] = deque(maxlen=500)  # Track timed out order IDs
 
         # Order acknowledgment timeout handling (P2)
         self._ack_timeout_seconds = config.parameters.get("ack_timeout_seconds", 5.0)  # 5 second default for broker ack
         self._pending_ack_orders: dict[str, datetime] = {}  # order_id -> submission_time
-        self._ack_timeout_alerts: list[dict] = []  # Track ack timeout events
+        self._ack_timeout_alerts: deque[dict] = deque(maxlen=500)  # Track ack timeout events
 
-        # Partial fill percentage tracking (P2)
-        self._partial_fill_history: list[dict] = []  # Historical partial fill data
+        # Partial fill percentage tracking (P2, bounded)
+        self._partial_fill_history: deque[dict] = deque(maxlen=1000)  # Historical partial fill data
+
+        # QUICK WIN #9: ATR cache for spread validation
+        self._atr_cache: dict[str, float] = {}  # symbol -> current ATR
         self._partial_fill_threshold_pct = config.parameters.get("partial_fill_alert_threshold_pct", 50.0)  # Alert if <50% filled
         self._partial_fill_time_window_seconds = config.parameters.get("partial_fill_time_window_seconds", 120)  # 2 min window
 
@@ -413,6 +417,13 @@ class ExecutionAgentImpl(ExecutionAgentBase):
         # Kill switch state
         self._kill_switch_active = False
         self._kill_switch_reason = ""
+
+        # Zombie order management (Phase C improvement)
+        self._zombie_order_timeout_seconds = config.parameters.get("zombie_order_timeout_seconds", 30.0)
+        self._zombie_check_interval_seconds = config.parameters.get("zombie_check_interval_seconds", 5.0)
+        self._zombie_order_monitor_task: asyncio.Task | None = None
+        self._zombie_orders_cancelled: int = 0
+        self._zombie_order_history: deque[dict] = deque(maxlen=100)  # Track cancelled zombie orders
 
         # VWAP execution state
         # Historical volume profiles by symbol (hourly buckets, 0-23 representing market hours)
@@ -433,6 +444,12 @@ class ExecutionAgentImpl(ExecutionAgentBase):
 
         # Optional components
         self._best_execution_analyzer = None
+        self._stop_loss_manager = None  # StopLossManager for automatic stop placement
+
+        # Automatic stop-loss configuration
+        self._auto_stop_loss_enabled = config.parameters.get("auto_stop_loss_enabled", True)
+        self._stop_loss_atr_multiplier = config.parameters.get("stop_loss_atr_multiplier", 2.5)
+        self._default_stop_loss_pct = config.parameters.get("default_stop_loss_pct", 5.0)
 
         # Order book tracking (#E15)
         self._order_books: dict[str, OrderBookSnapshot] = {}
@@ -480,6 +497,11 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             return
 
         if not isinstance(event, ValidatedDecisionEvent):
+            return
+
+        # Only process events from ComplianceAgent (final validation step)
+        # Skip events from RiskAgent (those go to ComplianceAgent first)
+        if event.source_agent != "ComplianceAgent":
             return
 
         # Check kill switch before executing
@@ -859,7 +881,12 @@ class ExecutionAgentImpl(ExecutionAgentBase):
 
         # Execute slices (#E9 - lot size aware)
         for i, current_size in enumerate(slices):
-            if pending.status == "cancelled":
+            # CRITICAL FIX: Check both cancelled status AND kill-switch at start of each iteration
+            # This ensures TWAP halts immediately when kill-switch triggers
+            if pending.status == "cancelled" or self._kill_switch_active:
+                logger.warning(f"TWAP halted at slice {i+1}/{num_slices}: kill_switch={self._kill_switch_active}")
+                pending.status = "cancelled"
+                pending.transition_state(OrderState.CANCELLED, "TWAP halted by kill-switch")
                 break
 
             # Create slice order
@@ -899,7 +926,18 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             # Wait before next slice (except for last one)
             # EXE-002: Use adjusted interval for market hours awareness
             if i < num_slices - 1:
-                await asyncio.sleep(adjusted_slice_interval)
+                # Split sleep into chunks to check kill-switch more frequently
+                sleep_chunks = max(1, int(adjusted_slice_interval / 5))  # Check every ~5 seconds
+                chunk_duration = adjusted_slice_interval / sleep_chunks
+                for _ in range(sleep_chunks):
+                    await asyncio.sleep(chunk_duration)
+                    # CRITICAL: Check kill-switch during sleep
+                    if self._kill_switch_active or pending.status == "cancelled":
+                        logger.warning(f"TWAP interrupted during sleep: kill_switch={self._kill_switch_active}")
+                        break
+                # Check again after full sleep completes
+                if self._kill_switch_active or pending.status == "cancelled":
+                    break
 
         pending.status = "completed" if len(pending.slices) == num_slices else "partial"
 
@@ -1227,7 +1265,12 @@ class ExecutionAgentImpl(ExecutionAgentBase):
 
         # Execute slices
         for i, slice_qty in enumerate(slices):
-            if pending.status == "cancelled":
+            # CRITICAL FIX: Check both cancelled status AND kill-switch at start of each iteration
+            # This ensures VWAP halts immediately when kill-switch triggers
+            if pending.status == "cancelled" or self._kill_switch_active:
+                logger.warning(f"VWAP halted at slice {i+1}/{num_slices}: kill_switch={self._kill_switch_active}")
+                pending.status = "cancelled"
+                pending.transition_state(OrderState.CANCELLED, "VWAP halted by kill-switch")
                 break
 
             # Create slice order
@@ -1269,7 +1312,19 @@ class ExecutionAgentImpl(ExecutionAgentBase):
 
             # Wait before next slice (except for last one)
             if i < num_slices - 1:
-                await asyncio.sleep(interval_minutes * 60)
+                sleep_seconds = interval_minutes * 60
+                # Split sleep into chunks to check kill-switch more frequently (~5 second chunks)
+                sleep_chunks = max(1, int(sleep_seconds / 5))
+                chunk_duration = sleep_seconds / sleep_chunks
+                for _ in range(sleep_chunks):
+                    await asyncio.sleep(chunk_duration)
+                    # CRITICAL: Check kill-switch during sleep
+                    if self._kill_switch_active or pending.status == "cancelled":
+                        logger.warning(f"VWAP interrupted during sleep: kill_switch={self._kill_switch_active}")
+                        break
+                # Check again after full sleep completes
+                if self._kill_switch_active or pending.status == "cancelled":
+                    break
 
         pending.status = "completed" if len(pending.slices) == num_slices else "partial"
 
@@ -1359,26 +1414,35 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             logger.warning(f"Received fill for unknown order: {fill.broker_order_id}")
             return
 
-        # Track slice-level fill if applicable (#E4)
+        # CRITICAL FIX: Check for overflow BEFORE any tracking to prevent inconsistent state
+        # Calculate what the new totals would be
+        projected_filled = matched_pending.filled_quantity + fill.filled_quantity
+        projected_remaining = matched_pending.remaining_quantity - fill.filled_quantity
+
+        if projected_remaining < 0:
+            # Fill overflow detected - reject this fill entirely
+            logger.error(
+                f"FILL OVERFLOW REJECTED for {fill.symbol}: "
+                f"would overfill by {abs(projected_remaining)}. "
+                f"Order qty={matched_pending.order_event.quantity}, "
+                f"already filled={matched_pending.filled_quantity}, "
+                f"this fill={fill.filled_quantity}. "
+                "Possible duplicate fill or race condition."
+            )
+            # Don't process this fill - it would cause inconsistent state
+            return
+
+        # Track slice-level fill if applicable (#E4) - ONLY after overflow check passed
         if match_type == "slice":
             matched_pending.add_slice_fill(fill.broker_order_id, fill.filled_quantity, fill.fill_price)
 
-        # Update fill tracking
+        # Update fill tracking - guaranteed to be valid after overflow check
         prev_filled = matched_pending.filled_quantity
-        matched_pending.filled_quantity += fill.filled_quantity
-        matched_pending.remaining_quantity -= fill.filled_quantity
+        matched_pending.filled_quantity = projected_filled
+        matched_pending.remaining_quantity = projected_remaining
 
         # Record our volume for VWAP participation tracking (#E10)
         self._record_our_volume(fill.symbol, fill.filled_quantity)
-
-        # Sanity check - cap filled_quantity to order quantity to prevent overflow
-        if matched_pending.remaining_quantity < 0:
-            logger.warning(
-                f"Fill overflow for {fill.symbol}: remaining={matched_pending.remaining_quantity}"
-            )
-            # Cap filled_quantity to the order quantity
-            matched_pending.filled_quantity = matched_pending.order_event.quantity
-            matched_pending.remaining_quantity = 0
 
         # Update average fill price (volume-weighted)
         if matched_pending.filled_quantity > 0:
@@ -1427,6 +1491,10 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             f"avg_price={matched_pending.avg_fill_price:.4f})"
         )
 
+        # Register position with stop-loss manager for automatic stop placement
+        if matched_pending.remaining_quantity <= 0:
+            self._register_position_with_stop_manager(fill, matched_pending)
+
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel a pending order."""
         if order_id not in self._pending_orders:
@@ -1461,6 +1529,73 @@ class ExecutionAgentImpl(ExecutionAgentBase):
     def set_best_execution_analyzer(self, analyzer) -> None:
         """Set the best execution analyzer for RTS 27/28 compliance tracking."""
         self._best_execution_analyzer = analyzer
+
+    def set_stop_loss_manager(self, manager) -> None:
+        """
+        Set the stop-loss manager for automatic stop placement.
+
+        When set, the execution agent will automatically register positions
+        with the stop-loss manager after fills, enabling:
+        - ATR-based stop-loss placement
+        - Trailing stop updates
+        - Automatic position closing on stop hit
+        """
+        self._stop_loss_manager = manager
+        logger.info("StopLossManager attached to ExecutionAgent")
+
+    def _register_position_with_stop_manager(
+        self,
+        fill: "FillEvent",
+        pending: PendingOrder,
+    ) -> None:
+        """
+        Register a filled position with the stop-loss manager.
+
+        Called after a fill is processed to set up automatic stop-loss.
+
+        Args:
+            fill: The fill event
+            pending: The pending order that was filled
+        """
+        if not self._stop_loss_manager or not self._auto_stop_loss_enabled:
+            return
+
+        # Only register on complete fills for new positions
+        if pending.remaining_quantity > 0:
+            return  # Wait for complete fill
+
+        # Determine if this is a long or short position
+        is_long = fill.side == OrderSide.BUY
+
+        # Get ATR if available from the decision context
+        atr = None
+        if pending.decision_event:
+            # Check if stop_loss was provided in the decision
+            stop_price = pending.decision_event.stop_price
+            if stop_price:
+                # Calculate implied ATR from provided stop
+                if is_long:
+                    implied_stop_distance = pending.avg_fill_price - stop_price
+                else:
+                    implied_stop_distance = stop_price - pending.avg_fill_price
+                # Reverse engineer ATR assuming default multiplier
+                atr = implied_stop_distance / self._stop_loss_atr_multiplier
+
+        # Register with stop-loss manager
+        self._stop_loss_manager.register_position(
+            symbol=fill.symbol,
+            entry_price=pending.avg_fill_price,
+            quantity=pending.filled_quantity,
+            is_long=is_long,
+            atr=atr,
+            stop_loss_price=pending.decision_event.stop_price if pending.decision_event else None,
+        )
+
+        logger.info(
+            f"Position registered with StopLossManager: "
+            f"{'LONG' if is_long else 'SHORT'} {pending.filled_quantity} {fill.symbol} "
+            f"@ {pending.avg_fill_price:.2f}"
+        )
 
     async def _pre_trade_checks(
         self, decision: "DecisionEvent", quantity: int
@@ -1507,6 +1642,35 @@ class ExecutionAgentImpl(ExecutionAgentBase):
                     f"Wide spread: {spread_pct:.2f}% (>{MAX_SPREAD_PCT}%) - "
                     f"consider using limit order"
                 )
+
+            # QUICK WIN #9: Dynamic spread check vs ATR
+            # Spread should not exceed configured % of ATR for the asset
+            if hasattr(self, '_config') and self._config:
+                exec_config = self._config.parameters if hasattr(self._config, 'parameters') else self._config
+                spread_limits = exec_config.get("spread_limits", {})
+                max_spread_atr_pct = exec_config.get("max_spread_atr_pct", 0.10)
+
+                # Check asset-specific spread limit first
+                asset_spread_limit = spread_limits.get(symbol)
+                if asset_spread_limit is not None:
+                    if spread_pct > asset_spread_limit * 100:  # Convert to percentage
+                        result["passed"] = False
+                        result["reason"] = (
+                            f"Spread {spread_pct:.3f}% exceeds limit "
+                            f"{asset_spread_limit*100:.2f}% for {symbol}"
+                        )
+                        return result
+
+                # Check spread vs ATR if we have ATR data
+                if hasattr(self, '_atr_cache') and symbol in self._atr_cache:
+                    atr = self._atr_cache[symbol]
+                    if atr > 0 and mid_price > 0:
+                        spread_as_atr_pct = spread / atr
+                        if spread_as_atr_pct > max_spread_atr_pct:
+                            result["warnings"].append(
+                                f"Spread is {spread_as_atr_pct:.1%} of ATR "
+                                f"(limit: {max_spread_atr_pct:.0%})"
+                            )
 
             # 4. Order size vs typical volume (if available)
             # Large orders in illiquid markets can cause significant slippage
@@ -1615,6 +1779,175 @@ class ExecutionAgentImpl(ExecutionAgentBase):
                 pass
             self._stop_order_monitor_task = None
             logger.info("Stop order monitor stopped")
+
+    # =========================================================================
+    # ZOMBIE ORDER MANAGEMENT (Phase C)
+    # =========================================================================
+
+    async def start_zombie_order_monitor(self) -> None:
+        """
+        Start the background task that cancels zombie (unfilled) orders.
+
+        A zombie order is an order that has been pending for longer than
+        the zombie_order_timeout_seconds threshold without being filled.
+        """
+        if self._zombie_order_monitor_task is not None:
+            logger.warning("Zombie order monitor already running")
+            return
+
+        self._zombie_order_monitor_task = asyncio.create_task(
+            self._zombie_order_monitor_loop()
+        )
+        logger.info(
+            f"Zombie order monitor started (timeout: {self._zombie_order_timeout_seconds}s, "
+            f"check interval: {self._zombie_check_interval_seconds}s)"
+        )
+
+    async def stop_zombie_order_monitor(self) -> None:
+        """Stop the zombie order monitor task."""
+        if self._zombie_order_monitor_task is not None:
+            self._zombie_order_monitor_task.cancel()
+            try:
+                await self._zombie_order_monitor_task
+            except asyncio.CancelledError:
+                pass
+            self._zombie_order_monitor_task = None
+            logger.info("Zombie order monitor stopped")
+
+    async def _zombie_order_monitor_loop(self) -> None:
+        """
+        Background loop that checks for and cancels zombie orders.
+
+        Runs continuously with configurable interval (default 5s).
+        """
+        while True:
+            try:
+                await self._check_and_cancel_zombie_orders()
+                await asyncio.sleep(self._zombie_check_interval_seconds)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.exception(f"Error in zombie order monitor: {e}")
+                await asyncio.sleep(5.0)  # Back off on error
+
+    async def _check_and_cancel_zombie_orders(self) -> int:
+        """
+        Check all pending orders and cancel those that have exceeded timeout.
+
+        Returns:
+            Number of zombie orders cancelled
+        """
+        if self._kill_switch_active:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        cancelled_count = 0
+
+        # Get list of pending orders to check (copy to avoid modification during iteration)
+        pending_order_ids = list(self._pending_orders.keys())
+
+        for order_id in pending_order_ids:
+            pending = self._pending_orders.get(order_id)
+            if pending is None:
+                continue
+
+            # Skip orders in terminal states
+            if pending.is_terminal():
+                continue
+
+            # Check if order is in a zombieable state (not yet filled/acknowledged)
+            if pending.state not in (
+                OrderState.PENDING,
+                OrderState.SUBMITTED,
+                OrderState.ACKNOWLEDGED,
+                OrderState.PARTIAL,
+            ):
+                continue
+
+            # Calculate order age
+            order_age = (now - pending.created_at).total_seconds()
+
+            # Use algo timeout for TWAP/VWAP orders (they take longer by design)
+            if pending.algo in ("TWAP", "VWAP"):
+                timeout = self._algo_timeout_seconds
+            else:
+                timeout = self._zombie_order_timeout_seconds
+
+            # Check if order has exceeded timeout
+            if order_age > timeout:
+                logger.warning(
+                    f"Cancelling zombie order {order_id} after {order_age:.1f}s "
+                    f"(timeout: {timeout}s, state: {pending.state.value}, algo: {pending.algo})"
+                )
+
+                try:
+                    # Attempt to cancel via broker
+                    cancelled = await self._cancel_order_via_broker(order_id)
+
+                    if cancelled:
+                        self._zombie_orders_cancelled += 1
+                        cancelled_count += 1
+
+                        # Record zombie order for analysis
+                        self._zombie_order_history.append({
+                            "order_id": order_id,
+                            "symbol": pending.order_event.symbol,
+                            "side": pending.order_event.side.value if pending.order_event.side else "unknown",
+                            "quantity": pending.order_event.quantity,
+                            "algo": pending.algo,
+                            "age_seconds": order_age,
+                            "cancelled_at": now.isoformat(),
+                            "state_at_cancel": pending.state.value,
+                        })
+
+                        # Transition order state
+                        pending.transition_state(OrderState.CANCELLED, "Zombie timeout")
+
+                except Exception as e:
+                    logger.error(f"Failed to cancel zombie order {order_id}: {e}")
+
+        if cancelled_count > 0:
+            logger.info(f"Cancelled {cancelled_count} zombie orders")
+
+        return cancelled_count
+
+    async def _cancel_order_via_broker(self, order_id: str) -> bool:
+        """
+        Cancel an order via the broker.
+
+        Args:
+            order_id: The order ID to cancel
+
+        Returns:
+            True if cancel was submitted successfully
+        """
+        pending = self._pending_orders.get(order_id)
+        if pending is None:
+            return False
+
+        # Find broker order ID (may be stored differently)
+        broker_order_id = pending.broker_order_id
+
+        if broker_order_id is None:
+            logger.warning(f"No broker order ID for {order_id}, cannot cancel")
+            return False
+
+        try:
+            await self._broker.cancel_order(broker_order_id)
+            return True
+        except Exception as e:
+            logger.error(f"Broker cancel failed for {broker_order_id}: {e}")
+            return False
+
+    def get_zombie_order_stats(self) -> dict:
+        """Get statistics about zombie order management."""
+        return {
+            "zombie_orders_cancelled": self._zombie_orders_cancelled,
+            "recent_zombies": list(self._zombie_order_history),
+            "zombie_timeout_seconds": self._zombie_order_timeout_seconds,
+            "algo_timeout_seconds": self._algo_timeout_seconds,
+            "monitor_running": self._zombie_order_monitor_task is not None,
+        }
 
     async def _stop_order_monitor_loop(self) -> None:
         """
@@ -2456,6 +2789,20 @@ class ExecutionAgentImpl(ExecutionAgentBase):
         """
         if price > 0:
             self._last_prices[symbol] = price
+
+    def update_atr(self, symbol: str, atr: float) -> None:
+        """
+        QUICK WIN #9: Update the ATR value for a symbol.
+
+        Used for spread validation in pre-trade checks.
+        Called by market data processor or signal agents.
+
+        Args:
+            symbol: Trading symbol
+            atr: Current ATR value
+        """
+        if atr > 0:
+            self._atr_cache[symbol] = atr
 
     def get_stop_orders(self) -> list[dict]:
         """Get all pending stop orders for monitoring."""
@@ -4190,8 +4537,8 @@ class ExecutionAgentImpl(ExecutionAgentBase):
 
     def __init_venue_latency(self):
         """Initialize venue latency tracking structures."""
-        self._venue_latencies: dict[str, list[tuple[datetime, float]]] = {}
-        self._venue_latency_alerts: list[dict] = []
+        self._venue_latencies: dict[str, deque[tuple[datetime, float]]] = {}
+        self._venue_latency_alerts: deque[dict] = deque(maxlen=500)
         self._latency_threshold_ms: float = 100.0  # Alert threshold
 
     def record_venue_latency(

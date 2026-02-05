@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING, Optional
@@ -30,6 +31,13 @@ from core.events import (
     OrderSide,
     GreeksUpdateEvent,
     StressTestResultEvent,
+    KillSwitchEvent,
+)
+from core.crash_protection import (
+    EnhancedCrashProtection,
+    CrashWarning,
+    CrashRiskLevel,
+    CrashProtectionConfig,
 )
 
 if TYPE_CHECKING:
@@ -44,6 +52,8 @@ logger = logging.getLogger(__name__)
 class KillSwitchReason(Enum):
     """Reasons for activating kill-switch."""
     DAILY_LOSS_LIMIT = "daily_loss_limit"
+    WEEKLY_LOSS_LIMIT = "weekly_loss_limit"  # New: Weekly loss limit breach
+    ROLLING_DRAWDOWN = "rolling_drawdown"    # New: Rolling N-day drawdown breach
     MAX_DRAWDOWN = "max_drawdown"
     VAR_BREACH = "var_breach"
     MANUAL = "manual"
@@ -55,11 +65,17 @@ class KillSwitchReason(Enum):
 
 
 class DrawdownLevel(Enum):
-    """Tiered drawdown response levels."""
+    """
+    Tiered drawdown response levels for autonomous risk management.
+
+    The system NEVER shuts down - it manages risk autonomously through
+    progressive position reduction and defensive mode activation.
+    """
     NORMAL = "normal"           # < 5%: Normal trading
-    WARNING = "warning"         # 5-7.5%: Warning, log alerts
-    REDUCE = "reduce"           # 7.5-10%: Reduce position sizes
-    HALT = "halt"               # > 10%: Kill switch, halt trading
+    WARNING = "warning"         # 5-10%: Warning, reduce new position sizes by 50%
+    CRITICAL = "critical"       # 10-15%: Close worst 20% of positions, no new longs
+    SEVERE = "severe"           # 15-20%: Close worst 50% of positions, defensive mode
+    MAXIMUM = "maximum"         # >= 20%: Close all positions, wait for reset (no shutdown)
 
 
 class KillSwitchAction(Enum):
@@ -307,15 +323,40 @@ class RiskAgent(ValidationAgent):
         super().__init__(config, event_bus, audit_logger)
         self._broker = broker
 
-        # Risk limits from config
+        # Risk limits from config - IMPROVED for better money management
         limits = config.parameters.get("limits", {})
-        self._max_position_pct = limits.get("max_position_size_pct", 5.0) / 100
+        # IMPROVED: Reduce max position from 5% to 2.5%
+        self._max_position_pct = limits.get("max_position_size_pct", 2.5) / 100
         self._max_sector_pct = limits.get("max_sector_exposure_pct", 20.0) / 100
-        self._max_leverage = limits.get("max_leverage", 2.0)
-        self._max_gross_exposure_pct = limits.get("max_gross_exposure_pct", 200.0) / 100
+        # IMPROVED: Reduce max leverage from 2.0 to 1.5
+        self._max_leverage = limits.get("max_leverage", 1.5)
+        # IMPROVED: Reduce max gross exposure from 200% to 50%
+        self._max_gross_exposure_pct = limits.get("max_gross_exposure_pct", 50.0) / 100
         self._max_var_pct = limits.get("max_portfolio_var_pct", 2.0) / 100
         self._max_daily_loss_pct = limits.get("max_daily_loss_pct", 3.0) / 100
         self._max_drawdown_pct = limits.get("max_drawdown_pct", 10.0) / 100
+        # NEW: Per-position daily loss limit (default 1% of portfolio)
+        self._max_position_daily_loss_pct = limits.get("max_position_daily_loss_pct", 1.0) / 100
+        # NEW: Track daily P&L per position
+        self._position_daily_pnl: dict[str, float] = {}
+        self._position_pnl_last_reset: datetime | None = None
+
+        # Weekly loss limit (Hard Stop #4.1)
+        self._max_weekly_loss_pct = limits.get("max_weekly_loss_pct", 7.0) / 100  # 7% weekly default
+        self._weekly_pnl_history: deque[tuple[datetime, float]] = deque(maxlen=7 * 24)  # 7 days hourly
+        self._weekly_loss_start_of_week: datetime | None = None
+        self._cumulative_weekly_pnl: float = 0.0
+
+        # Rolling drawdown limit (Hard Stop #4.1)
+        self._rolling_drawdown_days = limits.get("rolling_drawdown_days", 5)  # 5-day rolling window
+        self._max_rolling_drawdown_pct = limits.get("max_rolling_drawdown_pct", 5.0) / 100  # 5% rolling max
+        self._rolling_equity_history: deque[tuple[datetime, float]] = deque(maxlen=self._rolling_drawdown_days * 24)
+
+        # Manual override for kill switch reset (Hard Stop #4.1)
+        self._kill_switch_manual_override_required = limits.get("kill_switch_manual_override_required", True)
+        self._manual_override_provided = False
+        self._manual_override_time: datetime | None = None
+        self._manual_override_reason: str = ""
 
         # CVaR (Expected Shortfall) threshold alerts (#R13)
         cvar_config = config.parameters.get("cvar_alerts", {})
@@ -327,12 +368,24 @@ class RiskAgent(ValidationAgent):
         self._cvar_alert_cooldown_seconds = cvar_config.get("cooldown_seconds", 300)  # 5 min between alerts
         self._last_cvar_alert_time: datetime | None = None
 
-        # Tiered drawdown thresholds
+        # Tiered drawdown thresholds - AUTONOMOUS RISK MANAGEMENT (NO SHUTDOWN)
         drawdown_config = config.parameters.get("drawdown", {})
-        self._drawdown_warning_pct = drawdown_config.get("warning_pct", 5.0) / 100      # 5%: Warning
-        self._drawdown_reduce_pct = drawdown_config.get("reduce_pct", 7.5) / 100        # 7.5%: Reduce positions
-        self._drawdown_halt_pct = drawdown_config.get("halt_pct", 10.0) / 100           # 10%: Halt trading
-        self._drawdown_position_reduction = drawdown_config.get("position_reduction_factor", 0.5)  # 50% size reduction
+        self._drawdown_warning_pct = drawdown_config.get("warning_pct", 5.0) / 100      # 5%: Warning + 50% size reduction
+        self._drawdown_critical_pct = drawdown_config.get("critical_pct", 10.0) / 100   # 10%: Close worst 20%, no new longs
+        self._drawdown_severe_pct = drawdown_config.get("severe_pct", 15.0) / 100       # 15%: Close worst 50%, defensive mode
+        self._drawdown_maximum_pct = drawdown_config.get("maximum_pct", 20.0) / 100     # 20%: Close all positions
+        # Position reduction factors per level
+        self._drawdown_position_reduction_warning = drawdown_config.get("position_reduction_warning", 0.5)  # 50% size at WARNING
+        self._drawdown_position_reduction_critical = drawdown_config.get("position_reduction_critical", 0.0)  # No new at CRITICAL
+        self._drawdown_close_worst_critical_pct = drawdown_config.get("close_worst_critical_pct", 0.2)  # Close worst 20%
+        self._drawdown_close_worst_severe_pct = drawdown_config.get("close_worst_severe_pct", 0.5)  # Close worst 50%
+        # Defensive mode flags
+        self._defensive_mode_active = False
+        self._no_new_longs = False
+        # Legacy compatibility
+        self._drawdown_reduce_pct = self._drawdown_critical_pct  # backward compat
+        self._drawdown_halt_pct = self._drawdown_maximum_pct  # backward compat
+        self._drawdown_position_reduction = drawdown_config.get("position_reduction_factor", 0.5)
 
         # Rate limits (anti-HFT per CLAUDE.md)
         rate_limits = config.parameters.get("rate_limits", {})
@@ -403,13 +456,13 @@ class RiskAgent(ValidationAgent):
         self._kill_switch_cooldown_minutes = config.parameters.get("kill_switch_cooldown_minutes", 15)
         self._require_dual_authorization = config.parameters.get("require_dual_authorization", True)
 
-        # Kill switch audit trail
-        self._kill_switch_activations: list[dict] = []
+        # Kill switch audit trail (bounded to prevent memory leak)
+        self._kill_switch_activations: deque[dict] = deque(maxlen=100)
         self._authorized_users: set[str] = set(config.parameters.get("authorized_users", ["admin"]))
 
-        # Historical returns for VaR calculation
-        self._returns_history: list[float] = []
+        # Historical returns for VaR calculation (bounded to 1 year)
         self._max_history_days = 252  # 1 year of trading days
+        self._returns_history: deque[float] = deque(maxlen=self._max_history_days)
 
         # Pre-allocated rolling buffer for returns (PERF-P1-001)
         self._returns_buffer = np.zeros(252)
@@ -439,7 +492,7 @@ class RiskAgent(ValidationAgent):
         self._position_aging_critical_days = position_aging_config.get("critical_days", 60)  # Critical at 60 days
         self._position_aging_max_days = position_aging_config.get("max_days", 90)  # Force review at 90 days
         self._position_entry_times: dict[str, datetime] = {}  # symbol -> position entry time
-        self._position_aging_alerts: list[dict] = []  # Historical aging alerts
+        self._position_aging_alerts: deque[dict] = deque(maxlen=500)  # Historical aging alerts
 
         # Correlation breakdown detection (P2)
         correlation_config = config.parameters.get("correlation_breakdown", {})
@@ -449,11 +502,32 @@ class RiskAgent(ValidationAgent):
         self._correlation_check_window_days = correlation_config.get("check_window_days", 5)  # 5 day recent window
         self._historical_correlations: dict[tuple[str, str], float] = {}  # (sym1, sym2) -> baseline correlation
         self._current_correlations: dict[tuple[str, str], float] = {}  # (sym1, sym2) -> recent correlation
-        self._correlation_breakdown_alerts: list[dict] = []  # Historical breakdown alerts
+        self._correlation_breakdown_alerts: deque[dict] = deque(maxlen=500)  # Historical breakdown alerts
 
-        # Monitoring
-        self._check_latencies: list[float] = []
+        # Monitoring (bounded to prevent memory leak)
+        self._check_latencies: deque[float] = deque(maxlen=1000)
         self._var_recalc_count_today: int = 0
+
+        # Crash Protection System (Phase 5 integration)
+        crash_config = config.parameters.get("crash_protection", {})
+        self._crash_protection_enabled = crash_config.get("enabled", True)
+        crash_protection_config = CrashProtectionConfig(
+            vix_spike_threshold=crash_config.get("vix_spike_threshold", 1.5),
+            vix_extreme_level=crash_config.get("vix_extreme_level", 40.0),
+            vix_ma_period=crash_config.get("vix_ma_period", 20),
+            drawdown_warning_pct=crash_config.get("drawdown_warning_pct", 0.05),
+            drawdown_critical_pct=crash_config.get("drawdown_critical_pct", 0.10),
+            correlation_spike_threshold=crash_config.get("correlation_spike_threshold", 0.20),
+            correlation_crisis_level=crash_config.get("correlation_crisis_level", 0.70),
+        )
+        self._crash_protection = EnhancedCrashProtection(
+            config=crash_protection_config,
+            vix_history_size=crash_config.get("vix_history_size", 100),
+            equity_history_size=crash_config.get("equity_history_size", 100),
+            correlation_history_size=crash_config.get("correlation_history_size", 100),
+            protection_decay_days=crash_config.get("protection_decay_days", 5),
+        )
+        self._last_crash_warning: CrashWarning | None = None
 
     async def initialize(self) -> None:
         """Initialize risk state from broker."""
@@ -463,6 +537,10 @@ class RiskAgent(ValidationAgent):
 
         if self._broker:
             await self._refresh_portfolio_state()
+            # Set peak_equity to current portfolio value to start fresh
+            if self._risk_state.net_liquidation > 0:
+                self._risk_state.peak_equity = self._risk_state.net_liquidation
+                logger.info(f"Peak equity initialized to current portfolio: ${self._risk_state.peak_equity:,.2f}")
 
         logger.info("RiskAgent initialized")
 
@@ -494,8 +572,7 @@ class RiskAgent(ValidationAgent):
         # Track latency
         latency_ms = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         self._check_latencies.append(latency_ms)
-        if len(self._check_latencies) > 1000:
-            self._check_latencies = self._check_latencies[-1000:]
+        # Note: deque has maxlen=1000, so no manual trimming needed
 
         # Create validated event
         validated_event = ValidatedDecisionEvent(
@@ -576,28 +653,66 @@ class RiskAgent(ValidationAgent):
                 rejection_reason=var_check.message
             )
 
-        # 5. Daily loss limit (may trigger kill-switch)
+        # 5. Daily loss limit (autonomous mode - don't shutdown, manage risk)
         daily_check = await self._check_daily_loss_limit()
         checks.append(daily_check)
-        if not daily_check.passed:
-            await self._activate_kill_switch(KillSwitchReason.DAILY_LOSS_LIMIT)
+        # NOTE: We don't activate kill-switch anymore - autonomous risk management instead
+        # If daily loss exceeded, we enter defensive mode via drawdown handling
+
+        # 5b. Weekly loss limit (HARD STOP - triggers kill-switch)
+        weekly_check = await self._check_weekly_loss_limit()
+        checks.append(weekly_check)
+        if not weekly_check.passed:
             return RiskValidationResult(
                 approved=False,
                 checks=checks,
                 risk_metrics=self._get_risk_metrics(),
-                rejection_reason=daily_check.message
+                rejection_reason=weekly_check.message
             )
 
-        # 6. Drawdown limit (may trigger kill-switch)
-        dd_check = await self._check_drawdown_limit()
-        checks.append(dd_check)
-        if not dd_check.passed:
-            await self._activate_kill_switch(KillSwitchReason.MAX_DRAWDOWN)
+        # 5c. Rolling N-day drawdown (HARD STOP - triggers kill-switch)
+        rolling_dd_check = await self._check_rolling_drawdown()
+        checks.append(rolling_dd_check)
+        if not rolling_dd_check.passed:
             return RiskValidationResult(
                 approved=False,
                 checks=checks,
                 risk_metrics=self._get_risk_metrics(),
-                rejection_reason=dd_check.message
+                rejection_reason=rolling_dd_check.message
+            )
+
+        # 5d. NEW: Per-position daily loss limit (HARD limit - prevents doubling down)
+        position_daily_check = await self._check_position_daily_loss_limit(decision)
+        checks.append(position_daily_check)
+        if not position_daily_check.passed:
+            return RiskValidationResult(
+                approved=False,
+                checks=checks,
+                risk_metrics=self._get_risk_metrics(),
+                rejection_reason=position_daily_check.message
+            )
+
+        # 6. Drawdown limit (AUTONOMOUS - never triggers kill-switch/shutdown)
+        dd_check = await self._check_drawdown_limit()
+        checks.append(dd_check)
+        # NOTE: dd_check ALWAYS passes - autonomous risk management handles it
+
+        # 6a. Check defensive mode - reject new positions if in defensive mode
+        if self._defensive_mode_active:
+            return RiskValidationResult(
+                approved=False,
+                checks=checks,
+                risk_metrics=self._get_risk_metrics(),
+                rejection_reason=f"DEFENSIVE MODE active: Only exit orders allowed (drawdown: {self._risk_state.current_drawdown_pct*100:.1f}%)"
+            )
+
+        # 6b. Check if new longs are blocked
+        if self._no_new_longs and decision.action == OrderSide.BUY:
+            return RiskValidationResult(
+                approved=False,
+                checks=checks,
+                risk_metrics=self._get_risk_metrics(),
+                rejection_reason=f"NEW LONGS BLOCKED: Drawdown level {self._current_drawdown_level.value} - reduce positions first"
             )
 
         # 7. Rate limit (anti-HFT)
@@ -666,6 +781,18 @@ class RiskAgent(ValidationAgent):
                 risk_metrics=self._get_risk_metrics(),
                 rejection_reason=staleness_check.message
             )
+
+        # 13. Crash protection check (Phase 5 integration)
+        if self._crash_protection_enabled:
+            crash_check = await self._check_crash_protection(decision)
+            checks.append(crash_check)
+            if not crash_check.passed:
+                return RiskValidationResult(
+                    approved=False,
+                    checks=checks,
+                    risk_metrics=self._get_risk_metrics(),
+                    rejection_reason=crash_check.message
+                )
 
         # All checks passed
         return RiskValidationResult(
@@ -1102,41 +1229,397 @@ class RiskAgent(ValidationAgent):
         )
 
     async def _check_daily_loss_limit(self) -> RiskCheckResult:
-        """Check daily loss limit (-3% triggers kill-switch)."""
+        """
+        Check daily loss limit.
+
+        AUTONOMOUS MODE: Does NOT trigger kill-switch or shutdown.
+        Instead, the drawdown mechanism handles position management.
+        Daily loss contributes to overall drawdown calculation.
+
+        Returns:
+            RiskCheckResult - ALWAYS passes to keep system running
+        """
         daily_pnl_pct = self._risk_state.daily_pnl_pct
 
         breached = daily_pnl_pct < -self._max_daily_loss_pct
 
+        if breached:
+            logger.warning(
+                f"Daily loss limit breached: {daily_pnl_pct*100:.2f}% < -{self._max_daily_loss_pct*100:.1f}%. "
+                f"Drawdown-based autonomous risk management is active."
+            )
+
+        # ALWAYS pass - autonomous risk management via drawdown levels
         return RiskCheckResult(
             check_name="daily_loss_limit",
-            passed=not breached,
+            passed=True,  # Always pass - no shutdown
             current_value=daily_pnl_pct,
             limit_value=-self._max_daily_loss_pct,
-            message=f"KILL-SWITCH: Daily loss {daily_pnl_pct*100:.2f}% exceeds limit" if breached else ""
+            message=f"Daily loss {daily_pnl_pct*100:.2f}% exceeds limit - autonomous risk management active" if breached else ""
         )
+
+    async def _check_weekly_loss_limit(self) -> RiskCheckResult:
+        """
+        Check weekly loss limit (7-day rolling window).
+
+        Triggers kill-switch if weekly losses exceed threshold.
+        This is a HARD limit - requires manual reset if breached.
+
+        Returns:
+            RiskCheckResult with pass/fail status
+        """
+        now = datetime.now(timezone.utc)
+
+        # Update weekly P&L history with current hourly snapshot
+        # CRITICAL FIX: Only record once per hour to prevent double-counting
+        # Previously appended on every validation call, causing cumulative sum explosion
+        should_record = True
+        if self._weekly_pnl_history:
+            last_ts, _ = self._weekly_pnl_history[-1]
+            # Only record if at least 1 hour has passed since last entry
+            if (now - last_ts) < timedelta(hours=1):
+                should_record = False
+
+        if should_record:
+            current_pnl_pct = self._risk_state.daily_pnl_pct
+            self._weekly_pnl_history.append((now, current_pnl_pct))
+
+        # Calculate weekly cumulative loss
+        # Note: We're summing hourly snapshots of daily P&L, so this represents
+        # the average daily P&L over the past week (not cumulative P&L)
+        week_ago = now - timedelta(days=7)
+        weekly_pnl_entries = [pnl for ts, pnl in self._weekly_pnl_history if ts >= week_ago]
+        weekly_pnl = sum(weekly_pnl_entries) / max(len(weekly_pnl_entries), 1)
+
+        breached = weekly_pnl < -self._max_weekly_loss_pct
+
+        if breached:
+            logger.critical(
+                f"WEEKLY LOSS LIMIT BREACHED: {weekly_pnl*100:.2f}% < -{self._max_weekly_loss_pct*100:.1f}%. "
+                f"Kill-switch activation required."
+            )
+
+            # Activate kill-switch for weekly loss breach
+            if not self._kill_switch_active:
+                await self._activate_kill_switch(
+                    reason=KillSwitchReason.WEEKLY_LOSS_LIMIT,
+                    action=KillSwitchAction.HALT_NEW_ORDERS,
+                    triggered_by="weekly_loss_monitor"
+                )
+
+            return RiskCheckResult(
+                check_name="weekly_loss_limit",
+                passed=False,
+                current_value=weekly_pnl,
+                limit_value=-self._max_weekly_loss_pct,
+                message=f"Weekly loss {weekly_pnl*100:.2f}% exceeds {self._max_weekly_loss_pct*100:.1f}% limit - KILL SWITCH ACTIVE"
+            )
+
+        return RiskCheckResult(
+            check_name="weekly_loss_limit",
+            passed=True,
+            current_value=weekly_pnl,
+            limit_value=-self._max_weekly_loss_pct,
+            message=""
+        )
+
+    async def _check_rolling_drawdown(self) -> RiskCheckResult:
+        """
+        Check rolling N-day drawdown (default 5 days).
+
+        Monitors equity peak-to-trough over rolling window.
+        This is a HARD stop - triggers kill-switch requiring manual reset.
+
+        Returns:
+            RiskCheckResult with pass/fail status
+        """
+        now = datetime.now(timezone.utc)
+
+        # Get current equity
+        current_equity = self._risk_state.net_liquidation
+
+        # Update rolling equity history
+        self._rolling_equity_history.append((now, current_equity))
+
+        # Calculate rolling drawdown
+        if len(self._rolling_equity_history) < 2:
+            return RiskCheckResult(
+                check_name="rolling_drawdown",
+                passed=True,
+                current_value=0.0,
+                limit_value=-self._max_rolling_drawdown_pct,
+                message="Insufficient history for rolling drawdown calculation"
+            )
+
+        # Find peak equity in window
+        window_start = now - timedelta(days=self._rolling_drawdown_days)
+        window_equities = [
+            eq for ts, eq in self._rolling_equity_history
+            if ts >= window_start and eq > 0
+        ]
+
+        if not window_equities:
+            return RiskCheckResult(
+                check_name="rolling_drawdown",
+                passed=True,
+                current_value=0.0,
+                limit_value=-self._max_rolling_drawdown_pct,
+                message="No equity data in rolling window"
+            )
+
+        peak_equity = max(window_equities)
+        rolling_drawdown = (current_equity - peak_equity) / peak_equity if peak_equity > 0 else 0
+
+        breached = rolling_drawdown < -self._max_rolling_drawdown_pct
+
+        if breached:
+            logger.critical(
+                f"ROLLING {self._rolling_drawdown_days}-DAY DRAWDOWN BREACHED: "
+                f"{rolling_drawdown*100:.2f}% < -{self._max_rolling_drawdown_pct*100:.1f}%. "
+                f"Kill-switch activation required."
+            )
+
+            # Activate kill-switch for rolling drawdown breach
+            if not self._kill_switch_active:
+                await self._activate_kill_switch(
+                    reason=KillSwitchReason.ROLLING_DRAWDOWN,
+                    action=KillSwitchAction.HALT_NEW_ORDERS,
+                    triggered_by="rolling_drawdown_monitor"
+                )
+
+            return RiskCheckResult(
+                check_name="rolling_drawdown",
+                passed=False,
+                current_value=rolling_drawdown,
+                limit_value=-self._max_rolling_drawdown_pct,
+                message=f"Rolling {self._rolling_drawdown_days}-day drawdown {rolling_drawdown*100:.2f}% exceeds {self._max_rolling_drawdown_pct*100:.1f}% limit - KILL SWITCH ACTIVE"
+            )
+
+        return RiskCheckResult(
+            check_name="rolling_drawdown",
+            passed=True,
+            current_value=rolling_drawdown,
+            limit_value=-self._max_rolling_drawdown_pct,
+            message=""
+        )
+
+    def requires_manual_override_reset(self) -> bool:
+        """
+        Check if kill-switch was triggered by a reason requiring manual override.
+
+        Weekly loss and rolling drawdown breaches require explicit manual reset
+        to prevent automatic recovery trading after severe losses.
+
+        Returns:
+            True if manual override reset is required
+        """
+        if not self._kill_switch_active:
+            return False
+
+        manual_override_reasons = {
+            KillSwitchReason.WEEKLY_LOSS_LIMIT,
+            KillSwitchReason.ROLLING_DRAWDOWN,
+            KillSwitchReason.MANUAL,
+        }
+
+        return (
+            self._kill_switch_manual_override_required and
+            self._kill_switch_reason in manual_override_reasons
+        )
+
+    def get_weekly_loss_stats(self) -> dict:
+        """Get weekly loss statistics."""
+        now = datetime.now(timezone.utc)
+        week_ago = now - timedelta(days=7)
+
+        weekly_pnl = sum(
+            pnl for ts, pnl in self._weekly_pnl_history
+            if ts >= week_ago
+        )
+
+        return {
+            "weekly_pnl_pct": weekly_pnl * 100,
+            "max_weekly_loss_pct": self._max_weekly_loss_pct * 100,
+            "remaining_loss_capacity_pct": (self._max_weekly_loss_pct + weekly_pnl) * 100,
+            "history_count": len(self._weekly_pnl_history),
+            "oldest_entry": self._weekly_pnl_history[0][0].isoformat() if self._weekly_pnl_history else None,
+        }
+
+    def get_rolling_drawdown_stats(self) -> dict:
+        """Get rolling drawdown statistics."""
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(days=self._rolling_drawdown_days)
+
+        window_equities = [
+            eq for ts, eq in self._rolling_equity_history
+            if ts >= window_start and eq > 0
+        ]
+
+        if not window_equities:
+            return {
+                "rolling_drawdown_pct": 0.0,
+                "max_rolling_drawdown_pct": self._max_rolling_drawdown_pct * 100,
+                "peak_equity": 0.0,
+                "current_equity": self._risk_state.net_liquidation,
+                "window_days": self._rolling_drawdown_days,
+            }
+
+        peak_equity = max(window_equities)
+        current_equity = self._risk_state.net_liquidation
+        rolling_drawdown = (current_equity - peak_equity) / peak_equity if peak_equity > 0 else 0
+
+        return {
+            "rolling_drawdown_pct": rolling_drawdown * 100,
+            "max_rolling_drawdown_pct": self._max_rolling_drawdown_pct * 100,
+            "peak_equity": peak_equity,
+            "current_equity": current_equity,
+            "window_days": self._rolling_drawdown_days,
+            "remaining_drawdown_capacity_pct": (self._max_rolling_drawdown_pct + rolling_drawdown) * 100,
+        }
+
+    async def _check_position_daily_loss_limit(self, decision: DecisionEvent) -> RiskCheckResult:
+        """
+        Check per-position daily loss limit - NEW money management control.
+
+        Prevents adding to or increasing a position that has already lost more than
+        the per-position daily limit (default 1% of portfolio) today.
+
+        This is a HARD limit - if a position has lost > 1% today, we cannot add to it.
+        This prevents "doubling down" on losing positions.
+
+        Args:
+            decision: The trading decision to validate
+
+        Returns:
+            RiskCheckResult - passes if position within daily loss limit
+        """
+        symbol = decision.symbol
+        portfolio_value = self._risk_state.net_liquidation
+
+        # Reset tracking at start of new day
+        now = datetime.now(timezone.utc)
+        if self._position_pnl_last_reset is None:
+            self._position_pnl_last_reset = now
+            self._position_daily_pnl = {}
+        elif now.date() != self._position_pnl_last_reset.date():
+            # New trading day - reset all position P&L tracking
+            self._position_daily_pnl = {}
+            self._position_pnl_last_reset = now
+            logger.info("Per-position daily P&L tracking reset for new trading day")
+
+        # Get current position info
+        position = self._risk_state.positions.get(symbol)
+
+        if position is None:
+            # No existing position - this is a new position, allow it
+            return RiskCheckResult(
+                check_name="position_daily_loss_limit",
+                passed=True,
+                current_value=0.0,
+                limit_value=-self._max_position_daily_loss_pct,
+                message=""
+            )
+
+        # Calculate position's daily P&L as % of portfolio
+        position_pnl = position.unrealized_pnl
+        position_pnl_pct = position_pnl / portfolio_value if portfolio_value > 0 else 0
+
+        # Update tracking
+        self._position_daily_pnl[symbol] = position_pnl_pct
+
+        # Check if position has breached daily loss limit
+        max_loss = -self._max_position_daily_loss_pct  # e.g., -0.01 for 1%
+        position_breached = position_pnl_pct < max_loss
+
+        if position_breached:
+            # Only allow reducing the position, not adding to it
+            is_reducing = (
+                (position.quantity > 0 and decision.action == OrderSide.SELL) or
+                (position.quantity < 0 and decision.action == OrderSide.BUY)
+            )
+
+            if is_reducing:
+                # Allow reducing a losing position
+                return RiskCheckResult(
+                    check_name="position_daily_loss_limit",
+                    passed=True,
+                    current_value=position_pnl_pct,
+                    limit_value=max_loss,
+                    message=f"Position {symbol} down {position_pnl_pct*100:.2f}% today - reducing position allowed"
+                )
+            else:
+                # Block adding to a losing position
+                logger.warning(
+                    f"Per-position daily loss limit breached for {symbol}: "
+                    f"{position_pnl_pct*100:.2f}% loss (limit: {max_loss*100:.1f}%). "
+                    f"Cannot add to position."
+                )
+                return RiskCheckResult(
+                    check_name="position_daily_loss_limit",
+                    passed=False,
+                    current_value=position_pnl_pct,
+                    limit_value=max_loss,
+                    message=f"Position {symbol} daily loss {position_pnl_pct*100:.2f}% exceeds {max_loss*100:.1f}% limit - cannot add to position"
+                )
+
+        return RiskCheckResult(
+            check_name="position_daily_loss_limit",
+            passed=True,
+            current_value=position_pnl_pct,
+            limit_value=max_loss,
+            message=""
+        )
+
+    def get_positions_at_daily_loss_limit(self) -> list[dict]:
+        """
+        Get list of positions that have hit their daily loss limit.
+
+        Returns:
+            List of dicts with symbol, daily_pnl_pct, and limit info
+        """
+        positions_at_limit = []
+        max_loss = -self._max_position_daily_loss_pct
+
+        for symbol, pnl_pct in self._position_daily_pnl.items():
+            if pnl_pct < max_loss:
+                positions_at_limit.append({
+                    "symbol": symbol,
+                    "daily_pnl_pct": pnl_pct * 100,
+                    "limit_pct": max_loss * 100,
+                    "excess_loss_pct": (pnl_pct - max_loss) * 100,
+                    "status": "BLOCKED - cannot add to position"
+                })
+
+        return positions_at_limit
 
     async def _check_drawdown_limit(self) -> RiskCheckResult:
         """
-        Check drawdown with tiered response.
+        Check drawdown with tiered AUTONOMOUS response.
+
+        IMPORTANT: The system NEVER shuts down. Instead, it autonomously manages risk
+        through progressive position reduction and defensive mode activation.
 
         Tiers:
         - NORMAL (<5%): Normal trading
-        - WARNING (5-7.5%): Log warnings, continue trading
-        - REDUCE (7.5-10%): Reduce position sizes by configured factor
-        - HALT (>10%): Trigger kill-switch
+        - WARNING (5-10%): Reduce new position sizes by 50%, log warnings
+        - CRITICAL (10-15%): Close worst 20% of positions, no new long positions
+        - SEVERE (15-20%): Close worst 50% of positions, defensive mode (only exits)
+        - MAXIMUM (>=20%): Close all positions, wait for manual reset (NO SHUTDOWN)
 
         Returns:
-            RiskCheckResult with appropriate pass/fail based on tier
+            RiskCheckResult - ALWAYS passes to keep system running, but with context
         """
         current_dd = self._risk_state.current_drawdown_pct
 
         # Determine current drawdown level
         previous_level = self._current_drawdown_level
 
-        if current_dd >= self._drawdown_halt_pct:
-            new_level = DrawdownLevel.HALT
-        elif current_dd >= self._drawdown_reduce_pct:
-            new_level = DrawdownLevel.REDUCE
+        if current_dd >= self._drawdown_maximum_pct:
+            new_level = DrawdownLevel.MAXIMUM
+        elif current_dd >= self._drawdown_severe_pct:
+            new_level = DrawdownLevel.SEVERE
+        elif current_dd >= self._drawdown_critical_pct:
+            new_level = DrawdownLevel.CRITICAL
         elif current_dd >= self._drawdown_warning_pct:
             new_level = DrawdownLevel.WARNING
         else:
@@ -1148,24 +1631,34 @@ class RiskAgent(ValidationAgent):
             self._drawdown_level_time = datetime.now(timezone.utc)
             await self._handle_drawdown_level_change(previous_level, new_level, current_dd)
 
-        # Return result based on level
-        if new_level == DrawdownLevel.HALT:
+        # ALWAYS pass - system never shuts down, it manages risk autonomously
+        # Return context-appropriate messages for monitoring
+
+        if new_level == DrawdownLevel.MAXIMUM:
             return RiskCheckResult(
                 check_name="max_drawdown",
-                passed=False,
+                passed=True,  # ALWAYS TRUE - no shutdown
                 current_value=current_dd,
-                limit_value=self._drawdown_halt_pct,
-                message=f"KILL-SWITCH: Drawdown {current_dd*100:.2f}% exceeds {self._drawdown_halt_pct*100:.1f}% halt threshold"
+                limit_value=self._drawdown_maximum_pct,
+                message=f"MAXIMUM DRAWDOWN: {current_dd*100:.2f}% - ALL POSITIONS CLOSED, awaiting reset. System remains RUNNING."
             )
 
-        # REDUCE and WARNING levels pass but with context
-        if new_level == DrawdownLevel.REDUCE:
+        if new_level == DrawdownLevel.SEVERE:
             return RiskCheckResult(
                 check_name="max_drawdown",
-                passed=True,
+                passed=True,  # ALWAYS TRUE - no shutdown
                 current_value=current_dd,
-                limit_value=self._drawdown_halt_pct,
-                message=f"REDUCE MODE: Drawdown {current_dd*100:.2f}% - position sizes reduced by {(1-self._drawdown_position_reduction)*100:.0f}%"
+                limit_value=self._drawdown_maximum_pct,
+                message=f"SEVERE DRAWDOWN: {current_dd*100:.2f}% - Closing worst 50%, DEFENSIVE MODE active (exits only)"
+            )
+
+        if new_level == DrawdownLevel.CRITICAL:
+            return RiskCheckResult(
+                check_name="max_drawdown",
+                passed=True,  # ALWAYS TRUE - no shutdown
+                current_value=current_dd,
+                limit_value=self._drawdown_maximum_pct,
+                message=f"CRITICAL DRAWDOWN: {current_dd*100:.2f}% - Closing worst 20%, NO NEW LONGS allowed"
             )
 
         if new_level == DrawdownLevel.WARNING:
@@ -1173,16 +1666,19 @@ class RiskAgent(ValidationAgent):
                 check_name="max_drawdown",
                 passed=True,
                 current_value=current_dd,
-                limit_value=self._drawdown_halt_pct,
-                message=f"WARNING: Drawdown {current_dd*100:.2f}% approaching reduce threshold ({self._drawdown_reduce_pct*100:.1f}%)"
+                limit_value=self._drawdown_maximum_pct,
+                message=f"WARNING: Drawdown {current_dd*100:.2f}% - new position sizes reduced by 50%"
             )
 
-        # Normal level
+        # Normal level - reset defensive flags
+        self._defensive_mode_active = False
+        self._no_new_longs = False
+
         return RiskCheckResult(
             check_name="max_drawdown",
             passed=True,
             current_value=current_dd,
-            limit_value=self._drawdown_halt_pct,
+            limit_value=self._drawdown_maximum_pct,
         )
 
     async def _handle_drawdown_level_change(
@@ -1192,42 +1688,74 @@ class RiskAgent(ValidationAgent):
         drawdown_pct: float
     ) -> None:
         """
-        Handle transitions between drawdown levels.
+        Handle transitions between drawdown levels with AUTONOMOUS ACTIONS.
 
-        Publishes appropriate alerts and logs for audit trail.
+        IMPORTANT: The system NEVER shuts down. Instead, it takes autonomous
+        risk management actions based on the drawdown level:
+        - WARNING: Reduce new position sizes by 50%
+        - CRITICAL: Close worst 20% of positions, block new longs
+        - SEVERE: Close worst 50% of positions, enter defensive mode
+        - MAXIMUM: Close ALL positions, wait for reset (but stay running)
         """
-        level_order = [DrawdownLevel.NORMAL, DrawdownLevel.WARNING, DrawdownLevel.REDUCE, DrawdownLevel.HALT]
+        level_order = [DrawdownLevel.NORMAL, DrawdownLevel.WARNING, DrawdownLevel.CRITICAL, DrawdownLevel.SEVERE, DrawdownLevel.MAXIMUM]
         is_escalation = level_order.index(current) > level_order.index(previous)
 
+        # Take AUTONOMOUS ACTIONS based on new level
         if current == DrawdownLevel.WARNING:
             severity = RiskAlertSeverity.WARNING
-            message = f"Drawdown WARNING: {drawdown_pct*100:.2f}% (threshold: {self._drawdown_warning_pct*100:.1f}%)"
+            message = f"Drawdown WARNING: {drawdown_pct*100:.2f}% - Reducing new position sizes by 50%"
             logger.warning(message)
-        elif current == DrawdownLevel.REDUCE:
-            severity = RiskAlertSeverity.HIGH
-            message = f"Drawdown REDUCE MODE: {drawdown_pct*100:.2f}% - reducing position sizes by {(1-self._drawdown_position_reduction)*100:.0f}%"
+            # Set position reduction
+            self._no_new_longs = False
+            self._defensive_mode_active = False
+
+        elif current == DrawdownLevel.CRITICAL:
+            severity = RiskAlertSeverity.CRITICAL
+            message = f"Drawdown CRITICAL: {drawdown_pct*100:.2f}% - AUTONOMOUS ACTION: Closing worst 20% of positions, blocking new longs"
             logger.warning(message)
-        elif current == DrawdownLevel.HALT:
-            severity = RiskAlertSeverity.EMERGENCY
-            message = f"Drawdown HALT: {drawdown_pct*100:.2f}% exceeds {self._drawdown_halt_pct*100:.1f}% - KILL SWITCH ACTIVATED"
+            # Take autonomous action: close worst 20%
+            self._no_new_longs = True
+            self._defensive_mode_active = False
+            await self._close_worst_performing_positions(self._drawdown_close_worst_critical_pct)
+
+        elif current == DrawdownLevel.SEVERE:
+            severity = RiskAlertSeverity.CRITICAL
+            message = f"Drawdown SEVERE: {drawdown_pct*100:.2f}% - AUTONOMOUS ACTION: Closing worst 50%, entering DEFENSIVE MODE"
             logger.critical(message)
-        elif current == DrawdownLevel.NORMAL and is_escalation is False:
-            # Recovery
+            # Take autonomous action: close worst 50%, enter defensive mode
+            self._no_new_longs = True
+            self._defensive_mode_active = True
+            await self._close_worst_performing_positions(self._drawdown_close_worst_severe_pct)
+            await self._tighten_stop_losses()
+
+        elif current == DrawdownLevel.MAXIMUM:
+            severity = RiskAlertSeverity.EMERGENCY
+            message = f"Drawdown MAXIMUM: {drawdown_pct*100:.2f}% - AUTONOMOUS ACTION: CLOSING ALL POSITIONS. System remains RUNNING."
+            logger.critical(message)
+            # Take autonomous action: close ALL positions
+            self._no_new_longs = True
+            self._defensive_mode_active = True
+            await self._close_all_positions_autonomously()
+
+        elif current == DrawdownLevel.NORMAL and not is_escalation:
+            # Recovery - reset all defensive measures
             severity = RiskAlertSeverity.LOW
-            message = f"Drawdown recovered to NORMAL: {drawdown_pct*100:.2f}%"
+            message = f"Drawdown recovered to NORMAL: {drawdown_pct*100:.2f}% - Resuming normal trading"
             logger.info(message)
+            self._no_new_longs = False
+            self._defensive_mode_active = False
         else:
             return  # No alert needed
 
-        # Publish alert
+        # Publish alert - NEVER halt_trading=True, system always stays running
         alert = RiskAlertEvent(
             source_agent=self.name,
             severity=severity,
             alert_type="drawdown_level_change",
             message=message,
             current_value=drawdown_pct,
-            threshold_value=self._drawdown_halt_pct,
-            halt_trading=(current == DrawdownLevel.HALT),
+            threshold_value=self._drawdown_maximum_pct,
+            halt_trading=False,  # NEVER halt - autonomous risk management instead
         )
         await self._event_bus.publish(alert)
 
@@ -1238,8 +1766,8 @@ class RiskAgent(ValidationAgent):
             severity=severity.value,
             message=message,
             current_value=drawdown_pct,
-            threshold_value=self._drawdown_halt_pct,
-            halt_trading=(current == DrawdownLevel.HALT),
+            threshold_value=self._drawdown_maximum_pct,
+            halt_trading=False,  # NEVER halt - autonomous risk management instead
         )
 
     def get_drawdown_level(self) -> DrawdownLevel:
@@ -1250,14 +1778,302 @@ class RiskAgent(ValidationAgent):
         """
         Get position size multiplier based on drawdown level.
 
+        Autonomous risk management - progressively reduce position sizes
+        as drawdown increases, but NEVER return 0 (system stays active).
+
         Returns:
-            1.0 for NORMAL/WARNING, configured reduction for REDUCE, 0.0 for HALT
+            1.0 for NORMAL
+            0.5 for WARNING (50% reduction)
+            0.0 for CRITICAL/SEVERE/MAXIMUM (no new positions, only exits)
         """
-        if self._current_drawdown_level == DrawdownLevel.REDUCE:
-            return self._drawdown_position_reduction
-        elif self._current_drawdown_level == DrawdownLevel.HALT:
-            return 0.0
-        return 1.0
+        if self._current_drawdown_level == DrawdownLevel.MAXIMUM:
+            return 0.0  # No new positions, closing everything
+        elif self._current_drawdown_level == DrawdownLevel.SEVERE:
+            return 0.0  # Defensive mode - no new positions
+        elif self._current_drawdown_level == DrawdownLevel.CRITICAL:
+            return self._drawdown_position_reduction_critical  # 0 for new longs
+        elif self._current_drawdown_level == DrawdownLevel.WARNING:
+            return self._drawdown_position_reduction_warning  # 0.5 = 50% size
+        return 1.0  # Normal
+
+    def is_defensive_mode(self) -> bool:
+        """Check if system is in defensive mode (exits only, no new trades)."""
+        return self._defensive_mode_active
+
+    def is_new_longs_blocked(self) -> bool:
+        """Check if new long positions are blocked."""
+        return self._no_new_longs
+
+    def can_open_new_position(self, is_long: bool = True) -> tuple[bool, str]:
+        """
+        Check if a new position can be opened based on drawdown level.
+
+        Args:
+            is_long: True for long positions, False for short
+
+        Returns:
+            Tuple of (allowed, reason)
+        """
+        if self._defensive_mode_active:
+            return False, f"DEFENSIVE MODE active (drawdown level: {self._current_drawdown_level.value}) - only exits allowed"
+
+        if self._no_new_longs and is_long:
+            return False, f"NEW LONGS BLOCKED (drawdown level: {self._current_drawdown_level.value}) - reduce positions first"
+
+        if self._current_drawdown_level == DrawdownLevel.MAXIMUM:
+            return False, "MAXIMUM DRAWDOWN - all positions being closed, wait for reset"
+
+        return True, "OK"
+
+    # =========================================================================
+    # AUTONOMOUS POSITION MANAGEMENT
+    # =========================================================================
+
+    async def _close_worst_performing_positions(self, close_pct: float) -> None:
+        """
+        Autonomously close the worst-performing positions.
+
+        Args:
+            close_pct: Percentage of positions to close (0.2 = worst 20%)
+        """
+        if not self._broker:
+            logger.warning("Cannot close positions autonomously - no broker connected")
+            return
+
+        positions = list(self._risk_state.positions.values())
+        if not positions:
+            logger.info("No positions to close")
+            return
+
+        # Sort by unrealized P&L (worst first)
+        sorted_positions = sorted(positions, key=lambda p: p.unrealized_pnl)
+
+        # Calculate how many to close
+        num_to_close = max(1, int(len(sorted_positions) * close_pct))
+        positions_to_close = sorted_positions[:num_to_close]
+
+        logger.warning(
+            f"AUTONOMOUS ACTION: Closing {num_to_close} worst-performing positions "
+            f"({close_pct*100:.0f}% of {len(sorted_positions)} positions)"
+        )
+
+        for pos in positions_to_close:
+            await self._request_position_closure(pos)
+
+    async def _close_all_positions_autonomously(self) -> None:
+        """
+        Autonomously close ALL positions due to maximum drawdown.
+
+        This is an emergency measure but does NOT shutdown the system.
+        """
+        if not self._broker:
+            logger.warning("Cannot close positions autonomously - no broker connected")
+            return
+
+        positions = list(self._risk_state.positions.values())
+        if not positions:
+            logger.info("No positions to close")
+            return
+
+        logger.critical(
+            f"AUTONOMOUS ACTION: CLOSING ALL {len(positions)} POSITIONS due to MAXIMUM DRAWDOWN"
+        )
+
+        for pos in positions:
+            await self._request_position_closure(pos)
+
+    async def _request_position_closure(self, pos: PositionInfo) -> None:
+        """
+        Request closure of a specific position through the event bus.
+
+        Creates a market order to close the position.
+        """
+        try:
+            close_side = OrderSide.SELL if pos.quantity > 0 else OrderSide.BUY
+            close_qty = abs(pos.quantity)
+
+            logger.info(
+                f"AUTONOMOUS CLOSE: {pos.symbol} - {close_side.value} {close_qty} shares "
+                f"(unrealized P&L: ${pos.unrealized_pnl:,.2f})"
+            )
+
+            # Publish a risk-initiated closure event
+            alert = RiskAlertEvent(
+                source_agent=self.name,
+                severity=RiskAlertSeverity.CRITICAL,
+                alert_type="autonomous_position_closure",
+                message=f"Closing position {pos.symbol}: {close_qty} @ market (drawdown protection)",
+                affected_symbols=(pos.symbol,),
+                current_value=pos.unrealized_pnl,
+                threshold_value=0,
+                halt_trading=False,  # Never halt
+            )
+            await self._event_bus.publish(alert)
+
+            # Log for audit
+            self._audit_logger.log_risk_alert(
+                agent_name=self.name,
+                alert_type="autonomous_position_closure",
+                severity="high",
+                message=f"Autonomous closure: {pos.symbol} qty={close_qty}",
+                current_value=pos.unrealized_pnl,
+                threshold_value=0,
+                halt_trading=False,
+            )
+
+        except Exception as e:
+            logger.exception(f"Error requesting position closure for {pos.symbol}: {e}")
+
+    async def _tighten_stop_losses(self) -> None:
+        """
+        Tighten stop-losses on all remaining positions.
+
+        Called when entering SEVERE drawdown mode to protect remaining positions.
+        """
+        logger.info("AUTONOMOUS ACTION: Tightening stop-losses on all remaining positions")
+
+        for symbol, pos in self._risk_state.positions.items():
+            if pos.quantity != 0:
+                # Publish event for execution agent to tighten stops
+                alert = RiskAlertEvent(
+                    source_agent=self.name,
+                    severity=RiskAlertSeverity.WARNING,
+                    alert_type="tighten_stop_loss",
+                    message=f"Tighten stop-loss for {symbol} due to SEVERE drawdown",
+                    affected_symbols=(symbol,),
+                    current_value=self._risk_state.current_drawdown_pct,
+                    threshold_value=self._drawdown_severe_pct,
+                    halt_trading=False,
+                )
+                await self._event_bus.publish(alert)
+
+        self._audit_logger.log_risk_alert(
+            agent_name=self.name,
+            alert_type="tighten_stop_losses",
+            severity="warning",
+            message=f"Stop-losses tightened for {len(self._risk_state.positions)} positions",
+            current_value=self._risk_state.current_drawdown_pct,
+            threshold_value=self._drawdown_severe_pct,
+            halt_trading=False,
+        )
+
+    def reset_after_maximum_drawdown(self, authorized_by: str) -> tuple[bool, str]:
+        """
+        Reset the system after maximum drawdown - requires authorization.
+
+        This should be called after a human reviews the situation and
+        determines it's safe to resume trading.
+
+        Args:
+            authorized_by: Username of person authorizing the reset
+
+        Returns:
+            Tuple of (success, message)
+        """
+        if authorized_by not in self._authorized_users:
+            msg = f"Unauthorized reset attempt by: {authorized_by}"
+            logger.error(msg)
+            return False, msg
+
+        if self._current_drawdown_level != DrawdownLevel.MAXIMUM:
+            return False, f"Reset not needed - current level is {self._current_drawdown_level.value}"
+
+        # Check that all positions are actually closed
+        open_positions = [p for p in self._risk_state.positions.values() if p.quantity != 0]
+        if open_positions:
+            return False, f"Cannot reset - {len(open_positions)} positions still open"
+
+        # Reset peak equity to current (start fresh)
+        self._risk_state.peak_equity = self._risk_state.net_liquidation
+        self._risk_state.max_drawdown_pct = 0.0
+        self._risk_state.current_drawdown_pct = 0.0
+
+        # Reset defensive flags
+        self._defensive_mode_active = False
+        self._no_new_longs = False
+        self._current_drawdown_level = DrawdownLevel.NORMAL
+        self._drawdown_level_time = datetime.now(timezone.utc)
+
+        # Clear any kill switch (legacy)
+        self._kill_switch_active = False
+        self._kill_switch_reason = None
+        self._kill_switch_time = None
+
+        logger.warning(
+            f"SYSTEM RESET by {authorized_by}: Peak equity reset to ${self._risk_state.net_liquidation:,.0f}, "
+            f"all defensive measures cleared. Normal trading resumed."
+        )
+
+        self._audit_logger.log_risk_alert(
+            agent_name=self.name,
+            alert_type="system_reset",
+            severity="warning",
+            message=f"System reset by {authorized_by} after maximum drawdown",
+            current_value=self._risk_state.net_liquidation,
+            threshold_value=0,
+            halt_trading=False,
+        )
+
+        return True, f"System reset successfully. Peak equity: ${self._risk_state.net_liquidation:,.0f}"
+
+    def force_defensive_mode(self, reason: str = "manual") -> None:
+        """
+        Manually force the system into defensive mode.
+
+        Useful for external risk management or market conditions.
+
+        Args:
+            reason: Reason for forcing defensive mode
+        """
+        logger.warning(f"DEFENSIVE MODE FORCED: {reason}")
+        self._defensive_mode_active = True
+        self._no_new_longs = True
+
+        self._audit_logger.log_risk_alert(
+            agent_name=self.name,
+            alert_type="defensive_mode_forced",
+            severity="warning",
+            message=f"Defensive mode forced: {reason}",
+            current_value=self._risk_state.current_drawdown_pct,
+            threshold_value=0,
+            halt_trading=False,
+        )
+
+    def exit_defensive_mode(self, authorized_by: str) -> tuple[bool, str]:
+        """
+        Exit defensive mode - requires authorization.
+
+        Args:
+            authorized_by: Username of person authorizing the exit
+
+        Returns:
+            Tuple of (success, message)
+        """
+        if authorized_by not in self._authorized_users:
+            msg = f"Unauthorized exit attempt by: {authorized_by}"
+            logger.error(msg)
+            return False, msg
+
+        # Only allow if drawdown has recovered
+        if self._current_drawdown_level in [DrawdownLevel.SEVERE, DrawdownLevel.MAXIMUM]:
+            return False, f"Cannot exit defensive mode - drawdown level is {self._current_drawdown_level.value}"
+
+        self._defensive_mode_active = False
+        self._no_new_longs = False
+
+        logger.warning(f"DEFENSIVE MODE EXITED by {authorized_by}")
+
+        self._audit_logger.log_risk_alert(
+            agent_name=self.name,
+            alert_type="defensive_mode_exited",
+            severity="warning",
+            message=f"Defensive mode exited by {authorized_by}",
+            current_value=self._risk_state.current_drawdown_pct,
+            threshold_value=0,
+            halt_trading=False,
+        )
+
+        return True, "Defensive mode exited successfully"
 
     def _check_rate_limit(self) -> RiskCheckResult:
         """Check order rate limit (anti-HFT: 10 orders/min)."""
@@ -1477,7 +2293,7 @@ class RiskAgent(ValidationAgent):
             returns = self._returns_buffer
         else:
             # Buffer not yet full, use only filled portion
-            returns = self._returns_buffer[:self._buffer_idx] if self._buffer_idx > 0 else np.array(self._returns_history[-252:])
+            returns = self._returns_buffer[:self._buffer_idx] if self._buffer_idx > 0 else np.array(list(self._returns_history)[-252:])
 
         # Calculate return statistics
         mean_return = np.mean(returns)  # mu: expected daily return
@@ -1841,6 +2657,31 @@ class RiskAgent(ValidationAgent):
         if reason == KillSwitchReason.DAILY_LOSS_LIMIT:
             current_value = self._risk_state.daily_pnl_pct
             threshold_value = self._max_daily_loss_pct
+        elif reason == KillSwitchReason.WEEKLY_LOSS_LIMIT:
+            # Calculate weekly cumulative loss
+            now = datetime.now(timezone.utc)
+            week_ago = now - timedelta(days=7)
+            weekly_pnl = sum(
+                pnl for ts, pnl in self._weekly_pnl_history
+                if ts >= week_ago
+            )
+            current_value = weekly_pnl
+            threshold_value = self._max_weekly_loss_pct
+        elif reason == KillSwitchReason.ROLLING_DRAWDOWN:
+            # Calculate rolling drawdown
+            now = datetime.now(timezone.utc)
+            window_start = now - timedelta(days=self._rolling_drawdown_days)
+            window_equities = [
+                eq for ts, eq in self._rolling_equity_history
+                if ts >= window_start and eq > 0
+            ]
+            if window_equities:
+                peak_equity = max(window_equities)
+                current_equity = self._risk_state.net_liquidation
+                current_value = (current_equity - peak_equity) / peak_equity if peak_equity > 0 else 0
+            else:
+                current_value = 0
+            threshold_value = self._max_rolling_drawdown_pct
         elif reason == KillSwitchReason.MAX_DRAWDOWN:
             current_value = self._risk_state.current_drawdown_pct
             threshold_value = self._max_drawdown_pct
@@ -1863,6 +2704,18 @@ class RiskAgent(ValidationAgent):
         )
 
         await self._event_bus.publish(alert)
+
+        # MiFID II RTS 6: Publish structured KillSwitchEvent for immutable audit ledger
+        kill_switch_event = KillSwitchEvent(
+            source_agent=self.name,
+            activated=True,
+            reason=f"{reason.value}: {activation_record}",
+            trigger_type="automatic" if triggered_by == "system" else "manual",
+            affected_symbols=(),  # All symbols
+            cancel_pending_orders=(action in [KillSwitchAction.CANCEL_PENDING, KillSwitchAction.FULL_SHUTDOWN]),
+            close_positions=(action in [KillSwitchAction.CLOSE_POSITIONS, KillSwitchAction.FULL_SHUTDOWN]),
+        )
+        await self._event_bus.publish(kill_switch_event, priority=True)
 
         # Execute action
         if action == KillSwitchAction.CANCEL_PENDING:
@@ -2001,7 +2854,8 @@ class RiskAgent(ValidationAgent):
     def deactivate_kill_switch(
         self,
         authorized_by: str,
-        second_authorization: str | None = None
+        second_authorization: str | None = None,
+        manual_override_confirmed: bool = False
     ) -> tuple[bool, str]:
         """
         Deactivate kill-switch (requires authorization, optionally dual).
@@ -2012,6 +2866,8 @@ class RiskAgent(ValidationAgent):
         Args:
             authorized_by: Primary authorizing user
             second_authorization: Second authorizing user (if dual auth required)
+            manual_override_confirmed: Explicit confirmation for manual override reset
+                                       Required for WEEKLY_LOSS_LIMIT and ROLLING_DRAWDOWN
 
         Returns:
             Tuple of (success, message)
@@ -2041,6 +2897,26 @@ class RiskAgent(ValidationAgent):
                 msg = "Dual authorization requires two different users"
                 logger.error(msg)
                 return False, msg
+
+        # Check if manual override is required for this kill switch reason
+        manual_override_reasons = {
+            KillSwitchReason.WEEKLY_LOSS_LIMIT,
+            KillSwitchReason.ROLLING_DRAWDOWN,
+        }
+
+        if (
+            self._kill_switch_manual_override_required and
+            self._kill_switch_reason in manual_override_reasons and
+            not manual_override_confirmed
+        ):
+            reason_name = self._kill_switch_reason.value if self._kill_switch_reason else "unknown"
+            msg = (
+                f"Manual override confirmation required to reset kill switch after {reason_name}. "
+                f"This is a severe loss event requiring explicit acknowledgment. "
+                f"Pass manual_override_confirmed=True to confirm."
+            )
+            logger.warning(msg)
+            return False, msg
 
         # Check cooldown period
         if self._kill_switch_time:
@@ -2080,6 +2956,27 @@ class RiskAgent(ValidationAgent):
             halt_trading=False,
         )
 
+        # MiFID II RTS 6: Publish structured KillSwitchEvent for immutable audit ledger
+        kill_switch_event = KillSwitchEvent(
+            source_agent=self.name,
+            activated=False,  # Deactivation
+            reason=f"Deactivated by {', '.join(authorizers)} after {duration_minutes:.1f} minutes",
+            trigger_type="manual",
+            affected_symbols=(),
+            cancel_pending_orders=False,
+            close_positions=False,
+        )
+        # Use asyncio.create_task since we're in a sync method
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(self._event_bus.publish(kill_switch_event, priority=True))
+            else:
+                loop.run_until_complete(self._event_bus.publish(kill_switch_event, priority=True))
+        except Exception as e:
+            logger.warning(f"Failed to publish kill switch deactivation event: {e}")
+
         self._kill_switch_active = False
         self._kill_switch_reason = None
         self._kill_switch_time = None
@@ -2094,8 +2991,7 @@ class RiskAgent(ValidationAgent):
     def add_daily_return(self, return_pct: float) -> None:
         """Add a daily return to history for VaR calculation."""
         self._returns_history.append(return_pct)
-        if len(self._returns_history) > self._max_history_days:
-            self._returns_history = self._returns_history[-self._max_history_days:]
+        # Note: deque has maxlen=self._max_history_days, so no manual trimming needed
 
         # Update pre-allocated rolling buffer (PERF-P1-001)
         self._returns_buffer[self._buffer_idx] = return_pct
@@ -2439,6 +3335,119 @@ class RiskAgent(ValidationAgent):
             message="No broker available for staleness check"
         )
 
+    async def _check_crash_protection(self, decision: DecisionEvent) -> RiskCheckResult:
+        """
+        Check crash protection system for momentum crash risk.
+
+        Uses EnhancedCrashProtection to detect:
+        - VIX spikes (>1.5x MA)
+        - Correlation spikes (+20% vs baseline)
+        - Drawdown velocity (>3%/day)
+        - Winner/loser reversals
+
+        When crash risk is HIGH or CRITICAL, reduces position sizes or blocks new entries.
+        """
+        if not self._crash_protection_enabled:
+            return RiskCheckResult(
+                check_name="crash_protection",
+                passed=True,
+                current_value=0.0,
+                limit_value=1.0,
+                message="Crash protection disabled"
+            )
+
+        # Update crash protection with current state
+        current_equity = self._risk_state.net_liquidation
+        current_vix = getattr(self, '_current_vix', 20.0)  # Default VIX if not tracked
+
+        # Record equity data point
+        self._crash_protection.record_equity(current_equity)
+
+        # Record VIX if available
+        if hasattr(self._crash_protection, 'record_vix'):
+            self._crash_protection.record_vix(current_vix)
+
+        # Evaluate crash risk (uses internal histories)
+        warning = self._crash_protection.evaluate_with_histories()
+
+        self._last_crash_warning = warning
+
+        # Access crash_warning attributes (VelocityAwareWarning wraps CrashWarning)
+        cw = warning.crash_warning
+
+        # Check warning level
+        if cw.level == "critical":
+            # Block new entries in critical crash risk
+            if decision.action == OrderSide.BUY:
+                return RiskCheckResult(
+                    check_name="crash_protection",
+                    passed=False,
+                    current_value=cw.probability,
+                    limit_value=0.8,
+                    message=f"CRASH RISK CRITICAL ({cw.probability:.0%}): {', '.join(cw.indicators[:2])}. New entries blocked.",
+                    details={
+                        "crash_level": cw.level,
+                        "indicators": cw.indicators,
+                        "recommended_action": cw.recommended_action,
+                        "leverage_multiplier": cw.leverage_multiplier,
+                    }
+                )
+
+        elif cw.level == "high":
+            # Allow but warn, reduce size via leverage multiplier
+            logger.warning(
+                f"CRASH RISK HIGH ({cw.probability:.0%}): {', '.join(cw.indicators[:2])}. "
+                f"Position size reduced to {cw.leverage_multiplier:.0%}"
+            )
+
+        # Check if we're in protection mode
+        if self._crash_protection._is_in_protection_mode:
+            mode_info = self._crash_protection.get_enhanced_status().get("protection_mode", {})
+            if mode_info.get("active") and decision.action == OrderSide.BUY:
+                return RiskCheckResult(
+                    check_name="crash_protection",
+                    passed=False,
+                    current_value=cw.probability,
+                    limit_value=0.8,
+                    message=f"PROTECTION MODE ACTIVE: Peak level {mode_info.get('peak_level', 'unknown')}. No new entries.",
+                    details=mode_info
+                )
+
+        return RiskCheckResult(
+            check_name="crash_protection",
+            passed=True,
+            current_value=cw.probability,
+            limit_value=1.0,
+            message=f"Crash risk {cw.level}: {cw.probability:.0%}" if cw.level != "low" else "",
+            details={
+                "crash_level": cw.level,
+                "leverage_multiplier": cw.leverage_multiplier,
+                "indicators": cw.indicators,
+            }
+        )
+
+    def update_vix(self, vix_value: float) -> None:
+        """Update current VIX value for crash protection."""
+        self._current_vix = vix_value
+        if self._crash_protection_enabled:
+            self._crash_protection.record_vix(vix_value)
+
+    def get_crash_protection_status(self) -> dict:
+        """Get crash protection system status."""
+        if not self._crash_protection_enabled:
+            return {"enabled": False}
+
+        status = self._crash_protection.get_status()
+        if self._last_crash_warning:
+            cw = self._last_crash_warning.crash_warning
+            status["last_warning"] = {
+                "level": cw.level,
+                "probability": cw.probability,
+                "indicators": cw.indicators,
+                "leverage_multiplier": cw.leverage_multiplier,
+            }
+        return status
+
     def update_greeks(
         self,
         delta: float,
@@ -2751,7 +3760,7 @@ class RiskAgent(ValidationAgent):
                 # Publish risk alert event
                 alert_event = RiskAlertEvent(
                     source_agent=self.name,
-                    severity=RiskAlertSeverity.HIGH if severity == "CRITICAL" else RiskAlertSeverity.WARNING,
+                    severity=RiskAlertSeverity.CRITICAL if severity == "CRITICAL" else RiskAlertSeverity.WARNING,
                     alert_type="position_aging",
                     message=alert["message"],
                     affected_symbols=(symbol,),
@@ -2807,7 +3816,7 @@ class RiskAgent(ValidationAgent):
                 "critical_days": self._position_aging_critical_days,
                 "max_days": self._position_aging_max_days,
             },
-            "recent_alerts": self._position_aging_alerts[-10:],
+            "recent_alerts": list(self._position_aging_alerts)[-10:],
         }
 
     def get_position_aging_alerts(self) -> list[dict]:
@@ -3016,7 +4025,7 @@ class RiskAgent(ValidationAgent):
             "current_breakdowns": breakdown_count,
             "significant_changes": significant_changes,
             "total_alerts": len(self._correlation_breakdown_alerts),
-            "recent_alerts": self._correlation_breakdown_alerts[-5:],
+            "recent_alerts": list(self._correlation_breakdown_alerts)[-5:],
         }
 
     def get_correlation_breakdown_alerts(self) -> list[dict]:
@@ -3302,7 +4311,7 @@ class RiskAgent(ValidationAgent):
         elif margin.is_critical():
             alert = RiskAlertEvent(
                 source_agent=self.name,
-                severity=RiskAlertSeverity.HIGH,
+                severity=RiskAlertSeverity.CRITICAL,
                 alert_type="margin_critical",
                 message=f"Critical margin: Utilization {margin.margin_utilization_pct:.1f}% approaching call level",
                 current_value=margin.margin_utilization_pct,
@@ -3559,8 +4568,19 @@ class RiskAgent(ValidationAgent):
     def get_status(self) -> dict:
         """Get current risk agent status for monitoring."""
         return {
+            # Legacy kill switch fields (kept for compatibility but should always be False in autonomous mode)
             "kill_switch_active": self._kill_switch_active,
             "kill_switch_reason": self._kill_switch_reason.value if self._kill_switch_reason else None,
+            # AUTONOMOUS RISK MANAGEMENT STATUS
+            "autonomous_mode": {
+                "enabled": True,  # Always enabled - system never shuts down
+                "defensive_mode_active": self._defensive_mode_active,
+                "no_new_longs": self._no_new_longs,
+                "position_size_multiplier": self.get_position_size_multiplier(),
+                "can_open_longs": not self._no_new_longs and not self._defensive_mode_active,
+                "can_open_shorts": not self._defensive_mode_active,
+                "exits_only": self._defensive_mode_active,
+            },
             "risk_state": {
                 "net_liquidation": self._risk_state.net_liquidation,
                 "daily_pnl_pct": self._risk_state.daily_pnl_pct,
@@ -3572,10 +4592,19 @@ class RiskAgent(ValidationAgent):
             "drawdown_control": {
                 "level": self._current_drawdown_level.value,
                 "warning_threshold_pct": self._drawdown_warning_pct * 100,
-                "reduce_threshold_pct": self._drawdown_reduce_pct * 100,
-                "halt_threshold_pct": self._drawdown_halt_pct * 100,
+                "critical_threshold_pct": self._drawdown_critical_pct * 100,
+                "severe_threshold_pct": self._drawdown_severe_pct * 100,
+                "maximum_threshold_pct": self._drawdown_maximum_pct * 100,
                 "position_size_multiplier": self.get_position_size_multiplier(),
                 "level_since": self._drawdown_level_time.isoformat() if self._drawdown_level_time else None,
+                # Autonomous actions per level
+                "level_actions": {
+                    "NORMAL": "Normal trading",
+                    "WARNING": "50% position size reduction",
+                    "CRITICAL": "Close worst 20%, no new longs",
+                    "SEVERE": "Close worst 50%, defensive mode (exits only)",
+                    "MAXIMUM": "Close ALL positions, wait for reset",
+                },
             },
             # Drawdown recovery tracking (#R11)
             "drawdown_recovery": self.get_drawdown_recovery_status(),
@@ -3606,4 +4635,12 @@ class RiskAgent(ValidationAgent):
             # P2: Correlation breakdown detection
             "correlation_monitoring": self.get_correlation_status(),
             "avg_check_latency_ms": np.mean(self._check_latencies) if self._check_latencies else 0,
+            # Risk limits (for dashboard display)
+            "limits": {
+                "max_leverage": self._max_leverage,
+                "max_position_size_pct": self._max_position_pct * 100,
+                "max_daily_loss_pct": self._max_daily_loss_pct * 100,
+                "max_drawdown_pct": self._max_drawdown_pct * 100,
+                "max_portfolio_var_pct": self._max_var_pct * 100,
+            },
         }

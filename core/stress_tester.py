@@ -306,6 +306,228 @@ PREDEFINED_SCENARIOS: dict[str, StressScenario] = {
         liquidity_haircut=0.30,
         severity=4,
     ),
+
+    # =========================================================================
+    # HISTORICAL CRISIS SCENARIOS (Phase 5)
+    # =========================================================================
+
+    "2008_financial_crisis": StressScenario(
+        scenario_id="HIST-001",
+        name="2008 Financial Crisis",
+        scenario_type=ScenarioType.MARKET_CRASH,
+        description="Lehman Brothers collapse scenario. S&P500 fell ~57% peak-to-trough. "
+                    "VIX spiked to 80+. Credit markets froze. Flight to quality.",
+        price_shocks={
+            # Equities - severe decline (peak-to-trough was 57%)
+            "AAPL": -0.45, "MSFT": -0.42, "GOOGL": -0.50, "AMZN": -0.55,
+            "JPM": -0.60, "BAC": -0.80, "C": -0.85,  # Financials hit hardest
+            "XLF": -0.75,  # Financial sector ETF
+            # Index products
+            "SPY": -0.50, "QQQ": -0.50, "IWM": -0.55,
+            "ES": -0.50, "NQ": -0.50, "YM": -0.48, "RTY": -0.55,
+            "MES": -0.50, "MNQ": -0.50,
+            # Safe havens - significant rally
+            "GC": 0.25, "MGC": 0.25,  # Gold rallied
+            "ZB": 0.20, "ZN": 0.15,  # Treasuries rallied
+            # Commodities - crashed with demand
+            "CL": -0.70, "NG": -0.60,  # Oil crashed from $145 to ~$30
+            # Currencies - USD strengthened vs risk currencies
+            "EURUSD": -0.15, "AUDUSD": -0.30,
+        },
+        volatility_multiplier=5.0,  # VIX hit 80+
+        correlation_override=0.95,  # Everything correlated
+        liquidity_haircut=0.70,  # Severe liquidity crisis
+        horizon_days=30,  # Extended crisis
+        severity=5,
+    ),
+
+    "2010_flash_crash": StressScenario(
+        scenario_id="HIST-002",
+        name="2010 Flash Crash (May 6)",
+        scenario_type=ScenarioType.FLASH_CRASH,
+        description="May 6, 2010: DJIA dropped ~1000 points in minutes, then recovered. "
+                    "Triggered by algorithmic trading cascade. Peak drawdown ~9%.",
+        price_shocks={
+            # Sharp intraday drop, partial recovery
+            "AAPL": -0.06, "MSFT": -0.05, "GOOGL": -0.06,
+            "PG": -0.35,  # Procter & Gamble dropped 37%
+            "ACN": -0.90,  # Accenture famously traded at $0.01
+            # Index products
+            "SPY": -0.07, "QQQ": -0.08, "IWM": -0.09,
+            "ES": -0.07, "NQ": -0.08, "YM": -0.09, "RTY": -0.10,
+            "MES": -0.07, "MNQ": -0.08,
+            # ETFs showed extreme dislocations
+            "GLD": 0.02,  # Minor safe haven
+        },
+        volatility_multiplier=6.0,  # Extreme intraday volatility
+        correlation_override=0.90,
+        liquidity_haircut=0.80,  # Market makers pulled quotes
+        horizon_days=1,  # Intraday event
+        severity=5,
+    ),
+
+    "2020_covid_crash": StressScenario(
+        scenario_id="HIST-003",
+        name="2020 COVID Crash",
+        scenario_type=ScenarioType.MARKET_CRASH,
+        description="March 2020 COVID-19 pandemic crash. S&P500 fell ~34% in 23 trading days. "
+                    "VIX hit 82.69. Multiple circuit breakers triggered. "
+                    "Fastest bear market in history.",
+        price_shocks={
+            # Equities - fastest crash in history
+            "AAPL": -0.30, "MSFT": -0.28, "GOOGL": -0.30, "AMZN": -0.20,  # Tech held better
+            "META": -0.35, "NVDA": -0.35, "TSLA": -0.50,
+            # Travel/hospitality crushed
+            "BA": -0.70, "UAL": -0.75, "AAL": -0.80,
+            # Index products
+            "SPY": -0.34, "QQQ": -0.28, "IWM": -0.42,  # Small caps hit harder
+            "ES": -0.34, "NQ": -0.28, "YM": -0.35, "RTY": -0.42,
+            "MES": -0.34, "MNQ": -0.28, "M2K": -0.42,
+            # Oil - historic collapse (briefly went negative)
+            "CL": -0.65, "MCL": -0.65, "NG": -0.30,
+            # Safe havens
+            "GC": 0.10, "MGC": 0.10,  # Gold up
+            "ZB": 0.15, "ZN": 0.10,  # Treasuries up
+            # Currencies
+            "EURUSD": -0.05, "AUDUSD": -0.15,
+        },
+        volatility_multiplier=5.5,  # VIX hit 82.69
+        correlation_override=0.92,  # Almost perfect correlation
+        liquidity_haircut=0.60,  # Severe but Fed intervened
+        horizon_days=23,  # 23 trading days to bottom
+        severity=5,
+    ),
+
+    "2022_rate_hike_cycle": StressScenario(
+        scenario_id="HIST-004",
+        name="2022 Fed Rate Hike Cycle",
+        scenario_type=ScenarioType.INTEREST_RATE_SHOCK,
+        description="2022 aggressive Fed tightening. S&P500 fell ~25%. Nasdaq fell ~33%. "
+                    "Worst year for bonds since 1842. Growth stocks crushed. "
+                    "USD strengthened significantly.",
+        price_shocks={
+            # Growth stocks - severely impacted by rate hikes
+            "AAPL": -0.28, "MSFT": -0.30, "GOOGL": -0.40, "AMZN": -0.50,
+            "META": -0.65, "NVDA": -0.50, "TSLA": -0.65,
+            # Index products
+            "SPY": -0.25, "QQQ": -0.33, "IWM": -0.25,
+            "ES": -0.25, "NQ": -0.33, "YM": -0.22, "RTY": -0.25,
+            "MES": -0.25, "MNQ": -0.33,
+            # Bonds - worst year ever
+            "ZB": -0.25, "ZN": -0.15, "ZF": -0.10,
+            # Commodities - mixed (energy up, metals down)
+            "CL": 0.10, "NG": 0.30,  # Energy crisis
+            "GC": -0.05, "SI": -0.15,  # Strong USD hurt metals
+            # Currencies - USD strengthened
+            "EURUSD": -0.15, "GBPUSD": -0.20, "USDJPY": 0.25,
+        },
+        volatility_multiplier=2.0,
+        correlation_override=0.70,
+        liquidity_haircut=0.20,
+        horizon_days=252,  # Full year
+        severity=4,
+    ),
+
+    "2015_china_crash": StressScenario(
+        scenario_id="HIST-005",
+        name="2015 China Stock Market Crash",
+        scenario_type=ScenarioType.MARKET_CRASH,
+        description="August 2015 China market turbulence. Shanghai Composite fell 8.5% "
+                    "in single day (Black Monday). Global contagion. DJIA dropped 1000 points at open.",
+        price_shocks={
+            # US equities impacted
+            "AAPL": -0.15, "MSFT": -0.12, "GOOGL": -0.12,
+            # Index products
+            "SPY": -0.12, "QQQ": -0.14, "IWM": -0.15,
+            "ES": -0.12, "NQ": -0.14, "YM": -0.12, "RTY": -0.15,
+            "MES": -0.12, "MNQ": -0.14,
+            # Commodities - China demand fears
+            "CL": -0.15, "HG": -0.20,  # Copper hit hard
+            "ZS": -0.10,  # Soybeans (China buyer)
+            # Safe havens
+            "GC": 0.05, "ZB": 0.05,
+            # Currencies
+            "AUDUSD": -0.10,  # China proxy currency
+        },
+        volatility_multiplier=3.0,
+        correlation_override=0.80,
+        liquidity_haircut=0.40,
+        horizon_days=5,
+        severity=4,
+    ),
+
+    "momentum_crash": StressScenario(
+        scenario_id="HIST-006",
+        name="Momentum Crash (2009-type)",
+        scenario_type=ScenarioType.CORRELATION_BREAKDOWN,
+        description="Momentum factor crash similar to March 2009. Previous winners reverse, "
+                    "previous losers rally. Pairs trades blow up. "
+                    "Based on Daniel & Moskowitz (2016) research.",
+        price_shocks={
+            # Winners become losers (hypothetical reversal)
+            "AAPL": -0.15, "MSFT": -0.12, "NVDA": -0.20,
+            # Losers rally (banks in 2009)
+            "JPM": 0.30, "BAC": 0.40, "C": 0.50,
+            "XLF": 0.25,
+            # Spread trades fail
+            "ES": 0.05, "NQ": -0.10,  # ES/NQ spread blows up
+            "GC": -0.10, "SI": 0.15,  # Gold/Silver spread blows up
+            "CL": 0.10, "RB": -0.05,  # Crack spread inverts
+        },
+        volatility_multiplier=2.5,
+        correlation_override=None,  # Correlations break down
+        liquidity_haircut=0.35,
+        horizon_days=10,
+        severity=5,
+    ),
+
+    "black_monday_1987": StressScenario(
+        scenario_id="HIST-007",
+        name="Black Monday 1987",
+        scenario_type=ScenarioType.FLASH_CRASH,
+        description="October 19, 1987: DJIA fell 22.6% in single day - worst single-day "
+                    "percentage decline in history. Portfolio insurance cascade.",
+        price_shocks={
+            # Single day massive decline
+            "SPY": -0.22, "QQQ": -0.22, "IWM": -0.25,
+            "ES": -0.22, "NQ": -0.22, "YM": -0.22, "RTY": -0.25,
+            "MES": -0.22, "MNQ": -0.22,
+            "AAPL": -0.22, "MSFT": -0.22,
+            # Safe havens
+            "GC": 0.05, "ZB": 0.08,
+        },
+        volatility_multiplier=8.0,  # Extreme
+        correlation_override=0.98,  # Perfect correlation
+        liquidity_haircut=0.85,  # Market makers overwhelmed
+        horizon_days=1,
+        severity=5,
+    ),
+
+    "svb_banking_crisis_2023": StressScenario(
+        scenario_id="HIST-008",
+        name="SVB Banking Crisis 2023",
+        scenario_type=ScenarioType.SECTOR_CRASH,
+        description="March 2023 regional banking crisis. SVB, Signature Bank, First Republic "
+                    "failed. Contagion fears. Tech/VC ecosystem impacted.",
+        price_shocks={
+            # Regional banks crushed
+            "JPM": -0.08, "BAC": -0.15, "C": -0.12,
+            "XLF": -0.15,
+            # Tech exposed to SVB
+            "AAPL": -0.05, "MSFT": -0.03, "GOOGL": -0.05,
+            "NVDA": -0.08,
+            # Broader indices moderate impact
+            "SPY": -0.05, "QQQ": -0.06, "IWM": -0.10,
+            "ES": -0.05, "NQ": -0.06,
+            # Flight to safety
+            "GC": 0.08, "ZB": 0.05, "ZN": 0.04,
+        },
+        volatility_multiplier=2.5,
+        correlation_override=0.65,
+        liquidity_haircut=0.30,
+        horizon_days=5,
+        severity=4,
+    ),
 }
 
 
