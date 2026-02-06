@@ -306,9 +306,10 @@ class TestPositionSizing:
     """Test position sizing calculations."""
 
     def test_conviction_based_sizing(self, cio_agent):
-        """Test conviction-based position sizing (dollar-based with multiplier)."""
-        # Set price in cache for dollar-based sizing (FIX-01)
-        cio_agent._price_cache["AAPL"] = 1.0  # $1 price -> 100 dollars / $1 = 100 contracts
+        """Test conviction-based position sizing (portfolio % based)."""
+        cio_agent._price_cache["AAPL"] = 100.0
+        cio_agent._portfolio_value = 100_000.0
+        cio_agent._max_position_pct = 5.0  # 5% = $5,000
 
         signal = SignalEvent(
             source_agent="MomentumAgent",
@@ -329,12 +330,14 @@ class TestPositionSizing:
 
         size = cio_agent._calculate_conviction_size(agg)
 
-        # base_position_size=100 dollars / ($1 * multiplier 1.0) = 100 contracts
-        assert size == 100
+        # $100K * 5% * 1.0 * 1.0 / $100 = 50
+        assert size == 50
 
     def test_conviction_sizing_low_confidence(self, cio_agent):
         """Test that low confidence reduces position size."""
-        cio_agent._price_cache["AAPL"] = 1.0  # Set price for dollar-based sizing
+        cio_agent._price_cache["AAPL"] = 100.0
+        cio_agent._portfolio_value = 100_000.0
+        cio_agent._max_position_pct = 5.0
 
         signal = SignalEvent(
             source_agent="MomentumAgent",
@@ -355,8 +358,9 @@ class TestPositionSizing:
 
         size = cio_agent._calculate_conviction_size(agg)
 
-        # With low conviction, should get smaller size or zero
-        assert size < 100
+        # $100K * 5% * 0.3 * 0.5 / $100 = 7.5 -> 7
+        # Low conviction -> much smaller than full conviction (50)
+        assert size < 50
 
     def test_position_size_max_limit(self, cio_agent):
         """Test that position size respects max limit."""

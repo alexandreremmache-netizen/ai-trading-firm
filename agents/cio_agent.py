@@ -3261,9 +3261,6 @@ class CIOAgent(DecisionAgent):
         conviction_factor = agg.weighted_confidence
         strength_factor = abs(agg.weighted_strength)
 
-        # FIX-01/10: base_position_size is now in DOLLARS, convert to contracts
-        dollar_amount = self._base_position_size * conviction_factor * strength_factor
-
         # Get price and futures multiplier
         estimated_price = self._price_cache.get(agg.symbol)
         if estimated_price is None or estimated_price <= 0:
@@ -3273,7 +3270,14 @@ class CIOAgent(DecisionAgent):
         spec = CONTRACT_SPECS.get(agg.symbol)
         multiplier = spec.multiplier if spec else 1.0
         notional_per_contract = estimated_price * multiplier
-        size = int(dollar_amount / notional_per_contract)
+
+        # Position sizing: use portfolio % allocation, not fixed dollar amount
+        # For futures, $5K base is < 1 micro contract ($34K MES notional) -> always 0
+        # Instead: max_position_pct of portfolio * conviction * strength / notional
+        portfolio = self._portfolio_value if self._portfolio_value > 0 else 500_000.0
+        max_dollar_allocation = portfolio * (self._max_position_pct / 100.0)
+        dollar_amount = max_dollar_allocation * conviction_factor * strength_factor
+        size = max(int(dollar_amount / notional_per_contract), 1 if conviction_factor >= 0.7 else 0)
 
         # Apply limits
         size = min(size, self._max_position_size)
