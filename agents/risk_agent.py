@@ -344,6 +344,9 @@ class RiskAgent(ValidationAgent):
         self._position_daily_pnl: dict[str, float] = {}
         self._position_pnl_last_reset: datetime | None = None
 
+        # Price cache for accurate risk checks (fed by orchestrator)
+        self._price_cache: dict[str, float] = {}
+
         # Weekly loss limit (Hard Stop #4.1)
         self._max_weekly_loss_pct = limits.get("max_weekly_loss_pct", 7.0) / 100  # 7% weekly default
         self._weekly_pnl_history: deque[tuple[datetime, float]] = deque(maxlen=7 * 24)  # 7 days hourly
@@ -840,13 +843,17 @@ class RiskAgent(ValidationAgent):
         # 1. Try limit_price from decision
         price = decision.limit_price
 
-        # 2. Try current position's avg_cost as proxy
+        # 2. Try price cache (fed by orchestrator from market data)
+        if not price or price <= 0:
+            price = self._price_cache.get(symbol, 0.0)
+
+        # 3. Try current position's avg_cost as proxy
         if not price or price <= 0:
             existing_pos = self._risk_state.positions.get(symbol)
             if existing_pos and existing_pos.avg_cost > 0:
                 price = existing_pos.avg_cost
 
-        # 3. Fallback: log warning
+        # 4. Fallback: log warning
         if not price or price <= 0:
             logger.warning(
                 f"RiskAgent: No price for {symbol}, using fallback $100. Risk checks may be inaccurate!"
@@ -4665,6 +4672,11 @@ class RiskAgent(ValidationAgent):
         except Exception as e:
             # Stress testing failure - log trace for risk model debugging
             logger.exception(f"Stress test failed: {e}")
+
+    def update_price(self, symbol: str, price: float) -> None:
+        """Update price cache for accurate risk checks."""
+        if price > 0:
+            self._price_cache[symbol] = price
 
     def get_status(self) -> dict:
         """Get current risk agent status for monitoring."""

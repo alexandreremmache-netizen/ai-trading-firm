@@ -107,6 +107,19 @@ class MeanReversionAgent(SignalAgent):
         """Initialize mean reversion tracking."""
         logger.info(f"MeanReversionAgent ready: RSI({self._rsi_period}), BB({self._bb_period})")
 
+    async def _emit_warmup_heartbeat(self, symbol: str, reason: str) -> None:
+        """Emit FLAT heartbeat signal to participate in barrier sync."""
+        signal = SignalEvent(
+            source_agent=self.name,
+            symbol=symbol,
+            direction=SignalDirection.FLAT,
+            strength=0.0,
+            confidence=0.0,
+            rationale=f"Heartbeat: {reason}",
+            data_sources=("heartbeat",),
+        )
+        await self._event_bus.publish_signal(signal)
+
     def _get_state(self, symbol: str) -> SymbolState:
         """Get or create state for symbol."""
         if symbol not in self._states:
@@ -137,12 +150,14 @@ class MeanReversionAgent(SignalAgent):
         # Need enough data
         min_length = max(self._rsi_period, self._bb_period) + 5
         if len(state.prices) < min_length:
+            await self._emit_warmup_heartbeat(symbol, f"Collecting data ({len(state.prices)}/{min_length})")
             return
 
         # Check cooldown
         if state.last_signal_time is not None:
             elapsed = (timestamp - state.last_signal_time).total_seconds() / 60
             if elapsed < state.signal_cooldown_minutes:
+                await self._emit_warmup_heartbeat(symbol, "Cooldown")
                 return
 
         # Analyze for mean reversion opportunities
@@ -196,11 +211,13 @@ class MeanReversionAgent(SignalAgent):
         # Check regime - avoid trending markets
         regime = analysis.get("regime", MarketRegime.RANGE_BOUND)
         if regime in [MarketRegime.TRENDING_UP, MarketRegime.TRENDING_DOWN]:
+            await self._emit_warmup_heartbeat(symbol, f"Trending regime: {regime.name}")
             return  # Skip mean reversion in trending markets
 
         # Collect signals
         signals = analysis.get("signals", [])
         if len(signals) < self._min_indicators:
+            await self._emit_warmup_heartbeat(symbol, "Insufficient indicators")
             return  # Need multiple confirmations
 
         # Determine direction from signals
@@ -214,10 +231,12 @@ class MeanReversionAgent(SignalAgent):
             direction = SignalDirection.SHORT
             active_signals = short_signals
         else:
+            await self._emit_warmup_heartbeat(symbol, "No consensus")
             return  # No consensus
 
         # Skip same direction as last signal
         if state.last_signal == direction:
+            await self._emit_warmup_heartbeat(symbol, "Same direction")
             return
 
         # Calculate confidence from signal strengths

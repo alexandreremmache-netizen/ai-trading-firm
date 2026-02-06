@@ -165,6 +165,7 @@ class IndexSpreadAgent(SignalAgent):
 
         # Check if this symbol is part of any tracked pairs
         if symbol not in self._symbol_to_pairs:
+            await self._emit_warmup_heartbeat(symbol, "Not a tracked pair symbol")
             return
 
         # Update all pairs containing this symbol
@@ -184,6 +185,8 @@ class IndexSpreadAgent(SignalAgent):
             # Check if we can generate a signal
             if pair_state.is_ready():
                 await self._analyze_spread(pair_name, pair_state, timestamp)
+            else:
+                await self._emit_warmup_heartbeat(symbol, "Pair not ready")
 
     async def _analyze_spread(
         self,
@@ -232,6 +235,7 @@ class IndexSpreadAgent(SignalAgent):
         )
 
         if signal_result is None:
+            await self._emit_warmup_heartbeat(pair_state.leg1_symbol, "No spread signal")
             return
 
         # SpreadSignal has: direction, strength, hedge_ratio, entry_zscore, target_zscore, etc.

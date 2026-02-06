@@ -177,12 +177,15 @@ class TTMSqueezeAgent(SignalAgent):
         }
 
         if squeeze_result is None:
+            await self._emit_warmup_heartbeat(symbol, "No squeeze data")
             return
 
         squeeze_state = squeeze_result.get("squeeze_state", SqueezeState.SQUEEZE_OFF)
         momentum_dir = squeeze_result.get("momentum_direction", MomentumDirection.NEUTRAL)
         momentum_value = squeeze_result.get("momentum_value", 0.0)
         squeeze_ratio = squeeze_result.get("squeeze_ratio", 1.0)
+
+        signal_emitted = False
 
         # Track squeeze duration
         if squeeze_state == SqueezeState.SQUEEZE_ON:
@@ -211,10 +214,15 @@ class TTMSqueezeAgent(SignalAgent):
                     state=state,
                     timestamp=timestamp,
                 )
+                signal_emitted = True
         else:
             # NO_SQUEEZE - reset
             state.in_squeeze = False
             state.squeeze_bars = 0
+
+        # Emit heartbeat if no real signal was generated
+        if not signal_emitted:
+            await self._emit_warmup_heartbeat(symbol, f"Squeeze state: {squeeze_state.name}")
 
     async def _generate_squeeze_signal(
         self,

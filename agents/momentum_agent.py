@@ -144,6 +144,19 @@ class MomentumAgent(SignalAgent):
             f"DemandZones={self._demand_zones_enabled}"
         )
 
+    async def _emit_warmup_heartbeat(self, symbol: str, reason: str) -> None:
+        """Emit FLAT heartbeat signal to participate in barrier sync."""
+        signal = SignalEvent(
+            source_agent=self.name,
+            symbol=symbol,
+            direction=SignalDirection.FLAT,
+            strength=0.0,
+            confidence=0.0,
+            rationale=f"Heartbeat: {reason}",
+            data_sources=("heartbeat",),
+        )
+        await self._event_bus.publish_signal(signal)
+
     async def process_event(self, event: Event) -> None:
         """Process market data and generate momentum signals."""
         if not isinstance(event, MarketDataEvent):
@@ -200,9 +213,14 @@ class MomentumAgent(SignalAgent):
                     logger.debug(
                         f"Signal filtered: confidence {signal.confidence:.2f} < threshold {self._min_confidence}"
                     )
+                    await self._emit_warmup_heartbeat(symbol, "Low confidence")
                     return
                 await self._event_bus.publish_signal(signal)
                 self._audit_logger.log_event(signal)
+                return
+
+        # Fallback: emit heartbeat so barrier doesn't timeout waiting for this agent
+        await self._emit_warmup_heartbeat(symbol, "No signal conditions met")
 
     def _generate_momentum_signal(self, state: MomentumState) -> SignalEvent | None:
         """

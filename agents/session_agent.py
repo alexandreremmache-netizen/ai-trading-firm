@@ -185,6 +185,7 @@ class SessionAgent(SignalAgent):
         )
 
         if analysis is None:
+            await self._emit_warmup_heartbeat(symbol, "No session analysis")
             return
 
         # Strategy returns SessionSignal dataclass with direction as "LONG", "SHORT", "NEUTRAL"
@@ -218,10 +219,12 @@ class SessionAgent(SignalAgent):
 
         # Skip if no meaningful signal or below threshold
         if direction == SignalDirection.FLAT or confidence < 0.3:
+            await self._emit_warmup_heartbeat(symbol, "Below threshold")
             return
 
         # Skip if same signal as last time (avoid spam)
         if self._last_signals.get(symbol) == direction:
+            await self._emit_warmup_heartbeat(symbol, "Same direction")
             return
 
         self._last_signals[symbol] = direction

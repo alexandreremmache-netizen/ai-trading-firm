@@ -228,12 +228,14 @@ class MACDvAgent(SignalAgent):
 
         # Only emit on direction change
         if signal_direction == state.last_signal:
+            await self._emit_warmup_heartbeat(symbol, "No direction change")
             return
 
         state.last_signal = signal_direction
 
         # Skip FLAT signals
         if signal_direction == SignalDirection.FLAT:
+            await self._emit_warmup_heartbeat(symbol, "FLAT signal")
             return
 
         # Apply confidence threshold
@@ -242,6 +244,7 @@ class MACDvAgent(SignalAgent):
                 f"MACD-v signal filtered: confidence {macdv_signal.confidence:.2f} < "
                 f"threshold {self._min_confidence}"
             )
+            await self._emit_warmup_heartbeat(symbol, "Low confidence")
             return
 
         # Check trading session quality
@@ -258,6 +261,7 @@ class MACDvAgent(SignalAgent):
             logger.info(
                 f"MACD-v signal for {symbol} suppressed due to session: {session_reason}"
             )
+            await self._emit_warmup_heartbeat(symbol, f"Session: {session_reason}")
             return
         elif not is_optimal:
             # Reduce strength for sub-optimal sessions

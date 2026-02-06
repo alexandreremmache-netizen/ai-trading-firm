@@ -1833,6 +1833,9 @@ class TradingFirmOrchestrator:
             # Wire live prices to CIO for conviction-based position sizing
             if self._cio_agent:
                 self._cio_agent.update_price(data.symbol, data.last)
+            # Wire live prices to RiskAgent for accurate notional/leverage checks
+            if self._risk_agent:
+                self._risk_agent.update_price(data.symbol, data.last)
 
     def request_shutdown(self, reason: str = "user request") -> None:
         """Request graceful shutdown."""
