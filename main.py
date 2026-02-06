@@ -1830,6 +1830,9 @@ class TradingFirmOrchestrator:
             # Wire live prices to ExecutionAgent for stop orders and slippage calc
             if self._execution_agent:
                 self._execution_agent.update_price(data.symbol, data.last)
+            # Wire live prices to CIO for conviction-based position sizing
+            if self._cio_agent:
+                self._cio_agent.update_price(data.symbol, data.last)
 
     def request_shutdown(self, reason: str = "user request") -> None:
         """Request graceful shutdown."""

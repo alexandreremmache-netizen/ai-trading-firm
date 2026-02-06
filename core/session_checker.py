@@ -42,15 +42,18 @@ DEFAULT_SESSION_PREFS = {
         "USDCHF": {"active": ["london", "ny_overlap"], "avoid": ["asian"]},
     },
     "futures": {
-        # US equity index futures - optimal hours in ET (converted to UTC: +5h in winter)
-        "ES": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(17, 0, 19, 0)]},
-        "MES": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(17, 0, 19, 0)]},
-        "NQ": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(17, 0, 19, 0)]},
-        "MNQ": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(17, 0, 19, 0)]},
-        "YM": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(17, 0, 19, 0)]},
-        "MYM": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(17, 0, 19, 0)]},
-        "RTY": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(17, 0, 19, 0)]},
-        "M2K": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(17, 0, 19, 0)]},
+        # US equity index futures
+        # Optimal: 9:30-11:30 ET (14:30-16:30 UTC) = open + morning momentum
+        #          14:00-16:00 ET (19:00-21:00 UTC) = afternoon + MOC imbalances
+        # Avoid:   16:15-17:00 ET (21:15-22:00 UTC) = CME daily settlement + maintenance
+        "ES": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(21, 15, 22, 0)]},
+        "MES": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(21, 15, 22, 0)]},
+        "NQ": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(21, 15, 22, 0)]},
+        "MNQ": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(21, 15, 22, 0)]},
+        "YM": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(21, 15, 22, 0)]},
+        "MYM": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(21, 15, 22, 0)]},
+        "RTY": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(21, 15, 22, 0)]},
+        "M2K": {"optimal_hours_utc": [(14, 30, 16, 30), (19, 0, 21, 0)], "avoid_hours_utc": [(21, 15, 22, 0)]},
     },
     "commodities": {
         # Energy - NYMEX hours
