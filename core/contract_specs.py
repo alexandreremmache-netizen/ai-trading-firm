@@ -266,6 +266,48 @@ CONTRACT_SPECS: dict[str, ContractSpec] = {
     ),
 
     # =========================================================================
+    # MICRO ENERGY FUTURES
+    # =========================================================================
+    "MCL": ContractSpec(
+        symbol="MCL",
+        name="Micro WTI Crude Oil",
+        asset_class=AssetClass.ENERGY,
+        exchange=Exchange.NYMEX,
+        currency="USD",
+        multiplier=100.0,  # 1/10th of CL (100 barrels vs 1000)
+        tick_size=0.01,
+        tick_value=1.0,
+        initial_margin=660.0,
+        maintenance_margin=600.0,
+        trading_hours="Sun-Fri 6:00pm-5:00pm ET",
+        contract_months=("F", "G", "H", "J", "K", "M", "N", "Q", "U", "V", "X", "Z"),
+        last_trading_day="3 business days before 25th of month prior to delivery",
+        settlement_type="physical",
+        avg_daily_volume=300_000,
+    ),
+
+    # =========================================================================
+    # MICRO PRECIOUS METALS FUTURES
+    # =========================================================================
+    "MGC": ContractSpec(
+        symbol="MGC",
+        name="Micro Gold",
+        asset_class=AssetClass.PRECIOUS_METALS,
+        exchange=Exchange.COMEX,
+        currency="USD",
+        multiplier=10.0,  # 1/10th of GC (10 troy oz vs 100)
+        tick_size=0.10,
+        tick_value=1.0,
+        initial_margin=990.0,
+        maintenance_margin=900.0,
+        trading_hours="Sun-Fri 6:00pm-5:00pm ET",
+        contract_months=("G", "J", "M", "Q", "V", "Z"),
+        last_trading_day="3rd to last business day of delivery month",
+        settlement_type="physical",
+        avg_daily_volume=100_000,
+    ),
+
+    # =========================================================================
     # ENERGY FUTURES
     # =========================================================================
     "CL": ContractSpec(

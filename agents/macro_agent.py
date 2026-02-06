@@ -195,6 +195,20 @@ class MacroAgent(SignalAgent):
 
         return stop_loss, target_price, rr_ratio, is_valid_rr
 
+    async def _emit_warmup_heartbeat(self, symbol: str, reason: str = "Not a macro symbol") -> None:
+        """Emit FLAT heartbeat signal to participate in barrier sync."""
+        signal = SignalEvent(
+            source_agent=self.name,
+            strategy_name="macro_heartbeat",
+            symbol=symbol,
+            direction=SignalDirection.FLAT,
+            strength=0.0,
+            confidence=0.1,
+            rationale=f"Macro heartbeat: {reason}",
+        )
+        if self._event_bus:
+            await self._event_bus.publish(signal)
+
     async def initialize(self) -> None:
         """Initialize macro data feeds."""
         logger.info(f"MacroAgent initializing with indicators: {self._indicators}")
@@ -211,8 +225,9 @@ class MacroAgent(SignalAgent):
         symbol = event.symbol
         macro_symbols = {"VIX", "TLT", "UUP", "SPY", "QQQ", "GLD", "USO", "IWM"}
 
-        # Only process macro-relevant symbols
+        # Only process macro-relevant symbols; emit heartbeat for others to satisfy barrier
         if symbol not in macro_symbols:
+            await self._emit_warmup_heartbeat(symbol, f"{symbol} not in macro universe")
             return
 
         signal = await self._analyze_macro_conditions(event)

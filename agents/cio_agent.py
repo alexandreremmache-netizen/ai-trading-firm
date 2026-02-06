@@ -376,13 +376,21 @@ class CIOAgent(DecisionAgent):
     ):
         super().__init__(config, event_bus, audit_logger)
 
-        # Base signal weights by strategy
+        # Base signal weights by strategy (ALL agents must be listed here)
         self._base_weights = {
-            "MacroAgent": config.parameters.get("signal_weight_macro", 0.15),
-            "StatArbAgent": config.parameters.get("signal_weight_stat_arb", 0.25),
-            "MomentumAgent": config.parameters.get("signal_weight_momentum", 0.25),
-            "MarketMakingAgent": config.parameters.get("signal_weight_market_making", 0.15),
-            "MACDvAgent": config.parameters.get("signal_weight_macdv", 0.20),
+            "MacroAgent": config.parameters.get("signal_weight_macro", 0.10),
+            "StatArbAgent": config.parameters.get("signal_weight_stat_arb", 0.12),
+            "MomentumAgent": config.parameters.get("signal_weight_momentum", 0.12),
+            "MarketMakingAgent": config.parameters.get("signal_weight_market_making", 0.08),
+            "MACDvAgent": config.parameters.get("signal_weight_macdv", 0.10),
+            "SessionAgent": config.parameters.get("signal_weight_session", 0.10),
+            "IndexSpreadAgent": config.parameters.get("signal_weight_index_spread", 0.10),
+            "TTMSqueezeAgent": config.parameters.get("signal_weight_ttm_squeeze", 0.08),
+            "EventDrivenAgent": config.parameters.get("signal_weight_event_driven", 0.08),
+            "MeanReversionAgent": config.parameters.get("signal_weight_mean_reversion", 0.10),
+            "SentimentAgent": config.parameters.get("signal_weight_sentiment", 0.10),
+            "ChartAnalysisAgent": config.parameters.get("signal_weight_chart_analysis", 0.10),
+            "ForecastingAgent": config.parameters.get("signal_weight_forecasting", 0.10),
         }
 
         # Current effective weights (may be adjusted dynamically)
@@ -428,6 +436,11 @@ class CIOAgent(DecisionAgent):
         self._max_kelly_raw = config.parameters.get("max_kelly_raw", 0.15)
         # NEW: Per-position daily loss limit as % of portfolio (default 1%)
         self._max_position_daily_loss_pct = config.parameters.get("max_position_daily_loss_pct", 1.0)
+
+        # Intraday protection: max open positions and per-symbol cooldown
+        self._max_open_positions = config.parameters.get("max_open_positions", 6)
+        self._last_decision_time_per_symbol: dict[str, datetime] = {}
+        self._decision_cooldown_seconds = config.parameters.get("decision_cooldown_seconds", 120.0)
 
         # State
         self._pending_aggregations: dict[str, SignalAggregation] = {}
@@ -726,7 +739,7 @@ class CIOAgent(DecisionAgent):
                 f"{long_votes:.3f}",
                 f"{short_votes:.3f}",
                 f"{total_weight:.3f}",
-                f"{total_weight * 0.4:.3f}",
+                f"{total_weight * 0.55:.3f}",
                 agg.consensus_direction.value,
                 f"{agg.weighted_confidence:.3f}",
                 final_decision,
@@ -1035,6 +1048,26 @@ class CIOAgent(DecisionAgent):
         # Sync tracked positions with broker positions
         await self._sync_tracked_positions()
 
+        # EOD MANAGEMENT: Close all positions before market close (intraday only)
+        if self._is_eod_force_close_time:
+            for symbol, pos in list(self._tracked_positions.items()):
+                logger.warning(f"CIO EOD FORCE CLOSE 15:45 ET: Closing {symbol} (P&L: {pos.pnl_pct:.1f}%)")
+                decision = self._create_close_loser_decision(
+                    pos, reason="EOD FORCE CLOSE: 15:45 ET - market order", is_emergency=True,
+                )
+                if decision:
+                    await self._publish_position_management_decision(decision)
+            return
+        if self._is_eod_liquidation_time:
+            for symbol, pos in list(self._tracked_positions.items()):
+                logger.warning(f"CIO EOD LIQUIDATION 15:30 ET: Closing {symbol} (P&L: {pos.pnl_pct:.1f}%)")
+                decision = self._create_close_loser_decision(
+                    pos, reason=f"EOD LIQUIDATION: 15:30 ET - closing all (P&L: {pos.pnl_pct:.1f}%)",
+                )
+                if decision:
+                    await self._publish_position_management_decision(decision)
+            return
+
         # Update conviction from latest signals
         self._update_position_convictions(signals)
 
@@ -1342,6 +1375,29 @@ class CIOAgent(DecisionAgent):
                         f"{pullback:.1f}% pullback from peak"
                     ),
                     partial_exit=False,
+                )
+
+        # 6.5 TIME DECAY ON CONVICTION (C5 - Intraday urgency)
+        # As time progresses, conviction decays to force exits before EOD
+        if pos.holding_hours >= 2.0:
+            if self._is_past_new_position_cutoff:
+                # Past 15:00 ET: zero conviction -> force exit on next check
+                pos.current_conviction = 0.0
+                logger.info(
+                    f"CIO: Time decay zeroed conviction for {pos.symbol} "
+                    f"(past 15:00 ET cutoff)"
+                )
+            elif pos.holding_hours >= 3.0:
+                pos.current_conviction *= 0.8
+                logger.debug(
+                    f"CIO: Time decay 0.8x for {pos.symbol} "
+                    f"(held {pos.holding_hours:.1f}h)"
+                )
+            else:
+                pos.current_conviction *= 0.9
+                logger.debug(
+                    f"CIO: Time decay 0.9x for {pos.symbol} "
+                    f"(held {pos.holding_hours:.1f}h)"
                 )
 
         # 7. CONVICTION-BASED REDUCTION
@@ -1894,6 +1950,40 @@ class CIOAgent(DecisionAgent):
         market_close = dt_time(16, 0)
         return market_open <= now_et.time() <= market_close
 
+    def _get_et_time(self) -> tuple[float, float, float]:
+        """Get current ET time as (hour_decimal, hours_into_session, hours_remaining)."""
+        now = datetime.now(timezone.utc)
+        try:
+            from zoneinfo import ZoneInfo
+            et_tz = ZoneInfo("America/New_York")
+            now_et = now.astimezone(et_tz)
+        except ImportError:
+            now_et = now.replace(tzinfo=None) - timedelta(hours=5)
+        current_hour = now_et.hour + now_et.minute / 60.0
+        market_open_hour = 9.5
+        market_close_hour = 16.0
+        hours_into_session = max(0, current_hour - market_open_hour)
+        hours_remaining = max(0.0, market_close_hour - current_hour)
+        return current_hour, hours_into_session, hours_remaining
+
+    @property
+    def _is_past_new_position_cutoff(self) -> bool:
+        """True after 3:00 PM ET -- no new positions allowed."""
+        current_hour, _, _ = self._get_et_time()
+        return current_hour >= 15.0
+
+    @property
+    def _is_eod_liquidation_time(self) -> bool:
+        """True after 3:30 PM ET -- start closing all positions."""
+        current_hour, _, _ = self._get_et_time()
+        return current_hour >= 15.5
+
+    @property
+    def _is_eod_force_close_time(self) -> bool:
+        """True after 3:45 PM ET -- force market orders for everything."""
+        current_hour, _, _ = self._get_et_time()
+        return current_hour >= 15.75
+
     async def _make_decision_from_aggregation(self, agg: SignalAggregation) -> None:
         """
         Make a trading decision from aggregated signals (post-barrier).
@@ -1910,6 +2000,26 @@ class CIOAgent(DecisionAgent):
         # Filter by market hours - prevent decisions for US stocks when market is closed
         if self._filter_market_hours and not self._is_market_open_for_symbol(symbol):
             return
+
+        # INTRADAY: No new positions after 15:00 ET cutoff
+        if self._is_past_new_position_cutoff and symbol not in self._tracked_positions:
+            logger.info(f"CIO: EOD cutoff - no new positions after 15:00 ET, skipping {symbol}")
+            return
+
+        # Per-symbol cooldown: prevent rapid-fire decisions on same symbol
+        now = datetime.now(timezone.utc)
+        last_decision = self._last_decision_time_per_symbol.get(symbol)
+        if last_decision:
+            elapsed = (now - last_decision).total_seconds()
+            if elapsed < self._decision_cooldown_seconds:
+                logger.debug(f"CIO: Cooldown for {symbol} ({elapsed:.0f}s / {self._decision_cooldown_seconds:.0f}s)")
+                return
+
+        # Max open positions limit
+        if len(self._tracked_positions) >= self._max_open_positions:
+            if symbol not in self._tracked_positions:
+                logger.warning(f"CIO: Max open positions ({self._max_open_positions}) reached, skipping {symbol}")
+                return
 
         # Aggregate signals
         self._aggregate_signals(agg)
@@ -2121,6 +2231,7 @@ class CIOAgent(DecisionAgent):
 
         # Track active decisions (will be cleared when validated decision comes back)
         self._active_decisions[decision.event_id] = datetime.now(timezone.utc)
+        self._last_decision_time_per_symbol[symbol] = datetime.now(timezone.utc)
 
         # P2: Record decision for accuracy tracking
         self._record_decision(
@@ -2281,9 +2392,9 @@ class CIOAgent(DecisionAgent):
         agg.effective_signal_count = self._calculate_effective_signal_count(filtered_signals)
 
         # Determine consensus direction
-        if long_votes > short_votes and long_votes > total_weight * 0.4:
+        if long_votes > short_votes and long_votes > total_weight * 0.55:
             agg.consensus_direction = SignalDirection.LONG
-        elif short_votes > long_votes and short_votes > total_weight * 0.4:
+        elif short_votes > long_votes and short_votes > total_weight * 0.55:
             agg.consensus_direction = SignalDirection.SHORT
         else:
             agg.consensus_direction = SignalDirection.FLAT
@@ -2291,7 +2402,7 @@ class CIOAgent(DecisionAgent):
         # DEBUG: Log aggregation details
         logger.info(
             f"CIO AGG {agg.symbol}: LONG={long_votes:.2f} SHORT={short_votes:.2f} "
-            f"total={total_weight:.2f} (40%={total_weight*0.4:.2f}) "
+            f"total={total_weight:.2f} (55%={total_weight*0.55:.2f}) "
             f"-> {agg.consensus_direction.value} conf={agg.weighted_confidence:.2f}"
         )
 

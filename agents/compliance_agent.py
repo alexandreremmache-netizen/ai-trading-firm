@@ -375,6 +375,8 @@ class ComplianceAgent(ValidationAgent):
         "overbought_zone", "oversold_zone",
         # MomentumAgent dynamic sources
         "ma_cross", "macd", "stochastic", "adx", "session_filter", "trend_indicator",
+        # Historical warmup data source
+        "warmup", "historical_warmup",
     }
 
     # Suspicious patterns in data content
@@ -1256,10 +1258,34 @@ class ComplianceAgent(ValidationAgent):
             BlackoutEvent(
                 symbol="AAPL",
                 blackout_type=BlackoutType.EARNINGS,
-                event_date=datetime(2024, 1, 25, tzinfo=timezone.utc),
-                blackout_start=datetime(2024, 1, 25, tzinfo=timezone.utc) - timedelta(days=30),
-                blackout_end=datetime(2024, 1, 25, tzinfo=timezone.utc) + timedelta(days=1),
-                description="Q1 2024 Earnings"
+                event_date=datetime(2026, 1, 29, tzinfo=timezone.utc),
+                blackout_start=datetime(2026, 1, 29, tzinfo=timezone.utc) - timedelta(days=30),
+                blackout_end=datetime(2026, 1, 29, tzinfo=timezone.utc) + timedelta(days=1),
+                description="Q1 FY2026 Earnings"
+            ),
+            BlackoutEvent(
+                symbol="AAPL",
+                blackout_type=BlackoutType.EARNINGS,
+                event_date=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                blackout_start=datetime(2026, 5, 1, tzinfo=timezone.utc) - timedelta(days=30),
+                blackout_end=datetime(2026, 5, 1, tzinfo=timezone.utc) + timedelta(days=1),
+                description="Q2 FY2026 Earnings"
+            ),
+            BlackoutEvent(
+                symbol="MSFT",
+                blackout_type=BlackoutType.EARNINGS,
+                event_date=datetime(2026, 1, 28, tzinfo=timezone.utc),
+                blackout_start=datetime(2026, 1, 28, tzinfo=timezone.utc) - timedelta(days=30),
+                blackout_end=datetime(2026, 1, 28, tzinfo=timezone.utc) + timedelta(days=1),
+                description="Q2 FY2026 Earnings"
+            ),
+            BlackoutEvent(
+                symbol="NVDA",
+                blackout_type=BlackoutType.EARNINGS,
+                event_date=datetime(2026, 2, 26, tzinfo=timezone.utc),
+                blackout_start=datetime(2026, 2, 26, tzinfo=timezone.utc) - timedelta(days=30),
+                blackout_end=datetime(2026, 2, 26, tzinfo=timezone.utc) + timedelta(days=1),
+                description="Q4 FY2026 Earnings"
             ),
         ]
 
@@ -1269,10 +1295,14 @@ class ComplianceAgent(ValidationAgent):
             self._blackout_events[event.symbol].append(event)
 
     async def _load_restricted_list(self) -> None:
-        """Load restricted instruments list."""
-        # In production, would load from compliance database
-        # Includes sanctioned entities, etc.
-        pass
+        """Load restricted instruments list from config banned_instruments."""
+        banned = self._config.parameters.get("banned_instruments", [])
+        for instrument in banned:
+            self._restricted_instruments.add(instrument)
+        if banned:
+            logger.info(f"Loaded {len(banned)} restricted instruments: {banned}")
+        else:
+            logger.info("No restricted instruments configured")
 
     def add_blackout_event(self, event: BlackoutEvent) -> None:
         """Add a blackout event to the calendar."""

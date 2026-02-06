@@ -377,6 +377,21 @@ class TradingFirmOrchestrator:
             {"mode": mode, "config_path": self._config_path},
         )
 
+        # Start async writer for non-blocking audit I/O
+        await self._audit_logger.start_async_writer()
+
+        # Wire data retention tracking for MiFID II compliance
+        try:
+            from core.data_retention import DataRetentionManager, create_retention_aware_logger
+            self._retention_manager = DataRetentionManager(
+                db_path="logs/retention.db",
+                archive_path="archive",
+            )
+            create_retention_aware_logger(self._audit_logger, self._retention_manager)
+            logger.info("Data retention tracking enabled (MiFID II 7-year)")
+        except Exception as e:
+            logger.warning(f"Data retention tracking not available: {e}")
+
         # Initialize monitoring system
         await self._initialize_monitoring()
 
@@ -1805,11 +1820,15 @@ class TradingFirmOrchestrator:
 
     def _on_market_data(self, data: MarketDataEvent) -> None:
         """Handle market data for monitoring."""
-        if self._monitoring and data.last > 0:
-            self._monitoring.metrics.record_metric(
-                f"market.{data.symbol}.last",
-                data.last,
-            )
+        if data.last > 0:
+            if self._monitoring:
+                self._monitoring.metrics.record_metric(
+                    f"market.{data.symbol}.last",
+                    data.last,
+                )
+            # Wire live prices to ExecutionAgent for stop orders and slippage calc
+            if self._execution_agent:
+                self._execution_agent.update_price(data.symbol, data.last)
 
     def request_shutdown(self, reason: str = "user request") -> None:
         """Request graceful shutdown."""

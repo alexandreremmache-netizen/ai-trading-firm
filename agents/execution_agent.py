@@ -485,6 +485,10 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             f"ExecutionAgent initializing with algo={self._default_algo}, "
             f"slice_interval={self._slice_interval}s"
         )
+        # Start order monitors (stop orders, zombie detection, timeouts)
+        await self.start_stop_order_monitor()
+        await self.start_zombie_order_monitor()
+        self.start_order_timeout_monitor()
 
     def get_subscribed_events(self) -> list[EventType]:
         """Execution agent subscribes to validated decisions and kill switch."""

@@ -56,8 +56,8 @@ event_bus:
   # Releases barrier when quorum threshold of agents respond within fast_path
   quorum:
     enabled: true
-    threshold: 0.8                    # [float, 0.5-1.0] Release when 80% of agents respond
-    fast_path_timeout_ms: 100         # [int, 50-500] Fast path timeout in milliseconds
+    threshold: 0.6                    # [float, 0.5-1.0] Release when 60% of agents respond (was 0.8 - too strict with symbol-filtering agents)
+    fast_path_timeout_ms: 500         # [int, 50-500] Fast path timeout in ms (was 100 - too fast for HMM/Kalman agents)
     require_critical: true            # [bool] All CRITICAL agents must respond
 
   # Agent criticality levels for quorum
@@ -362,35 +362,15 @@ sector_map:
   SPY: "index"
   QQQ: "index"
   IWM: "index"
-  # Futures - Index
-  ES: "index_futures"
-  NQ: "index_futures"
-  YM: "index_futures"
-  RTY: "index_futures"
-  # Futures - Energy
-  CL: "energy"
-  NG: "energy"
-  RB: "energy"
-  HO: "energy"
-  # Futures - Metals
-  GC: "precious_metals"
-  SI: "precious_metals"
-  HG: "base_metals"
-  PL: "precious_metals"
-  # Futures - Agriculture
-  ZC: "agriculture"
-  ZW: "agriculture"
-  ZS: "agriculture"
-  ZM: "agriculture"
-  ZL: "agriculture"
-  # Futures - Bonds
-  ZB: "bonds"
-  ZN: "bonds"
-  ZF: "bonds"
-  # Forex
-  EUR: "forex"
-  GBP: "forex"
-  JPY: "forex"
+  # Micro Futures - Index
+  MES: "index_futures"
+  MNQ: "index_futures"
+  MYM: "index_futures"
+  M2K: "index_futures"
+  # Micro Futures - Energy
+  MCL: "energy"
+  # Micro Futures - Metals
+  MGC: "precious_metals"
 
 # =============================================================================
 # === SAFE TO MODIFY - Portfolio Settings ===
@@ -427,13 +407,13 @@ cio:
 
   position_management:
     # Loss thresholds - when to close losing positions
-    max_loss_pct: 5.0                 # [float] Close position at this % loss (default 5%)
-    extended_loss_pct: 8.0            # [float] Emergency close at this % loss
-    loss_time_threshold_hours: 48.0   # [float] Close losing positions held > this many hours
+    max_loss_pct: 2.0                 # [float] INTRADAY: Close at 2% loss (was 5%)
+    extended_loss_pct: 3.0            # [float] INTRADAY: Emergency close at 3% (was 8%)
+    loss_time_threshold_hours: 2.0    # [float] INTRADAY: Close losers after 2h (was 48h)
 
     # Profit taking thresholds (Phase 12: realistic for intraday futures)
-    profit_target_pct: 4.0            # [float] Start taking profit at this % gain (was 15%)
-    trailing_profit_pct: 1.5          # [float] Take profit if drops this % from peak (was 3%)
+    profit_target_pct: 1.5            # [float] INTRADAY: Take profit at 1.5% (was 4%)
+    trailing_profit_pct: 0.75         # [float] INTRADAY: Trail 0.75% from peak (was 1.5%)
     partial_profit_pct: 33.0          # [float] Percentage to sell at each partial level (was 50)
 
     # Conviction-based position reduction
@@ -441,11 +421,11 @@ cio:
     min_conviction_to_hold: 0.5       # [float] INCREASED from 0.4 - exit faster on weak conviction
 
     # Time-based rules (Phase 12: per-strategy-type holding limits)
-    max_holding_days: 2.0             # [float] Default max holding 2 days (was 30)
-    stale_signal_hours: 12.0          # [float] Signal is stale after 12h (was 24h)
-    max_holding_hours_intraday: 4.0   # [float] Session/TTM/MeanReversion/EventDriven
-    max_holding_hours_swing: 48.0     # [float] Momentum/MACD-v/Macro/MarketMaking
-    max_holding_hours_pairs: 120.0    # [float] StatArb/IndexSpread (5 days)
+    max_holding_days: 0.25            # [float] INTRADAY: Max 6h holding (was 2 days)
+    stale_signal_hours: 4.0           # [float] INTRADAY: Stale after 4h (was 12h)
+    max_holding_hours_intraday: 3.0   # [float] Session/TTM/MeanReversion/EventDriven (was 4h)
+    max_holding_hours_swing: 4.0      # [float] INTRADAY: All strategies max 4h (was 48h)
+    max_holding_hours_pairs: 4.0      # [float] INTRADAY: Pairs max 4h too (was 120h)
 
     # Market regime adjustments
     volatile_regime_loss_pct: 3.0     # [float] Tighter stop in volatile markets
@@ -458,11 +438,11 @@ cio:
     # Phase 12: Active Position Protection (breakeven + trailing + graduated exits)
     breakeven_r_trigger: 1.0          # [float] Move stop to breakeven at this R-multiple
     breakeven_buffer_pct: 0.1         # [float] Buffer above entry for spread (0.1%)
-    trailing_activation_r: 1.5        # [float] Activate trailing stop at this R-multiple
-    trailing_distance_r: 0.5          # [float] Trail this many R behind peak price
-    partial_profit_1_r: 1.5           # [float] 1st partial exit (33%) at this R-multiple
-    partial_profit_2_r: 2.5           # [float] 2nd partial exit (33%) at this R-multiple
-    partial_profit_3_r: 3.5           # [float] Final full exit at this R-multiple
+    trailing_activation_r: 1.0        # [float] INTRADAY: Activate trailing at 1R (was 1.5R)
+    trailing_distance_r: 0.3          # [float] INTRADAY: Trail 0.3R behind peak (was 0.5R)
+    partial_profit_1_r: 1.0           # [float] INTRADAY: 1st partial at 1R (was 1.5R)
+    partial_profit_2_r: 1.5           # [float] INTRADAY: 2nd partial at 1.5R (was 2.5R)
+    partial_profit_3_r: 2.0           # [float] INTRADAY: Full exit at 2R (was 3.5R)
 
   # Signal Quality Scoring (Phase 2 Enhancement)
   # Filters out low-quality signals before aggregation
@@ -705,7 +685,7 @@ agents:
     candle_period_seconds: 300          # 5-minute candles for zone detection
 
   market_making:
-    enabled: true
+    enabled: false                       # DISABLED: Requires real-time level 2 data, degraded with delayed data
     spread_bps: 10
     max_inventory: 1000
     quote_refresh_ms: 1000
@@ -771,7 +751,8 @@ agents:
   index_spread:
     enabled: true                        # ENABLED: Fixed agent-strategy interface
     spread_pairs:
-      - ["MES", "MNQ"]                   # Micro futures
+      - ["MES", "MNQ"]                   # Micro S&P vs Micro NASDAQ
+      - ["MYM", "M2K"]                   # Micro Dow vs Micro Russell
     zscore_entry: 2.0
     zscore_exit: 0.5
     lookback_periods: 20
@@ -830,10 +811,10 @@ agents:
     min_confidence: 0.75                 # Minimum confidence threshold
     # Stop-loss / Take-profit (ATR-based)
     use_atr_stop: true                   # Use ATR for stops
-    stop_loss_atr_mult: 2.0              # Stop-loss at 2x ATR
-    take_profit_atr_mult: 4.0            # Take-profit at 4x ATR (2:1 R:R)
-    stop_loss_pct: 2.0                   # Fallback fixed stop (2%)
-    take_profit_pct: 4.0                 # Fallback fixed TP (4%)
+    stop_loss_atr_mult: 1.0              # INTRADAY: Stop at 1x ATR (was 2x)
+    take_profit_atr_mult: 1.5            # INTRADAY: TP at 1.5x ATR (was 4x)
+    stop_loss_pct: 1.0                   # INTRADAY: 1% stop (was 2%)
+    take_profit_pct: 1.5                 # INTRADAY: 1.5% TP (was 4%)
     # Histogram momentum
     histogram_momentum_bars: 3           # Bars to check for momentum confirmation
     # Symbols to analyze
@@ -855,17 +836,17 @@ agents:
     enabled: true
     # Stop-loss settings
     use_atr_stops: true                  # Use ATR-based dynamic stops (recommended)
-    stop_loss_atr_multiplier: 2.0        # Stop distance = 2.0x ATR (was 2.5)
-    default_stop_loss_pct: 3.0           # Fallback: 3% fixed stop if no ATR (was 5%)
+    stop_loss_atr_multiplier: 1.5        # INTRADAY: Stop at 1.5x ATR (was 2.0)
+    default_stop_loss_pct: 1.0           # INTRADAY: 1% stop (was 3%)
     # Take profit settings
-    default_take_profit_pct: 4.0         # 4% profit target (was 10%)
+    default_take_profit_pct: 1.5         # INTRADAY: 1.5% target (was 4%)
     trailing_take_profit: true           # Trailing take profit enabled
     # Trailing stop settings (Phase 12: tighter for intraday)
     trailing_enabled: true               # Enable trailing stops to lock in gains
-    trailing_activation_pct: 1.0         # Activate trailing after 1% profit (was 2%)
-    trailing_distance_pct: 1.5           # Trail 1.5% below peak (was 3%)
+    trailing_activation_pct: 0.5         # INTRADAY: Activate at 0.5% (was 1%)
+    trailing_distance_pct: 0.75          # INTRADAY: Trail 0.75% (was 1.5%)
     # Time-based exit
-    time_exit_hours: 48                  # Default 48h max hold (was 0=disabled)
+    time_exit_hours: 4                   # INTRADAY: Max 4h hold (was 48h)
 
   # ========== DECISION & VALIDATION AGENTS ==========
   cio:
@@ -884,9 +865,11 @@ agents:
     signal_weight_sentiment: 0.10       # LLM sentiment analysis weight
     signal_weight_chart_analysis: 0.10  # Claude Vision chart patterns
     signal_weight_forecasting: 0.10     # LLM price forecasting
-    min_conviction_threshold: 0.75      # INCREASED from 0.6 - only high conviction trades
+    min_conviction_threshold: 0.70      # INTRADAY: Require stronger conviction (was 0.50)
     max_concurrent_decisions: 5
-    max_leverage: 3.0                   # Aligned with RiskAgent (both use 3.0x)
+    max_open_positions: 6               # INTRADAY: Max 6 simultaneous positions
+    decision_cooldown_seconds: 120.0    # INTRADAY: 2min cooldown per symbol
+    max_leverage: 3.0                   # Must match RiskAgent's max_leverage (both 3.0x)
     # Dynamic weight settings
     use_dynamic_weights: true
     performance_weight_factor: 0.3
@@ -998,9 +981,9 @@ position_sizing:
   method: "kelly"
   kelly_fraction: 0.25
   max_kelly_raw: 0.15
-  max_position_pct: 3.0
+  max_position_pct: 1.0               # INTRADAY: Max 1% per position (was 3%)
   min_position_pct: 0.5
-  max_total_exposure_pct: 50.0
+  max_total_exposure_pct: 20.0        # INTRADAY: Max 20% total exposure (was 50%)
   vol_target: 0.15
   correlation_discount: true
   # Turn of month boost

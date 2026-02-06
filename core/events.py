@@ -690,6 +690,7 @@ class OrderState(Enum):
     PENDING = "pending"  # Awaiting submission to broker
     SUBMITTED = "submitted"  # Sent to broker, awaiting acknowledgment
     ACKNOWLEDGED = "acknowledged"  # Broker acknowledged receipt
+    WORKING = "working"  # Order is active/working at the exchange
     PARTIAL = "partial"  # Partially filled
     FILLED = "filled"  # Completely filled
     CANCELLED = "cancelled"  # Cancelled by user or system
@@ -703,7 +704,8 @@ VALID_ORDER_TRANSITIONS: dict[OrderState, tuple[OrderState, ...]] = {
     OrderState.CREATED: (OrderState.PENDING, OrderState.CANCELLED),
     OrderState.PENDING: (OrderState.SUBMITTED, OrderState.CANCELLED, OrderState.FAILED),
     OrderState.SUBMITTED: (OrderState.ACKNOWLEDGED, OrderState.REJECTED, OrderState.FAILED),
-    OrderState.ACKNOWLEDGED: (OrderState.PARTIAL, OrderState.FILLED, OrderState.CANCELLED, OrderState.EXPIRED),
+    OrderState.ACKNOWLEDGED: (OrderState.WORKING, OrderState.PARTIAL, OrderState.FILLED, OrderState.CANCELLED, OrderState.EXPIRED),
+    OrderState.WORKING: (OrderState.PARTIAL, OrderState.FILLED, OrderState.CANCELLED, OrderState.EXPIRED),
     OrderState.PARTIAL: (OrderState.PARTIAL, OrderState.FILLED, OrderState.CANCELLED),
     OrderState.FILLED: (),  # Terminal state
     OrderState.CANCELLED: (),  # Terminal state

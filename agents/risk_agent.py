@@ -40,6 +40,8 @@ from core.crash_protection import (
     CrashProtectionConfig,
 )
 
+from core.contract_specs import CONTRACT_SPECS
+
 if TYPE_CHECKING:
     from core.event_bus import EventBus
     from core.logger import AuditLogger
@@ -804,6 +806,39 @@ class RiskAgent(ValidationAgent):
             adjusted_quantity=adjusted_quantity if adjusted_quantity != decision.quantity else None
         )
 
+    def _estimate_order_notional(self, decision: DecisionEvent) -> tuple[float, float, float]:
+        """
+        Estimate notional value of an order using CONTRACT_SPECS multiplier.
+
+        Returns:
+            (price, multiplier, notional_value) where notional = price * multiplier * |quantity|
+        """
+        symbol = decision.symbol
+        quantity = abs(decision.quantity)
+
+        # 1. Try limit_price from decision
+        price = decision.limit_price
+
+        # 2. Try current position's avg_cost as proxy
+        if not price or price <= 0:
+            existing_pos = self._risk_state.positions.get(symbol)
+            if existing_pos and existing_pos.avg_cost > 0:
+                price = existing_pos.avg_cost
+
+        # 3. Fallback: log warning
+        if not price or price <= 0:
+            logger.warning(
+                f"RiskAgent: No price for {symbol}, using fallback $100. Risk checks may be inaccurate!"
+            )
+            price = 100.0
+
+        # Get multiplier from CONTRACT_SPECS (futures have multiplier > 1)
+        spec = CONTRACT_SPECS.get(symbol)
+        multiplier = spec.multiplier if spec else 1.0
+
+        notional = price * multiplier * quantity
+        return price, multiplier, notional
+
     async def _check_position_limit(
         self, decision: DecisionEvent
     ) -> tuple[RiskCheckResult, Optional[int]]:
@@ -834,9 +869,9 @@ class RiskAgent(ValidationAgent):
                 delta = requested_qty if decision.action == OrderSide.BUY else -requested_qty
                 new_qty = current_qty + delta
 
-        # Estimate value (use limit price or last known price)
-        price = decision.limit_price or 100.0  # Fallback
-        new_value = abs(new_qty) * price
+        # Estimate notional value using CONTRACT_SPECS multiplier
+        price, multiplier, _ = self._estimate_order_notional(decision)
+        new_value = abs(new_qty) * price * multiplier
 
         # Check against limit
         max_value = self._risk_state.net_liquidation * self._max_position_pct
@@ -844,7 +879,7 @@ class RiskAgent(ValidationAgent):
 
         if new_value > max_value:
             # Try to adjust quantity
-            max_qty = int(max_value / price) - abs(current_qty)
+            max_qty = int(max_value / (price * multiplier)) - abs(current_qty)
             # Also apply drawdown reduction to max_qty
             max_qty = max(1, int(max_qty * size_multiplier)) if size_multiplier < 1.0 else max_qty
 
@@ -897,9 +932,9 @@ class RiskAgent(ValidationAgent):
 
         current_sector_exposure = self._risk_state.sector_exposure.get(sector, 0.0)
 
-        # Estimate additional exposure
-        price = decision.limit_price or 100.0
-        additional_exposure = decision.quantity * price / self._risk_state.net_liquidation
+        # Estimate additional exposure using notional (price * multiplier * qty)
+        price, multiplier, order_notional = self._estimate_order_notional(decision)
+        additional_exposure = order_notional / self._risk_state.net_liquidation if self._risk_state.net_liquidation > 0 else 0
 
         if decision.action == OrderSide.SELL:
             additional_exposure = -additional_exposure
@@ -1093,9 +1128,8 @@ class RiskAgent(ValidationAgent):
         gross_exposure = self._risk_state.gross_exposure
         net_exposure = self._risk_state.net_exposure if hasattr(self._risk_state, 'net_exposure') else gross_exposure
 
-        # Estimate impact of this order
-        price = decision.limit_price or 100.0
-        order_value = abs(decision.quantity * price)
+        # Estimate impact of this order using notional (price * multiplier)
+        price, multiplier, order_value = self._estimate_order_notional(decision)
 
         # Determine if this adds to or reduces exposure
         symbol = decision.symbol
@@ -1105,16 +1139,17 @@ class RiskAgent(ValidationAgent):
         is_buy = decision.action == OrderSide.BUY
         new_qty = current_qty + decision.quantity if is_buy else current_qty - decision.quantity
 
-        # Calculate exposure change
+        # Calculate exposure change (using notional = price * multiplier * qty)
+        unit_value = price * multiplier
         if (current_qty >= 0 and is_buy) or (current_qty <= 0 and not is_buy):
             # Adding to existing direction - increases exposure
             gross_delta = order_value
         else:
             # Reducing position - decreases exposure
-            gross_delta = -min(order_value, abs(current_qty * price))
+            gross_delta = -min(order_value, abs(current_qty) * unit_value)
             if abs(new_qty) > abs(current_qty):
                 # Flip and establish new position
-                gross_delta = abs(new_qty - current_qty) * price - abs(current_qty * price)
+                gross_delta = abs(new_qty - current_qty) * unit_value - abs(current_qty) * unit_value
 
         projected_gross = gross_exposure + gross_delta
 
@@ -1165,9 +1200,9 @@ class RiskAgent(ValidationAgent):
         current_var = self._risk_state.var_95
         portfolio_value = self._risk_state.net_liquidation
 
-        # Get order value
-        price = decision.limit_price or 100.0
-        order_value = decision.quantity * price
+        # Get order notional value using CONTRACT_SPECS multiplier
+        price, multiplier, order_notional = self._estimate_order_notional(decision)
+        order_value = order_notional
         if decision.action and decision.action.value == "sell":
             order_value = -order_value
 
