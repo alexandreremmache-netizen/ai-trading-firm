@@ -45,7 +45,7 @@ except ImportError:
 
 import yaml
 
-from core.event_bus import EventBus, AgentCriticality
+from core.event_bus import EventBus, AgentCriticality, QuorumConfig
 from core.broker import IBBroker, BrokerConfig
 from core.logger import AuditLogger
 from core.agent_base import AgentConfig
@@ -413,11 +413,20 @@ class TradingFirmOrchestrator:
             for name, level in agent_criticality_config.items()
         } if agent_criticality_config else None
 
+        # Parse quorum config from config.yaml (was missing - used code default 0.8 instead of config 0.6)
+        quorum_cfg = event_bus_config.get("quorum", {})
+        quorum_config = QuorumConfig(
+            threshold=quorum_cfg.get("threshold", 0.8),
+            fast_path_timeout_ms=quorum_cfg.get("fast_path_timeout_ms", 500),
+            require_critical=quorum_cfg.get("require_critical", True),
+        ) if quorum_cfg.get("enabled", False) else None
+
         self._event_bus = EventBus(
             max_queue_size=event_bus_config.get("max_queue_size", 10000),
             signal_timeout=event_bus_config.get("signal_timeout_seconds", 5.0),
             barrier_timeout=event_bus_config.get("sync_barrier_timeout_seconds", 10.0),
             agent_criticality=agent_criticality,
+            quorum_config=quorum_config,
         )
 
         # CRITICAL: Initialize and connect immutable audit ledger for MiFID II compliance

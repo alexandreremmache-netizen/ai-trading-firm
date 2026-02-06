@@ -39,8 +39,9 @@ broker:
   client_id: 10                   # [int, 1-32] Unique client ID (each app needs different ID)
   timeout_seconds: 30             # [int, 10-120] Connection timeout
   readonly: false                 # [bool] If true, cannot place orders
-  # SAFE: Use delayed data (free, no subscription needed)
-  use_delayed_data: true          # [bool] Use delayed market data (15-20 min delay)
+  # Paper account: must use delayed data (subscriptions only available on live account)
+  # For live trading: set to false (requires IB market data subscription)
+  use_delayed_data: true          # [bool] true=delayed (paper), false=live (requires subscription)
 
 # =============================================================================
 # === ADVANCED - Event System (usually no changes needed) ===
@@ -56,7 +57,7 @@ event_bus:
   # Releases barrier when quorum threshold of agents respond within fast_path
   quorum:
     enabled: true
-    threshold: 0.6                    # [float, 0.5-1.0] Release when 60% of agents respond (was 0.8 - too strict with symbol-filtering agents)
+    threshold: 0.8                    # [float, 0.5-1.0] Release when 80% of agents respond (need strong consensus for intraday)
     fast_path_timeout_ms: 500         # [int, 50-500] Fast path timeout in ms (was 100 - too fast for HMM/Kalman agents)
     require_critical: true            # [bool] All CRITICAL agents must respond
 
@@ -448,9 +449,9 @@ cio:
   # Filters out low-quality signals before aggregation
   signal_quality:
     enabled: true                       # [bool] Enable signal quality scoring
-    min_total_score: 50.0               # [float] Reject signals below this score (0-100)
-    min_volume_score: 5.0               # [float] Min volume confirmation score (0-20)
-    min_trend_score: 5.0                # [float] Min trend alignment score (0-20)
+    min_total_score: 65.0               # [float] Reject signals below this score (0-100) - raised from 50 for intraday
+    min_volume_score: 10.0              # [float] Min volume confirmation score (0-20) - raised from 5
+    min_trend_score: 8.0                # [float] Min trend alignment score (0-20) - raised from 5
 
   # Enhanced Correlation Filter (Phase D Enhancement)
   # Monthly rolling correlation with aggressive weight reduction

@@ -2247,15 +2247,25 @@ class DashboardState:
         # Build positions list from current positions
         positions = []
         for symbol, pos in self._positions.items():
-            if pos.get("quantity", 0) != 0:
-                entry_price = pos.get("entry_price", pos.get("avg_price", 100))
-                quantity = abs(pos.get("quantity", 0))
-                current_price = pos.get("current_price", entry_price)
+            # pos is a PositionInfo dataclass, use attribute access
+            qty = getattr(pos, "quantity", 0) if not isinstance(pos, dict) else pos.get("quantity", 0)
+            if qty != 0:
+                if isinstance(pos, dict):
+                    entry_price = pos.get("entry_price", pos.get("avg_price", 100))
+                    current_price = pos.get("current_price", entry_price)
+                    var_contrib = pos.get("var_contribution", 5.0)
+                    entry_dt = pos.get("entry_time", datetime.now(timezone.utc) - timedelta(days=1))
+                else:
+                    entry_price = getattr(pos, "entry_price", 100)
+                    current_price = getattr(pos, "current_price", entry_price)
+                    var_contrib = getattr(pos, "var_contribution", 5.0)
+                    entry_dt = getattr(pos, "entry_time", None) or datetime.now(timezone.utc) - timedelta(days=1)
+                quantity = abs(qty)
                 positions.append({
                     "symbol": symbol,
                     "value": abs(quantity * current_price),
-                    "var_contribution": pos.get("var_contribution", 5.0),
-                    "entry_date": pos.get("entry_time", datetime.now(timezone.utc) - timedelta(days=1)),
+                    "var_contribution": var_contrib,
+                    "entry_date": entry_dt,
                 })
 
         # Get portfolio value from latest equity point or default

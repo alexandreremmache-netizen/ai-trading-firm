@@ -1245,8 +1245,33 @@ Python `deque` ne supporte pas le slicing `[-N:]`. Corrections:
 
 ---
 
-*Document mis a jour: 2026-02-05*
-*Total tests: 1127*
+### Phase 15: Live Trading Session & Audit Corrections (2026-02-06)
+
+**Live session results** (50 min, micro futures):
+- 13+ fills on MES, MNQ, M2K with conviction 0.81-1.00
+- PnL realise: +$52.63 sur trades fermes
+- Win rate: ~75% (3 winners, 1 loser sur trades mesurables)
+
+**Critical Fixes:**
+- **Quorum wiring**: main.py ne passait pas quorum_config a EventBus → config.yaml ignore. Corrige.
+- **Quorum threshold**: 0.6 → 0.8 (consensus fort pour intraday)
+- **Signal quality thresholds**: min_total_score 50→65, volume 5→10, trend 5→8
+- **Dashboard heatmap**: PositionInfo `.get()` AttributeError corrige
+- **CIO price tracking**: Notional vs actual price (400% phantom PnL) corrige
+- **MYM multiplier**: `> 1.0` → `!= 1.0` pour multiplier < 1
+- **EOD cutoff**: Equity close 15:45 ET → Futures close 16:55 ET
+- **Compliance heartbeat**: Ajoute "heartbeat" a APPROVED_SOURCES
+
+**Expert Audit Analysis (external review):**
+- use_delayed_data: true → Paper account limitation (pas de subscription possible)
+- Execution optimizer: NON INTEGRE (core/execution_optimizer.py = Alpha, zero imports)
+- signal_decay.py: Code mort (AsyncSignalCache utilise a la place, 30s staleness)
+- Kelly sizing: b=avg_win/avg_loss est dimensionless → ratio correct en dollars ou returns
+
+---
+
+*Document mis a jour: 2026-02-06*
+*Total tests: 1204*
 *Total lignes de code: ~33,000+*
-*Phase 12: Active Position Protection & Barrier Integrity*
+*Phase 15: Live Trading Session & Audit Corrections*
 *Risk Score: 9.5/10 | Compliance Score: 90/100*

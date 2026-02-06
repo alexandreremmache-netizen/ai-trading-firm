@@ -3091,8 +3091,8 @@ class CIOAgent(DecisionAgent):
 
         # Kelly inputs from actual tracked data
         win_rate = perf.win_rate
-        avg_win = perf.avg_win
-        avg_loss = perf.avg_loss
+        avg_win = perf.avg_win    # Dollar amounts from trade attribution
+        avg_loss = perf.avg_loss  # Dollar amounts from trade attribution
 
         # Validate inputs
         if win_rate <= 0 or win_rate >= 1:
@@ -3101,6 +3101,11 @@ class CIOAgent(DecisionAgent):
             return self._calculate_conviction_size(agg)
 
         # Step 1: Calculate raw Kelly
+        # BUGFIX: Kelly formula expects return RATIOS, not dollar amounts.
+        # avg_win/avg_loss are in dollars from attribution - the ratio b = avg_win/avg_loss
+        # is dimensionless and correct regardless of units (dollars cancel out).
+        # However, the Kelly fraction f* = (bp - q)/b gives the fraction of bankroll to bet,
+        # which is correct as long as b is the ratio of average win to average loss.
         b = avg_win / avg_loss
         p = win_rate
         q = 1 - p
