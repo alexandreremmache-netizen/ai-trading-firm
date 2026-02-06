@@ -377,6 +377,8 @@ class ComplianceAgent(ValidationAgent):
         "ma_cross", "macd", "stochastic", "adx", "session_filter", "trend_indicator",
         # Historical warmup data source
         "warmup", "historical_warmup",
+        # Agent heartbeat (FLAT/no-signal participation in barrier sync)
+        "heartbeat",
     }
 
     # Suspicious patterns in data content

@@ -1158,7 +1158,12 @@ class CIOAgent(DecisionAgent):
                         del self._tracked_positions[symbol]
                     continue
 
-                price = (pos.market_value / pos.quantity) if pos.quantity != 0 else pos.avg_cost
+                # FIX: Convert IB notional to actual price using contract multiplier
+                # IB market_value = price * multiplier * quantity for futures
+                spec = CONTRACT_SPECS.get(symbol)
+                multiplier = spec.multiplier if spec else 1.0
+                raw_price = (pos.market_value / pos.quantity) if pos.quantity != 0 else pos.avg_cost
+                price = raw_price / multiplier if multiplier != 1.0 else raw_price
 
                 if symbol in self._tracked_positions:
                     # Update existing position
@@ -1169,11 +1174,8 @@ class CIOAgent(DecisionAgent):
                 else:
                     # New position we're not tracking yet - add it
                     is_long = pos.quantity > 0
-                    # FIX-09: Set contract multiplier for PnL calculation
-                    spec = CONTRACT_SPECS.get(symbol)
-                    multiplier = spec.multiplier if spec else 1.0
-                    # IB avg_cost = price * multiplier for futures, divide it back
-                    entry_price = pos.avg_cost / multiplier if multiplier > 1.0 else pos.avg_cost
+                    # IB avg_cost = price * multiplier for ALL futures (including multiplier < 1)
+                    entry_price = pos.avg_cost / multiplier if multiplier != 1.0 else pos.avg_cost
                     # Estimate initial risk (2% default for unknown positions)
                     est_initial_risk = entry_price * 0.02
                     self._tracked_positions[symbol] = TrackedPosition(
@@ -2035,21 +2037,21 @@ class CIOAgent(DecisionAgent):
 
     @property
     def _is_past_new_position_cutoff(self) -> bool:
-        """True after 3:00 PM ET -- no new positions allowed."""
+        """True after 4:45 PM ET -- no new positions allowed (futures trade until 5pm ET)."""
         current_hour, _, _ = self._get_et_time()
-        return current_hour >= 15.0
+        return current_hour >= 16.75
 
     @property
     def _is_eod_liquidation_time(self) -> bool:
-        """True after 3:30 PM ET -- start closing all positions."""
+        """True after 4:50 PM ET -- start closing all positions."""
         current_hour, _, _ = self._get_et_time()
-        return current_hour >= 15.5
+        return current_hour >= 16.833
 
     @property
     def _is_eod_force_close_time(self) -> bool:
-        """True after 3:45 PM ET -- force market orders for everything."""
+        """True after 4:55 PM ET -- force market orders for everything."""
         current_hour, _, _ = self._get_et_time()
-        return current_hour >= 15.75
+        return current_hour >= 16.917
 
     async def _make_decision_from_aggregation(self, agg: SignalAggregation) -> None:
         """
@@ -2068,9 +2070,9 @@ class CIOAgent(DecisionAgent):
         if self._filter_market_hours and not self._is_market_open_for_symbol(symbol):
             return
 
-        # INTRADAY: No new positions after 15:00 ET cutoff
+        # INTRADAY: No new positions after 16:45 ET cutoff (futures close 17:00 ET)
         if self._is_past_new_position_cutoff and symbol not in self._tracked_positions:
-            logger.info(f"CIO: EOD cutoff - no new positions after 15:00 ET, skipping {symbol}")
+            logger.info(f"CIO: EOD cutoff - no new positions after 16:45 ET, skipping {symbol}")
             return
 
         # Per-symbol cooldown: prevent rapid-fire decisions on same symbol
