@@ -1052,8 +1052,11 @@ class CIOAgent(DecisionAgent):
         # Sync tracked positions with broker positions
         await self._sync_tracked_positions()
 
-        # EOD MANAGEMENT: Close all positions before market close (intraday only)
+        # EOD MANAGEMENT: Graduated close before market close (all instruments)
+        # Phase 14+: Proportional schedule to avoid order clustering at close
+        current_hour, _, hours_remaining = self._get_et_time()
         if self._is_eod_force_close_time:
+            # 15:45 ET: FORCE CLOSE everything with market orders
             for symbol, pos in list(self._tracked_positions.items()):
                 logger.warning(f"CIO EOD FORCE CLOSE 15:45 ET: Closing {symbol} (P&L: {pos.pnl_pct:.1f}%)")
                 decision = self._create_close_loser_decision(
@@ -1063,6 +1066,7 @@ class CIOAgent(DecisionAgent):
                     await self._publish_position_management_decision(decision)
             return
         if self._is_eod_liquidation_time:
+            # 15:30 ET: Close all remaining positions with limit orders
             for symbol, pos in list(self._tracked_positions.items()):
                 logger.warning(f"CIO EOD LIQUIDATION 15:30 ET: Closing {symbol} (P&L: {pos.pnl_pct:.1f}%)")
                 decision = self._create_close_loser_decision(
@@ -1070,6 +1074,29 @@ class CIOAgent(DecisionAgent):
                 )
                 if decision:
                     await self._publish_position_management_decision(decision)
+            return
+        if self._is_past_new_position_cutoff:
+            # 15:00-15:30 ET: Graduated close - losers first, then all
+            # Close losing positions immediately after 15:00
+            for symbol, pos in list(self._tracked_positions.items()):
+                if pos.pnl_pct < 0:
+                    logger.info(f"CIO EOD GRADUATED 15:00+ ET: Closing loser {symbol} (P&L: {pos.pnl_pct:.1f}%)")
+                    decision = self._create_close_loser_decision(
+                        pos, reason=f"EOD GRADUATED: 15:00+ ET - closing loser (P&L: {pos.pnl_pct:.1f}%)",
+                    )
+                    if decision:
+                        await self._publish_position_management_decision(decision)
+            # After 15:15 ET: close winners too
+            if current_hour >= 15.25:
+                for symbol, pos in list(self._tracked_positions.items()):
+                    if pos.pnl_pct >= 0:
+                        logger.info(f"CIO EOD GRADUATED 15:15+ ET: Closing winner {symbol} (P&L: {pos.pnl_pct:.1f}%)")
+                        decision = self._create_take_profit_decision(
+                            pos, reason=f"EOD GRADUATED: 15:15+ ET - locking in {pos.pnl_pct:.1f}% gain",
+                            partial_exit=False,
+                        )
+                        if decision:
+                            await self._publish_position_management_decision(decision)
             return
 
         # CLEANUP: Close any positions on no-trade symbols (stocks, ETFs, forex)
@@ -1142,15 +1169,17 @@ class CIOAgent(DecisionAgent):
                 else:
                     # New position we're not tracking yet - add it
                     is_long = pos.quantity > 0
-                    # Estimate initial risk (2% default for unknown positions)
-                    est_initial_risk = pos.avg_cost * 0.02
                     # FIX-09: Set contract multiplier for PnL calculation
                     spec = CONTRACT_SPECS.get(symbol)
                     multiplier = spec.multiplier if spec else 1.0
+                    # IB avg_cost = price * multiplier for futures, divide it back
+                    entry_price = pos.avg_cost / multiplier if multiplier > 1.0 else pos.avg_cost
+                    # Estimate initial risk (2% default for unknown positions)
+                    est_initial_risk = entry_price * 0.02
                     self._tracked_positions[symbol] = TrackedPosition(
                         symbol=symbol,
                         quantity=abs(pos.quantity),
-                        entry_price=pos.avg_cost,
+                        entry_price=entry_price,
                         entry_time=datetime.now(timezone.utc),  # Approximate
                         is_long=is_long,
                         current_price=price,
@@ -1163,7 +1192,7 @@ class CIOAgent(DecisionAgent):
                     )
                     logger.info(
                         f"CIO: Started tracking existing position {symbol}: "
-                        f"{'LONG' if is_long else 'SHORT'} {abs(pos.quantity)} @ ${pos.avg_cost:.2f}"
+                        f"{'LONG' if is_long else 'SHORT'} {abs(pos.quantity)} @ ${entry_price:.2f}"
                     )
 
             # Remove tracked positions that no longer exist
