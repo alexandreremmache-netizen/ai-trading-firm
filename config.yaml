@@ -120,9 +120,9 @@ risk:
   # Value at Risk limit - REDUCED after 25% loss incident
   max_portfolio_var_pct: 1.0          # [float] REDUCED from 2.0 to 1.0 for safety
 
-  # FIX-05: Position size limits - 7% needed for 1 MES ($34.7K notional) on $551K portfolio
-  max_position_pct: 7.0               # [float] 7% = $38.6K on $551K, allows 1 MES contract
-  max_position_size_pct: 7.0          # [float] 7% = $38.6K on $551K, allows 1 MES contract
+  # FIX-05: Position size limits - 10% needed for 1 MNQ ($50K notional) on $551K portfolio
+  max_position_pct: 10.0              # [float] 10% = $55K on $551K, allows 1 contract of any micro future
+  max_position_size_pct: 10.0         # [float] 10% = $55K on $551K, allows 1 contract of any micro future
 
   # Sector concentration limit
   max_sector_pct: 15.0                # [float] REDUCED from 20.0 to 15.0
@@ -217,7 +217,7 @@ position_sizing:
   method: "kelly"                     # "kelly", "vol_target", "fixed_fractional", "equal"
   kelly_fraction: 0.25                # [float] Quarter-Kelly for safety
   max_kelly_raw: 0.15                 # [float] Max raw Kelly before fraction (15%)
-  max_position_pct: 7.0               # [float] 7% for futures (1 MES = ~$34.7K on $551K)
+  max_position_pct: 10.0              # [float] 10% for futures (1 MNQ = ~$50K on $551K)
   min_position_pct: 0.5               # [float] Minimum position as % of portfolio
   max_total_exposure_pct: 20.0        # [float] INTRADAY: Max 20% total exposure
   vol_target: 0.15                    # Target volatility (15% annual)
