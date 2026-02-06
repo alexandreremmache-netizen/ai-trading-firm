@@ -496,6 +496,29 @@ class MeanReversionStrategy:
             else:
                 direction = None
 
+        # GAP FILTER: After a large overnight gap (>3%), suppress signals
+        # that go WITH the gap (i.e., don't short after gap down, don't long after gap up).
+        # Mean reversion after a gap should FADE the move, not chase it.
+        if len(close) >= 20 and direction is not None:
+            # Estimate "prior session" price as mean of first 10 bars
+            prior_price = np.mean(close[:10])
+            gap_pct = (current_price - prior_price) / prior_price if prior_price > 0 else 0
+            if abs(gap_pct) > 0.03:  # >3% gap detected
+                if gap_pct < -0.03 and direction == "SHORT":
+                    # Gap DOWN but signal says SHORT - suppress (should fade the gap = LONG)
+                    logger.info(
+                        f"MeanReversion GAP FILTER: {symbol} gapped down {gap_pct*100:.1f}%, "
+                        f"suppressing SHORT signal (should fade gap = LONG)"
+                    )
+                    direction = None
+                elif gap_pct > 0.03 and direction == "LONG":
+                    # Gap UP but signal says LONG - suppress (should fade the gap = SHORT)
+                    logger.info(
+                        f"MeanReversion GAP FILTER: {symbol} gapped up {gap_pct*100:.1f}%, "
+                        f"suppressing LONG signal (should fade gap = SHORT)"
+                    )
+                    direction = None
+
         # No clear signal
         if direction is None or len(signals_triggered) < 1:
             # Check for exit signals

@@ -143,11 +143,11 @@ class StatArbAgent(SignalAgent):
 
         # Correlation divergence detection (MoonDev-inspired)
         self._divergence_enabled = config.parameters.get("divergence_enabled", True)
+        # FIX-11: Removed stock/ETF pairs - futures-only system
         self._divergence_pairs = config.parameters.get("divergence_pairs", [
-            ["SPY", "QQQ"],   # Index ETFs (data only)
             ["MES", "MNQ"],   # Micro index futures
             ["MGC", "MCL"],   # Micro metals/energy
-            ["AAPL", "MSFT"], # Tech leaders
+            ["MYM", "M2K"],   # Micro Dow / Micro Russell
         ])
         self._divergence_lookback = config.parameters.get("divergence_lookback", 20)
         self._divergence_threshold = config.parameters.get("divergence_threshold", 2.0)
@@ -196,20 +196,36 @@ class StatArbAgent(SignalAgent):
         if price <= 0:
             return
 
+        # FIX-28: Track last update time per leg to avoid stale data
+        import time
+        now = time.time()
+
         # Update relevant pairs
         signals = []
         for pair_key, pair_state in self._pairs.items():
             if symbol == pair_state.symbol_a:
                 pair_state.price_a.append(price)
-                signal = await self._check_pair_signal(pair_key, pair_state)
-                if signal:
-                    signals.append(signal)
+                if not hasattr(pair_state, '_last_update_a'):
+                    pair_state._last_update_a = 0.0
+                    pair_state._last_update_b = 0.0
+                pair_state._last_update_a = now
+                # FIX-28: Only compute signal when both legs updated within 5s
+                if now - getattr(pair_state, '_last_update_b', 0.0) < 5.0:
+                    signal = await self._check_pair_signal(pair_key, pair_state)
+                    if signal:
+                        signals.extend(signal if isinstance(signal, list) else [signal])
 
             elif symbol == pair_state.symbol_b:
                 pair_state.price_b.append(price)
-                signal = await self._check_pair_signal(pair_key, pair_state)
-                if signal:
-                    signals.append(signal)
+                if not hasattr(pair_state, '_last_update_b'):
+                    pair_state._last_update_a = 0.0
+                    pair_state._last_update_b = 0.0
+                pair_state._last_update_b = now
+                # FIX-28: Only compute signal when both legs updated within 5s
+                if now - getattr(pair_state, '_last_update_a', 0.0) < 5.0:
+                    signal = await self._check_pair_signal(pair_key, pair_state)
+                    if signal:
+                        signals.extend(signal if isinstance(signal, list) else [signal])
 
         # Publish signals (filter by confidence threshold)
         for signal in signals:
@@ -227,12 +243,12 @@ class StatArbAgent(SignalAgent):
             # Send a neutral signal if symbol is part of any tracked pair
             for pair_key, pair_state in self._pairs.items():
                 if symbol == pair_state.symbol_a or symbol == pair_state.symbol_b:
-                    # Send a neutral/monitoring signal to satisfy barrier
+                    # FIX-27: Use actual symbol (not pair key) for heartbeat
                     data_status = f"A:{len(pair_state.price_a)}/B:{len(pair_state.price_b)}"
                     neutral_signal = SignalEvent(
                         source_agent=self.name,
                         strategy_name="stat_arb_pairs",
-                        symbol=pair_key,
+                        symbol=symbol,
                         direction=SignalDirection.FLAT,
                         strength=0.0,
                         confidence=0.3,
@@ -266,7 +282,7 @@ class StatArbAgent(SignalAgent):
         self,
         pair_key: str,
         pair_state: PairState,
-    ) -> SignalEvent | None:
+    ) -> list[SignalEvent] | None:
         """
         Check if pair generates a trading signal.
 
@@ -276,8 +292,8 @@ class StatArbAgent(SignalAgent):
         3. Compute spread and z-score
         4. Check for entry/exit signals
         """
-        # Need sufficient data (reduced from 100 to 10 for faster startup)
-        min_data = 10
+        # FIX-25: Need sufficient data (120 bars = 2 hours). 10 bars = noise.
+        min_data = 120
         if len(pair_state.price_a) < min_data or len(pair_state.price_b) < min_data:
             return None
 
@@ -350,80 +366,123 @@ class StatArbAgent(SignalAgent):
         pair_key: str,
         pair_state: PairState,
         zscore: float,
-    ) -> SignalEvent | None:
-        """Generate signal based on z-score."""
+    ) -> list[SignalEvent] | None:
+        """
+        Generate signals based on z-score.
+
+        FIX-27: Emits two separate signals (one per leg) instead of a single
+        signal with pair symbol "MES:MNQ" which IB cannot execute.
+        """
         current_signal = pair_state.last_signal
 
         # P2: Check if pair is tradeable (allow signals with reduced confidence if not verified)
         tradeable, reason = self.is_pair_tradeable(pair_key)
         confidence_penalty = 0.0 if tradeable else 0.3  # Reduce confidence if not verified tradeable
 
+        # Get last prices for SL/TP
+        price_a = list(pair_state.price_a)[-1] if pair_state.price_a else 0
+        price_b = list(pair_state.price_b)[-1] if pair_state.price_b else 0
+
         # Entry signals
         if zscore > self._zscore_entry and current_signal != SignalDirection.SHORT:
             # Spread too high - short A, long B
             pair_state.last_signal = SignalDirection.SHORT
-            # Calculate stop_loss and target_price based on spread
-            # For SHORT: spread should decrease, so target is lower, stop is higher
-            current_spread = list(pair_state.spread_history)[-1] if pair_state.spread_history else 0
-            stop_loss_spread = current_spread * 1.02  # 2% above (adverse move)
-            target_spread = current_spread * 0.96  # 4% below (favorable move)
-            return SignalEvent(
-                source_agent=self.name,
-                strategy_name="stat_arb_pairs",
-                symbol=pair_key,  # Pair identifier
-                direction=SignalDirection.SHORT,
-                strength=-min(1.0, zscore / 3.0),
-                confidence=max(0.1, self._calculate_confidence(zscore, pair_state) - confidence_penalty),
-                target_price=target_spread,
-                stop_loss=stop_loss_spread,
-                rationale=(
-                    f"Pair {pair_key} spread z-score={zscore:.2f} > {self._zscore_entry}. "
-                    f"Short {pair_state.symbol_a}, Long {pair_state.symbol_b}. "
-                    f"Quality={pair_state.pair_quality_score:.2f}"
-                ),
-                data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+            confidence = max(0.1, self._calculate_confidence(zscore, pair_state) - confidence_penalty)
+            strength = min(1.0, zscore / 3.0)
+            rationale = (
+                f"Pair {pair_key} spread z-score={zscore:.2f} > {self._zscore_entry}. "
+                f"Quality={pair_state.pair_quality_score:.2f}"
             )
+
+            # FIX-27: Emit two executable signals, one per leg
+            signals = []
+            if price_a > 0:
+                signals.append(SignalEvent(
+                    source_agent=self.name,
+                    strategy_name="stat_arb_pairs",
+                    symbol=pair_state.symbol_a,
+                    direction=SignalDirection.SHORT,
+                    strength=-strength,
+                    confidence=confidence,
+                    target_price=round(price_a * 0.96, 2),
+                    stop_loss=round(price_a * 1.02, 2),
+                    rationale=f"Short leg: {rationale}",
+                    data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+                ))
+            if price_b > 0:
+                signals.append(SignalEvent(
+                    source_agent=self.name,
+                    strategy_name="stat_arb_pairs",
+                    symbol=pair_state.symbol_b,
+                    direction=SignalDirection.LONG,
+                    strength=strength,
+                    confidence=confidence,
+                    target_price=round(price_b * 1.04, 2),
+                    stop_loss=round(price_b * 0.98, 2),
+                    rationale=f"Long leg: {rationale}",
+                    data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+                ))
+            return signals if signals else None
 
         elif zscore < -self._zscore_entry and current_signal != SignalDirection.LONG:
             # Spread too low - long A, short B
             pair_state.last_signal = SignalDirection.LONG
-            # Calculate stop_loss and target_price based on spread
-            # For LONG: spread should increase, so target is higher, stop is lower
-            current_spread = list(pair_state.spread_history)[-1] if pair_state.spread_history else 0
-            stop_loss_spread = current_spread * 0.98  # 2% below (adverse move)
-            target_spread = current_spread * 1.04  # 4% above (favorable move)
-            return SignalEvent(
-                source_agent=self.name,
-                strategy_name="stat_arb_pairs",
-                symbol=pair_key,
-                direction=SignalDirection.LONG,
-                strength=min(1.0, abs(zscore) / 3.0),
-                confidence=max(0.1, self._calculate_confidence(zscore, pair_state) - confidence_penalty),
-                target_price=target_spread,
-                stop_loss=stop_loss_spread,
-                rationale=(
-                    f"Pair {pair_key} spread z-score={zscore:.2f} < -{self._zscore_entry}. "
-                    f"Long {pair_state.symbol_a}, Short {pair_state.symbol_b}. "
-                    f"Quality={pair_state.pair_quality_score:.2f}"
-                ),
-                data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+            confidence = max(0.1, self._calculate_confidence(zscore, pair_state) - confidence_penalty)
+            strength = min(1.0, abs(zscore) / 3.0)
+            rationale = (
+                f"Pair {pair_key} spread z-score={zscore:.2f} < -{self._zscore_entry}. "
+                f"Quality={pair_state.pair_quality_score:.2f}"
             )
+
+            # FIX-27: Emit two executable signals, one per leg
+            signals = []
+            if price_a > 0:
+                signals.append(SignalEvent(
+                    source_agent=self.name,
+                    strategy_name="stat_arb_pairs",
+                    symbol=pair_state.symbol_a,
+                    direction=SignalDirection.LONG,
+                    strength=strength,
+                    confidence=confidence,
+                    target_price=round(price_a * 1.04, 2),
+                    stop_loss=round(price_a * 0.98, 2),
+                    rationale=f"Long leg: {rationale}",
+                    data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+                ))
+            if price_b > 0:
+                signals.append(SignalEvent(
+                    source_agent=self.name,
+                    strategy_name="stat_arb_pairs",
+                    symbol=pair_state.symbol_b,
+                    direction=SignalDirection.SHORT,
+                    strength=-strength,
+                    confidence=confidence,
+                    target_price=round(price_b * 0.96, 2),
+                    stop_loss=round(price_b * 1.02, 2),
+                    rationale=f"Short leg: {rationale}",
+                    data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+                ))
+            return signals if signals else None
 
         # Exit signals
         elif abs(zscore) < self._zscore_exit and current_signal != SignalDirection.FLAT:
             pair_state.last_signal = SignalDirection.FLAT
-            return SignalEvent(
-                source_agent=self.name,
-                strategy_name="stat_arb_pairs",
-                symbol=pair_key,
-                direction=SignalDirection.FLAT,
-                strength=0.0,
-                confidence=0.8,
-                rationale=f"Pair {pair_key} spread reverted, z-score={zscore:.2f}. Exit position.",
-                data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
-                target_price=None,
-                stop_loss=None,
-            )
+            # FIX-27: Emit FLAT for both legs
+            signals = []
+            for sym in [pair_state.symbol_a, pair_state.symbol_b]:
+                signals.append(SignalEvent(
+                    source_agent=self.name,
+                    strategy_name="stat_arb_pairs",
+                    symbol=sym,
+                    direction=SignalDirection.FLAT,
+                    strength=0.0,
+                    confidence=0.8,
+                    rationale=f"Pair {pair_key} spread reverted, z-score={zscore:.2f}. Exit position.",
+                    data_sources=("ib_market_data", "stat_arb_indicator", "pair_correlation"),
+                    target_price=None,
+                    stop_loss=None,
+                ))
+            return signals
 
         return None
 

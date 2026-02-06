@@ -1978,6 +1978,9 @@ class MomentumStrategy:
             direction, trend_strength, adx
         )
 
+        # Initialize confidence before conditional adjustments
+        confidence = 0.5  # Base confidence
+
         # QUICK WIN #6: Apply triple confirmation filter
         if direction != "flat":
             is_confirmed, conf_boost = self._check_triple_confirmation(
@@ -2015,9 +2018,12 @@ class MomentumStrategy:
         elif trend_strength == "moderate":
             confidence_adjustment = 0.85
 
-        # Confidence based on agreement, adjusted for trend strength
+        # FIX-31: Merge agreement-based confidence with prior adjustments
+        # (triple confirmation, volume) instead of overwriting
         agreement = sum(1 for s in scores if s == np.sign(total_score)) / len(scores)
-        confidence = agreement * confidence_adjustment * trend_confidence_adj
+        agreement_confidence = agreement * confidence_adjustment * trend_confidence_adj
+        # Blend: 50% prior confidence (from triple confirmation etc.) + 50% agreement
+        confidence = (confidence + agreement_confidence) / 2
 
         # P2: Volume confirmation boosts or reduces confidence
         if volumes is not None and direction != "flat":

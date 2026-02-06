@@ -156,7 +156,11 @@ class IndexSpreadStrategy:
         self._zscore_stop = config.get("zscore_stop", 3.5)
 
         # Statistics settings
-        self._lookback_days = config.get("lookback_days", 60)
+        # FIX-24: lookback_days was used as bar count (60 bars = 1 hour, not 60 days)
+        # Convert days to bars. Default: 2 days * 1380 bars/day for futures
+        self._lookback_days = config.get("lookback_days", 2)
+        self._bars_per_day = config.get("bars_per_day", 1380)  # Futures: ~23 hours
+        self._lookback_bars = self._lookback_days * self._bars_per_day
         self._min_correlation = config.get("min_correlation", 0.7)
         self._min_half_life = config.get("min_half_life", 1)
         self._max_half_life = config.get("max_half_life", 20)
@@ -373,7 +377,8 @@ class IndexSpreadStrategy:
         spread = self.calculate_spread(prices_a, prices_b, hedge_ratio)
 
         # Calculate statistics
-        zscore = self.calculate_zscore(spread, self._lookback_days)
+        # FIX-24: Use bar count, not day count
+        zscore = self.calculate_zscore(spread, self._lookback_bars)
         half_life = self.calculate_half_life(spread)
         correlation = np.corrcoef(prices_a, prices_b)[0, 1]
 
@@ -488,17 +493,24 @@ class IndexSpreadStrategy:
         if direction == "FLAT" and current_position == "FLAT":
             return None
 
-        # Calculate position sizing
+        # FIX-37: Dollar-neutral sizing
+        # For market neutrality: qty_a * price_a * mult_a == qty_b * price_b * mult_b
+        # Set qty_b = 1, solve for qty_a to equalize notional exposure
         mult_a = spread_def.get("multiplier_a", 1.0)
         mult_b = spread_def.get("multiplier_b", 1.0)
 
-        # Dollar-neutral sizing
-        notional_a = prices_a[-1] * mult_a
-        notional_b = prices_b[-1] * mult_b * state.hedge_ratio
+        notional_per_contract_a = prices_a[-1] * mult_a
+        notional_per_contract_b = prices_b[-1] * mult_b
 
-        total_notional = notional_a + notional_b
-        ratio_a = notional_a / total_notional if total_notional > 0 else 0.5
-        ratio_b = notional_b / total_notional if total_notional > 0 else 0.5
+        # qty_a such that qty_a * notional_a = 1 * notional_b * hedge_ratio
+        if notional_per_contract_a > 0:
+            qty_ratio_a = (notional_per_contract_b * state.hedge_ratio) / notional_per_contract_a
+        else:
+            qty_ratio_a = 1.0
+
+        # Normalize: use these as contract ratios (qty_a : 1)
+        ratio_a = qty_ratio_a / (qty_ratio_a + 1.0)
+        ratio_b = 1.0 / (qty_ratio_a + 1.0)
 
         return SpreadSignal(
             symbol_long=symbol_a if direction == "LONG_SPREAD" else symbol_b,
@@ -512,7 +524,8 @@ class IndexSpreadStrategy:
             position_size_ratio={symbol_a: ratio_a, symbol_b: ratio_b},
             rationale=(
                 f"Spread {spread_name}: zscore={state.zscore:.2f}, "
-                f"half_life={state.half_life_days:.1f}d, corr={state.correlation:.2f}"
+                f"half_life={state.half_life_days:.1f}d, corr={state.correlation:.2f}, "
+                f"qty_ratio={qty_ratio_a:.2f}:1"
             ),
         )
 

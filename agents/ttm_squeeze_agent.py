@@ -83,12 +83,12 @@ class TTMSqueezeAgent(SignalAgent):
         self._mom_length = config.parameters.get("mom_length", 12)
         self._min_squeeze_bars = config.parameters.get("min_squeeze_bars", 6)
 
-        # Create strategy instance
+        # FIX-13: Strategy expects bb_period/kc_period/kc_atr_mult (not bb_length/kc_length/kc_mult)
         self._strategy = create_ttm_squeeze_strategy({
-            "bb_length": self._bb_length,
+            "bb_period": self._bb_length,
             "bb_mult": self._bb_mult,
-            "kc_length": self._kc_length,
-            "kc_mult": self._kc_mult,
+            "kc_period": self._kc_length,
+            "kc_atr_mult": self._kc_mult,
             "mom_length": self._mom_length,
         })
 
@@ -191,7 +191,9 @@ class TTMSqueezeAgent(SignalAgent):
                 state.squeeze_bars = 1
             else:
                 state.squeeze_bars += 1
-        elif squeeze_state == SqueezeState.SQUEEZE_OFF:
+        elif squeeze_state in (SqueezeState.SQUEEZE_OFF, SqueezeState.SQUEEZE_FIRING):
+            # FIX-12: SQUEEZE_FIRING = just transitioned from ON to OFF (the release event)
+            # This is THE signal - BB just broke outside KC after being compressed
             was_in_squeeze = state.in_squeeze
             squeeze_duration = state.squeeze_bars
             state.in_squeeze = False
@@ -267,11 +269,19 @@ class TTMSqueezeAgent(SignalAgent):
         highs = np.array(state.highs)
         lows = np.array(state.lows)
 
-        tr = np.maximum(
-            highs[-14:] - lows[-14:],
-            np.abs(highs[-14:] - np.roll(prices[-14:], 1)[1:]),
-        )
-        atr = np.mean(tr) if len(tr) > 0 else price * 0.02
+        # FIX-33: Proper 3-component True Range calculation
+        h = highs[-14:]
+        l = lows[-14:]
+        c = prices[-14:]
+        if len(c) > 1:
+            prev_c = np.concatenate([[c[0]], c[:-1]])
+            tr = np.maximum(
+                h - l,
+                np.maximum(np.abs(h - prev_c), np.abs(l - prev_c))
+            )
+            atr = np.mean(tr)
+        else:
+            atr = price * 0.02
 
         if direction == SignalDirection.LONG:
             stop_loss = price - (atr * 2.0)

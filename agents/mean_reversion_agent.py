@@ -75,9 +75,10 @@ class MeanReversionAgent(SignalAgent):
         super().__init__(config, event_bus, audit_logger)
 
         # Configuration
-        self._rsi_period = config.parameters.get("rsi_period", 14)
-        self._rsi_oversold = config.parameters.get("rsi_oversold", 30)
-        self._rsi_overbought = config.parameters.get("rsi_overbought", 70)
+        # FIX-19: Connors RSI(2) defaults, not RSI(14)
+        self._rsi_period = config.parameters.get("rsi_period", 2)
+        self._rsi_oversold = config.parameters.get("rsi_oversold", 5)
+        self._rsi_overbought = config.parameters.get("rsi_overbought", 95)
         self._bb_period = config.parameters.get("bb_period", 20)
         self._bb_std = config.parameters.get("bb_std", 2.0)
         self._zscore_threshold = config.parameters.get("zscore_threshold", 2.0)

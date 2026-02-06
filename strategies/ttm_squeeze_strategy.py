@@ -288,15 +288,42 @@ class TTMSqueezeStrategy:
             window_close = close[i - period + 1:i + 1]
             sma = np.mean(window_close)
 
-            # TTM Squeeze momentum = Donchian midpoint - SMA
-            # This combines the current midpoint with average position
-            # Positive when price is above the midpoint-SMA equilibrium
-            # The formula is actually: (Donchian_midpoint + SMA) / 2 - SMA = (Donchian_midpoint - SMA) / 2
-            # Simplified: close - (Donchian_midpoint + SMA) / 2
+            # TTM Squeeze momentum = close - (Donchian_midpoint + SMA) / 2
             equilibrium = (donchian_midpoint + sma) / 2
             momentum[i] = close[i] - equilibrium
 
-        return momentum
+        # FIX-32: Apply linear regression smoothing per Carter's original
+        # Raw momentum is too noisy on 1-min bars. Linreg smooths while
+        # preserving the slope (direction) better than a simple MA.
+        smoothed = self._linreg_smooth(momentum, period)
+
+        return smoothed
+
+    def _linreg_smooth(self, values: np.ndarray, period: int) -> np.ndarray:
+        """
+        Apply linear regression smoothing to an array.
+
+        For each point, fit a linear regression over the lookback period
+        and use the endpoint value. This smooths noise while preserving trend.
+        """
+        result = np.zeros(len(values))
+        for i in range(len(values)):
+            if i < period - 1:
+                result[i] = values[i]
+                continue
+            window = values[i - period + 1:i + 1]
+            # Simple linear regression: y = a + b*x
+            x = np.arange(period, dtype=float)
+            x_mean = np.mean(x)
+            y_mean = np.mean(window)
+            denom = np.sum((x - x_mean) ** 2)
+            if denom > 0:
+                b = np.sum((x - x_mean) * (window - y_mean)) / denom
+                a = y_mean - b * x_mean
+                result[i] = a + b * (period - 1)  # Endpoint of regression
+            else:
+                result[i] = values[i]
+        return result
 
     def detect_squeeze(
         self,

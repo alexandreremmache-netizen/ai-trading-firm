@@ -1881,7 +1881,7 @@ class ExecutionAgentImpl(ExecutionAgentBase):
             order_age = (now - pending.created_at).total_seconds()
 
             # Use algo timeout for TWAP/VWAP orders (they take longer by design)
-            if pending.algo in ("TWAP", "VWAP"):
+            if pending.order_event.algo in ("TWAP", "VWAP"):
                 timeout = self._algo_timeout_seconds
             else:
                 timeout = self._zombie_order_timeout_seconds
@@ -2149,7 +2149,7 @@ class ExecutionAgentImpl(ExecutionAgentBase):
                 timeout_seconds = self._order_timeout_seconds
 
             # Calculate age
-            order_age = (now - pending.submitted_at).total_seconds()
+            order_age = (now - pending.created_at).total_seconds()
 
             # Check for timeout
             if order_age > timeout_seconds:

@@ -124,6 +124,9 @@ class MACDvStrategy:
         self._ranging_detection_enabled = config.get("ranging_detection_enabled", True)
         self._ranging_bar_threshold = config.get("ranging_bar_threshold", 25)
         self._bars_in_neutral: dict[str, int] = {}  # Track per symbol
+        # FIX-36: Track last neutral update time to avoid per-tick counting
+        self._last_neutral_update: dict[str, float] = {}  # symbol -> last update timestamp
+        self._neutral_update_interval = config.get("neutral_update_interval", 60.0)  # 60s = 1 bar
 
         # Stop-loss and take-profit settings
         self._stop_loss_pct = config.get("stop_loss_pct", 2.0)  # 2%
@@ -705,11 +708,18 @@ class MACDvStrategy:
         # Track how many bars MACD-v has been in the neutral zone
         # 25+ bars in neutral zone = ranging/sideways market = suppress all signals
         if self._ranging_detection_enabled:
+            import time
+            now = time.time()
             in_neutral = self._neutral_zone_lower < curr_macdv < self._neutral_zone_upper
-            if in_neutral:
-                self._bars_in_neutral[symbol] = self._bars_in_neutral.get(symbol, 0) + 1
-            else:
-                self._bars_in_neutral[symbol] = 0
+            # FIX-36: Only update counter once per bar interval (60s default)
+            # to avoid inflating count when called per-tick
+            last_update = self._last_neutral_update.get(symbol, 0.0)
+            if now - last_update >= self._neutral_update_interval:
+                self._last_neutral_update[symbol] = now
+                if in_neutral:
+                    self._bars_in_neutral[symbol] = self._bars_in_neutral.get(symbol, 0) + 1
+                else:
+                    self._bars_in_neutral[symbol] = 0
 
             bars_neutral = self._bars_in_neutral.get(symbol, 0)
             if bars_neutral >= self._ranging_bar_threshold and direction != "flat":

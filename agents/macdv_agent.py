@@ -125,7 +125,8 @@ class MACDvAgent(SignalAgent):
         self._strategy = MACDvStrategy(strategy_config)
 
         # Minimum confidence threshold for signal emission
-        self._min_confidence = config.parameters.get("min_confidence", 0.75)
+        # FIX-20: 0.75 blocked most signals (strategy base confidence is 0.6)
+        self._min_confidence = config.parameters.get("min_confidence", 0.50)
 
         # State per symbol
         self._symbols: dict[str, MACDvState] = {}

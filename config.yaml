@@ -120,9 +120,9 @@ risk:
   # Value at Risk limit - REDUCED after 25% loss incident
   max_portfolio_var_pct: 1.0          # [float] REDUCED from 2.0 to 1.0 for safety
 
-  # EMERGENCY: Position size limits - aggressive reduction
-  max_position_pct: 1.5               # [float] REDUCED from 2.5 to 1.5
-  max_position_size_pct: 1.5          # [float] REDUCED from 2.5 to 1.5
+  # FIX-05: Position size limits - 1% blocked ALL futures (1 MES = $26K notional > $1K)
+  max_position_pct: 5.0               # [float] 5% allows 1-3 futures contracts on $100K
+  max_position_size_pct: 5.0          # [float] 5% allows 1-3 futures contracts on $100K
 
   # Sector concentration limit
   max_sector_pct: 15.0                # [float] REDUCED from 20.0 to 15.0
@@ -211,20 +211,21 @@ liquidity:
   max_position_pct_of_adv: 10.0       # Position must be < 10% of ADV
   max_order_pct_of_adv: 5.0           # Order must be < 5% of ADV
 
-# Position Sizing - IMPROVED MONEY MANAGEMENT
+# Position Sizing - UNIFIED (single source of truth, was duplicated)
+# NOTE: This section was merged - the Quick Win #7 section below is removed
 position_sizing:
   method: "kelly"                     # "kelly", "vol_target", "fixed_fractional", "equal"
-  # IMPROVED: Use quarter-Kelly (0.25x) instead of half-Kelly for safer sizing
-  kelly_fraction: 0.25                # [float, 0.1-0.5] Fractional Kelly multiplier
-  # IMPROVED: Cap raw Kelly before applying fraction to prevent outsized positions
-  max_kelly_raw: 0.15                 # [float, 0.1-0.3] Max raw Kelly before fraction (15%)
-  # IMPROVED: Stricter position size limits
-  max_position_pct: 3.0               # [float, 1.0-10.0] Maximum position as % of portfolio
-  min_position_pct: 0.5               # [float, 0.1-2.0] Minimum position as % of portfolio
-  # IMPROVED: Total exposure limit
-  max_total_exposure_pct: 50.0        # [float, 25.0-100.0] Maximum total portfolio exposure %
+  kelly_fraction: 0.25                # [float] Quarter-Kelly for safety
+  max_kelly_raw: 0.15                 # [float] Max raw Kelly before fraction (15%)
+  max_position_pct: 5.0               # [float] FIX-05: 5% for futures (1 MES = ~$26K on $100K)
+  min_position_pct: 0.5               # [float] Minimum position as % of portfolio
+  max_total_exposure_pct: 20.0        # [float] INTRADAY: Max 20% total exposure
   vol_target: 0.15                    # Target volatility (15% annual)
   correlation_discount: true          # Reduce size for correlated positions
+  # Turn of month boost (Quick Win #7)
+  use_turn_of_month_boost: true
+  tom_multiplier: 1.25                # 25% larger positions during TOM
+  tom_asset_classes: ["equity", "future"]
 
 # Cross-Strategy Risk Budget (#P3)
 risk_budget:
@@ -385,14 +386,13 @@ portfolio:
 # =============================================================================
 
 strategies:
-  enabled:                            # [list] Strategies to activate
+  enabled:                            # [list] Strategies to activate (aligned with agents.*.enabled)
     - "momentum"
     - "stat_arb"
-    - "market_making"
+    # market_making REMOVED - agents.market_making.enabled is false
   weights:                            # Strategy allocation weights (must sum to 1.0)
-    momentum: 0.4
-    stat_arb: 0.4
-    market_making: 0.2
+    momentum: 0.5
+    stat_arb: 0.5
 
 # =============================================================================
 # === REVIEW CAREFULLY - CIO Autonomous Position Management ===
@@ -574,26 +574,25 @@ agents:
     lookback_days: 60
     zscore_entry_threshold: 2.0
     zscore_exit_threshold: 0.5
+    # FIX-11: Removed stock/ETF pairs (AAPL:MSFT, GOOGL:META) - futures-only system
     pairs:
-      - ["AAPL", "MSFT"]
-      - ["GOOGL", "META"]
       - ["MES", "MNQ"]     # Micro index futures pair
       - ["MGC", "MCL"]     # Micro metals/energy pair
+      - ["MYM", "M2K"]     # Micro Dow / Micro Russell pair
     # Correlation divergence detection (MoonDev-inspired)
     divergence_enabled: true
     divergence_threshold: 2.0           # Z-score threshold for divergence signal
     divergence_lookback: 20             # Periods for correlation calculation
     correlation_breakdown_threshold: 0.3 # Drop in correlation to trigger alert
     divergence_pairs:                   # Pairs to monitor for divergence
-      - ["SPY", "QQQ"]    # Index ETFs (data only)
       - ["MES", "MNQ"]    # Micro index futures
       - ["MGC", "MCL"]    # Micro metals/energy
-      - ["AAPL", "MSFT"]  # Tech leaders
+      - ["MYM", "M2K"]    # Micro Dow / Micro Russell
 
   momentum:
     enabled: true
     fast_period: 10
-    slow_period: 30
+    slow_period: 50              # FIX-22: 30 too short for 1-min bars, causes whipsaws
     signal_period: 9
     rsi_period: 14
     rsi_overbought: 70
@@ -742,7 +741,7 @@ agents:
   session:
     enabled: true                        # ENABLED: Fixed agent-strategy interface
     opening_range_minutes: 30            # First 30 min after open
-    breakout_threshold_atr: 0.5          # Breakout distance in ATR
+    breakout_threshold_atr: 1.5          # FIX-21: 0.5 = massive false breakouts (research: 1.5-2.0)
     session_momentum_enabled: true
     symbols:
       - "MES"
@@ -780,9 +779,9 @@ agents:
 
   mean_reversion:
     enabled: true                        # ENABLED: Fixed agent-strategy interface
-    rsi_period: 14
-    rsi_oversold: 30
-    rsi_overbought: 70
+    rsi_period: 2                        # FIX-19: Connors RSI(2), not RSI(14)
+    rsi_oversold: 5                      # FIX-19: 5/95 thresholds for mean reversion
+    rsi_overbought: 95                   # FIX-19: 5/95 thresholds for mean reversion
     bb_period: 20
     bb_std: 2.0
     zscore_threshold: 2.0
@@ -790,8 +789,8 @@ agents:
     symbols:
       - "MES"
       - "MNQ"
-      - "AAPL"
-      - "MSFT"
+      - "M2K"
+      - "MYM"
 
   # MACD-v Agent (Volatility-Normalized MACD) - Charles H. Dow Award 2022
   macdv:
@@ -876,8 +875,8 @@ agents:
     regime_weight_factor: 0.2
     # Position sizing
     use_kelly_sizing: true
-    kelly_fraction: 0.5               # Half-Kelly
-    base_position_size: 100
+    kelly_fraction: 0.25              # Quarter-Kelly (aligned with global position_sizing)
+    base_position_size: 5000            # FIX-10: Dollar-based (was 100 contracts = $2.28M MNQ)
     max_position_size: 1000
 
   execution:
@@ -974,22 +973,7 @@ signals:
     swing: 2.0          # Standard swing trading
     position: 3.0       # Higher R:R for position trades
 
-# =========================================================================
-# QUICK WIN #7: Turn-of-Month Effect
-# =========================================================================
-position_sizing:
-  method: "kelly"
-  kelly_fraction: 0.25
-  max_kelly_raw: 0.15
-  max_position_pct: 1.0               # INTRADAY: Max 1% per position (was 3%)
-  min_position_pct: 0.5
-  max_total_exposure_pct: 20.0        # INTRADAY: Max 20% total exposure (was 50%)
-  vol_target: 0.15
-  correlation_discount: true
-  # Turn of month boost
-  use_turn_of_month_boost: true
-  tom_multiplier: 1.25          # 25% larger positions during TOM
-  tom_asset_classes: ["equity", "future"]  # Apply to equities/futures only
+# (Quick Win #7 Turn-of-Month merged into position_sizing above)
 
 # =========================================================================
 # QUICK WIN #9: Spread/Slippage Pre-Check

@@ -101,11 +101,11 @@ class IndexSpreadAgent(SignalAgent):
             {"leg1": "MYM", "leg2": "MNQ", "name": "YM_NQ_spread"},
         ])
 
-        # Create strategy instance
+        # FIX-23: Strategy expects zscore_entry/zscore_exit/lookback_days (not entry_zscore/exit_zscore/lookback)
         self._strategy = create_index_spread_strategy({
-            "entry_zscore": self._entry_zscore,
-            "exit_zscore": self._exit_zscore,
-            "lookback": self._lookback,
+            "zscore_entry": self._entry_zscore,
+            "zscore_exit": self._exit_zscore,
+            "lookback_days": self._lookback,
             "min_half_life": self._min_half_life,
             "max_half_life": self._max_half_life,
         })
@@ -245,7 +245,7 @@ class IndexSpreadAgent(SignalAgent):
             signal_direction = SignalDirection.LONG
         elif direction == "short_spread":
             signal_direction = SignalDirection.SHORT
-        elif direction == "exit":
+        elif direction in ("exit", "flat"):  # FIX-26: Strategy can return "flat" for exits
             signal_direction = SignalDirection.FLAT
         else:
             return

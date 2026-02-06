@@ -700,23 +700,44 @@ class RiskAgent(ValidationAgent):
         checks.append(dd_check)
         # NOTE: dd_check ALWAYS passes - autonomous risk management handles it
 
-        # 6a. Check defensive mode - reject new positions if in defensive mode
+        # 6a. FIX-02: Defensive mode - block NEW positions but ALLOW exits/reductions
         if self._defensive_mode_active:
-            return RiskValidationResult(
-                approved=False,
-                checks=checks,
-                risk_metrics=self._get_risk_metrics(),
-                rejection_reason=f"DEFENSIVE MODE active: Only exit orders allowed (drawdown: {self._risk_state.current_drawdown_pct*100:.1f}%)"
-            )
+            current_pos = self._risk_state.positions.get(decision.symbol)
+            current_qty = current_pos.quantity if current_pos else 0
+            # Determine if this order reduces the existing position
+            is_reducing = False
+            if current_qty > 0 and decision.action == OrderSide.SELL:
+                is_reducing = True  # Selling a long = reducing
+            elif current_qty < 0 and decision.action == OrderSide.BUY:
+                is_reducing = True  # Buying a short = reducing
 
-        # 6b. Check if new longs are blocked
+            if not is_reducing:
+                return RiskValidationResult(
+                    approved=False,
+                    checks=checks,
+                    risk_metrics=self._get_risk_metrics(),
+                    rejection_reason=f"DEFENSIVE MODE active: Only exit orders allowed (drawdown: {self._risk_state.current_drawdown_pct*100:.1f}%)"
+                )
+            else:
+                logger.info(f"DEFENSIVE MODE: Allowing exit order for {decision.symbol} (reducing {current_qty})")
+
+        # 6b. FIX-03: _no_new_longs - block new longs but ALLOW BUY to close shorts
         if self._no_new_longs and decision.action == OrderSide.BUY:
-            return RiskValidationResult(
-                approved=False,
-                checks=checks,
-                risk_metrics=self._get_risk_metrics(),
-                rejection_reason=f"NEW LONGS BLOCKED: Drawdown level {self._current_drawdown_level.value} - reduce positions first"
-            )
+            current_pos = self._risk_state.positions.get(decision.symbol)
+            current_qty = current_pos.quantity if current_pos else 0
+            if current_qty < 0:
+                # BUY to cover a short position - this is DELEVERAGING, allow it
+                logger.info(
+                    f"_no_new_longs: Allowing BUY to close short for {decision.symbol} "
+                    f"(current: {current_qty}, buying: {decision.quantity})"
+                )
+            else:
+                return RiskValidationResult(
+                    approved=False,
+                    checks=checks,
+                    risk_metrics=self._get_risk_metrics(),
+                    rejection_reason=f"NEW LONGS BLOCKED: Drawdown level {self._current_drawdown_level.value} - reduce positions first"
+                )
 
         # 7. Rate limit (anti-HFT)
         rate_check = self._check_rate_limit()
@@ -869,6 +890,20 @@ class RiskAgent(ValidationAgent):
                 delta = requested_qty if decision.action == OrderSide.BUY else -requested_qty
                 new_qty = current_qty + delta
 
+        # Allow orders that REDUCE an existing position (deleveraging, EOD close, etc.)
+        if abs(new_qty) < abs(current_qty):
+            logger.info(
+                f"Position reduction allowed for {symbol}: "
+                f"{current_qty} -> {new_qty} (reducing exposure)"
+            )
+            return RiskCheckResult(
+                check_name="position_limit",
+                passed=True,
+                current_value=0,
+                limit_value=self._max_position_pct,
+                message=f"Position reduction: {current_qty} -> {new_qty}"
+            ), requested_qty
+
         # Estimate notional value using CONTRACT_SPECS multiplier
         price, multiplier, _ = self._estimate_order_notional(decision)
         new_value = abs(new_qty) * price * multiplier
@@ -883,7 +918,7 @@ class RiskAgent(ValidationAgent):
             # Also apply drawdown reduction to max_qty
             max_qty = max(1, int(max_qty * size_multiplier)) if size_multiplier < 1.0 else max_qty
 
-            if max_qty >= 10:  # Minimum viable order
+            if max_qty >= 1:  # FIX-06: Min viable order = 1 for futures
                 return RiskCheckResult(
                     check_name="position_limit",
                     passed=True,
@@ -941,8 +976,18 @@ class RiskAgent(ValidationAgent):
 
         new_exposure = current_sector_exposure + additional_exposure
 
-        # DELEVERAGING LOGIC: Allow trades that reduce sector exposure when over limit
-        is_reducing_exposure = additional_exposure < 0
+        # DELEVERAGING LOGIC: Allow trades that reduce actual position size
+        # Check if this order reduces the position (works for both long and short)
+        current_qty = 0
+        pos_info = self._risk_state.positions.get(symbol)
+        if pos_info is not None:
+            current_qty = pos_info.quantity if hasattr(pos_info, 'quantity') else (pos_info.get("quantity", 0) if isinstance(pos_info, dict) else 0)
+        requested_qty = decision.quantity
+        delta = requested_qty if decision.action == OrderSide.BUY else -requested_qty
+        new_qty = current_qty + delta
+        is_position_reduction = abs(new_qty) < abs(current_qty) and current_qty != 0
+
+        is_reducing_exposure = additional_exposure < 0 or is_position_reduction
         is_sector_over_limit = current_sector_exposure > self._max_sector_pct
 
         if is_sector_over_limit and is_reducing_exposure:

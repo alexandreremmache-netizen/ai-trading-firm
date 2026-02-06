@@ -12,6 +12,8 @@ Does NOT make trading decisions or send orders.
 from __future__ import annotations
 
 import logging
+import numpy as np
+from collections import deque
 from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING
 
@@ -64,13 +66,15 @@ class EventDrivenAgent(SignalAgent):
         super().__init__(config, event_bus, audit_logger)
 
         # Configuration
-        # Pre-event window: 24h for FOMC (was 2h, too short for proper positioning)
-        # Research: institutional positioning starts 24-48h before major Fed events
-        self._pre_event_hours = config.parameters.get("pre_event_hours", 24)
+        # FIX-44: Pre-event window 24h→2h for intraday system
+        # 24h requires overnight holding which violates intraday constraint.
+        # 2h is standard institutional pre-event risk reduction window.
+        self._pre_event_hours = config.parameters.get("pre_event_hours", 2)
         self._post_event_hours = config.parameters.get("post_event_hours", 4)
-        # Min surprise: 3.0 std devs for significant moves (was 1.0, too sensitive)
-        # Research: only >2.5 std surprise generates sustained directional moves
-        self._min_surprise_std = config.parameters.get("min_surprise_std", 3.0)
+        # FIX-45: min_surprise 3.0→1.5 std devs
+        # 3.0σ = 0.3% probability → agent generates ~0 signals/year
+        # 1.5σ = ~13% of events → ~8 tradable signals/year for NFP alone
+        self._min_surprise_std = config.parameters.get("min_surprise_std", 1.5)
         self._tracked_events = config.parameters.get("tracked_events", [
             "FOMC", "NFP", "CPI", "GDP", "RETAIL_SALES", "ISM_PMI"
         ])
@@ -85,13 +89,21 @@ class EventDrivenAgent(SignalAgent):
         # State tracking
         self._last_signals: dict[str, SignalDirection] = {}
         self._active_events: dict[str, EconomicEvent] = {}
+        # FIX-16: Track recent prices per symbol for surprise estimation
+        self._price_history: dict[str, deque] = {}
+        self._pre_event_prices: dict[str, float] = {}  # Snapshot price at event time
 
         # Symbol to event type mapping (which symbols react to which events)
+        # FIX-42: Added M2K/MYM micro futures to sensitivity map
         self._symbol_event_sensitivity = config.parameters.get("symbol_sensitivity", {
             "ES": ["FOMC", "NFP", "CPI", "GDP"],
             "MES": ["FOMC", "NFP", "CPI", "GDP"],
             "NQ": ["FOMC", "NFP", "CPI"],
             "MNQ": ["FOMC", "NFP", "CPI"],
+            "YM": ["FOMC", "NFP", "GDP"],
+            "MYM": ["FOMC", "NFP", "GDP"],
+            "RTY": ["FOMC", "NFP", "GDP"],
+            "M2K": ["FOMC", "NFP", "GDP"],
             "GC": ["FOMC", "CPI"],
             "MGC": ["FOMC", "CPI"],
             "EURUSD": ["FOMC", "NFP", "CPI", "GDP"],
@@ -134,11 +146,13 @@ class EventDrivenAgent(SignalAgent):
         timestamp = event.timestamp
 
         if price is None or price <= 0:
+            await self._emit_warmup_heartbeat(symbol, "No valid price")  # FIX-17: heartbeat
             return
 
         # Check which events this symbol is sensitive to
         sensitive_events = self._symbol_event_sensitivity.get(symbol, [])
         if not sensitive_events:
+            await self._emit_warmup_heartbeat(symbol, "Symbol not event-sensitive")  # FIX-17
             return
 
         # Get next upcoming event from strategy
@@ -152,6 +166,7 @@ class EventDrivenAgent(SignalAgent):
         # Check if this symbol is sensitive to this event
         event_type_str = next_event.event_type.value.upper()
         if event_type_str not in sensitive_events:
+            await self._emit_warmup_heartbeat(symbol, f"Not sensitive to {event_type_str}")  # FIX-17
             return
 
         # Get event window
@@ -169,11 +184,29 @@ class EventDrivenAgent(SignalAgent):
         window_type = window_type_map.get(window, None)
 
         if window_type is None:
+            await self._emit_warmup_heartbeat(symbol, "Outside event window")  # FIX-17
             return
 
         event_name = next_event.event_type.value.upper()
         time_to_event = (next_event.timestamp - timestamp).total_seconds() / 3600
-        surprise = 0.0  # No actual data available yet
+
+        # FIX-16: Compute surprise from price action (instead of hardcoded 0.0)
+        if symbol not in self._price_history:
+            self._price_history[symbol] = deque(maxlen=120)  # 2 hours of 1-min bars
+        self._price_history[symbol].append(price)
+
+        surprise = 0.0
+        if window_type == "post" and len(self._price_history[symbol]) >= 10:
+            prices = np.array(self._price_history[symbol])
+            returns = np.diff(prices) / prices[:-1]
+            if len(returns) > 5 and np.std(returns) > 0:
+                # Surprise = recent move in standard deviations of historical returns
+                recent_move = (prices[-1] - prices[-min(10, len(prices))]) / prices[-min(10, len(prices))]
+                surprise = recent_move / np.std(returns)
+                # Snapshot pre-event price for comparison
+                event_key = f"{symbol}_{event_name}"
+                if event_key not in self._pre_event_prices:
+                    self._pre_event_prices[event_key] = prices[-min(10, len(prices))]
 
         # Build analysis dict for compatibility
         analysis = {
@@ -183,7 +216,7 @@ class EventDrivenAgent(SignalAgent):
                 "time_to_event_hours": time_to_event,
                 "surprise_std": surprise,
             },
-            "atr": price * 0.015,  # Approximate ATR
+            "atr": price * 0.001,  # FIX-34: 0.1% for 1-min ATR (was 1.5% = 15-50x too wide)
         }
 
         direction = SignalDirection.FLAT
@@ -217,6 +250,7 @@ class EventDrivenAgent(SignalAgent):
                 rationale_parts = signal_result["rationale"]
 
         if direction == SignalDirection.FLAT or confidence < 0.3:
+            await self._emit_warmup_heartbeat(symbol, "Flat/low-confidence event signal")  # FIX-17
             return
 
         # Skip duplicate signals
@@ -234,6 +268,15 @@ class EventDrivenAgent(SignalAgent):
         else:
             stop_loss = price + (atr * 2.5)
             take_profit = price - (atr * 5.0)
+
+        # R:R validation (consistent with MacroAgent)
+        sl_distance = abs(price - stop_loss)
+        tp_distance = abs(take_profit - price)
+        rr_ratio = round(tp_distance / sl_distance, 2) if sl_distance > 0 else 0.0
+        if rr_ratio < 2.0:
+            logger.debug(f"EventDriven: R:R {rr_ratio:.2f} < 2.0 for {symbol}, skipping")
+            await self._emit_warmup_heartbeat(symbol, f"R:R {rr_ratio:.2f} insufficient")
+            return
 
         # Create signal
         signal = SignalEvent(

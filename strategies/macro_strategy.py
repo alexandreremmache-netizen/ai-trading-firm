@@ -354,7 +354,9 @@ class MacroStrategy:
             tp_distance = current_price - take_profit
 
         # Calculate reward/risk ratio
+        # FIX-35: Round to avoid float precision issues (e.g. 1.999999 != 2.0)
         reward_risk_ratio = tp_distance / sl_distance if sl_distance > 0 else 0.0
+        reward_risk_ratio = round(reward_risk_ratio, 2)
         is_valid_rr = reward_risk_ratio >= self._min_reward_risk_ratio
 
         return stop_loss, take_profit, reward_risk_ratio, is_valid_rr

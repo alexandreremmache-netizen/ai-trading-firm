@@ -1255,7 +1255,8 @@ class TradingFirmOrchestrator:
             # Initialize Economic Calendar and register events
             calendar_config = agents_config.get("event_driven", {}).get("calendar", {})
             self._economic_calendar = create_economic_calendar(calendar_config)
-            asyncio.create_task(self._init_economic_calendar(event_driven_agent))
+            # FIX-38: Await calendar init (was fire-and-forget causing race condition)
+            await self._init_economic_calendar(event_driven_agent)
 
         # Mean Reversion Agent (RSI extremes, BB touches, z-score)
         if agents_config.get("mean_reversion", {}).get("enabled", True):

@@ -54,6 +54,9 @@ if TYPE_CHECKING:
     from core.correlation_manager import CorrelationManager, CorrelationRegime
     from core.risk_budget import RiskBudgetManager
 
+# Import CONTRACT_SPECS for futures multiplier (FIX-01: position sizing)
+from core.contract_specs import CONTRACT_SPECS
+
 # Import Signal Quality Scorer
 try:
     from core.signal_quality import SignalQualityScorer, create_signal_quality_scorer
@@ -205,6 +208,7 @@ class TrackedPosition:
     peak_r_multiple: float = 0.0  # Highest R-multiple reached
     partial_exits_taken: int = 0  # Number of partial exits (0, 1, 2, 3)
     strategy_type: str = ""  # For time-based exit rules (intraday, swing, pairs)
+    contract_multiplier: float = 1.0  # FIX-09: Futures multiplier for PnL calculation
 
     @property
     def pnl_pct(self) -> float:
@@ -218,11 +222,11 @@ class TrackedPosition:
 
     @property
     def pnl_dollar(self) -> float:
-        """Calculate unrealized P&L in dollars."""
+        """Calculate unrealized P&L in dollars (FIX-09: includes futures multiplier)."""
         if self.is_long:
-            return (self.current_price - self.entry_price) * self.quantity
+            return (self.current_price - self.entry_price) * self.quantity * self.contract_multiplier
         else:
-            return (self.entry_price - self.current_price) * self.quantity
+            return (self.entry_price - self.current_price) * self.quantity * self.contract_multiplier
 
     @property
     def holding_hours(self) -> float:
@@ -481,9 +485,9 @@ class CIOAgent(DecisionAgent):
         self._us_stock_symbols = self._us_equity_symbols | self._us_etf_symbols
         self._filter_market_hours = config.parameters.get("filter_market_hours", True)
 
-        # No-trade symbols: ETFs are used for analysis (MacroAgent regime detection)
-        # but we never open positions on them
-        self._no_trade_symbols: set[str] = set(self._us_etf_symbols) | set(self._forex_symbols)
+        # No-trade symbols: ETFs and individual stocks are used for analysis only
+        # (MacroAgent regime detection, correlation). We only trade futures.
+        self._no_trade_symbols: set[str] = set(self._us_etf_symbols) | set(self._forex_symbols) | set(self._us_equity_symbols)
 
         # Signal history for correlation tracking (#Q5)
         self._signal_history: dict[str, list[tuple[datetime, float]]] = {}  # agent -> [(time, direction_val)]
@@ -1068,6 +1072,35 @@ class CIOAgent(DecisionAgent):
                     await self._publish_position_management_decision(decision)
             return
 
+        # CLEANUP: Close any positions on no-trade symbols (stocks, ETFs, forex)
+        # These should only be traded as futures
+        if self._broker:
+            try:
+                portfolio_state = await self._broker.get_portfolio_state()
+                for sym, pos_info in portfolio_state.positions.items():
+                    if pos_info.quantity != 0 and sym.upper() in self._no_trade_symbols:
+                        close_qty = abs(pos_info.quantity)
+                        action = OrderSide.SELL if pos_info.quantity > 0 else OrderSide.BUY
+                        logger.warning(
+                            f"CIO: Closing NO-TRADE symbol {sym} ({pos_info.quantity} shares) - "
+                            f"only futures should be traded"
+                        )
+                        decision = DecisionEvent(
+                            source_agent=self.name,
+                            symbol=sym,
+                            action=action,
+                            quantity=close_qty,
+                            order_type=OrderType.MARKET,
+                            limit_price=None,
+                            rationale=f"CLEANUP: {sym} is a no-trade symbol (stock/ETF), closing position",
+                            contributing_signals=tuple(),
+                            data_sources=("position_management",),
+                            conviction_score=1.0,
+                        )
+                        await self._event_bus.publish(decision)
+            except Exception as e:
+                logger.debug(f"CIO: Could not check no-trade positions: {e}")
+
         # Update conviction from latest signals
         self._update_position_convictions(signals)
 
@@ -1104,12 +1137,16 @@ class CIOAgent(DecisionAgent):
                     # Update existing position
                     tracked = self._tracked_positions[symbol]
                     tracked.update_price(price)
-                    tracked.quantity = pos.quantity
+                    tracked.quantity = abs(pos.quantity)  # FIX-08: IB gives signed qty, TrackedPosition expects unsigned
+                    tracked.is_long = pos.quantity > 0  # Update direction from IB
                 else:
                     # New position we're not tracking yet - add it
                     is_long = pos.quantity > 0
                     # Estimate initial risk (2% default for unknown positions)
                     est_initial_risk = pos.avg_cost * 0.02
+                    # FIX-09: Set contract multiplier for PnL calculation
+                    spec = CONTRACT_SPECS.get(symbol)
+                    multiplier = spec.multiplier if spec else 1.0
                     self._tracked_positions[symbol] = TrackedPosition(
                         symbol=symbol,
                         quantity=abs(pos.quantity),
@@ -1122,6 +1159,7 @@ class CIOAgent(DecisionAgent):
                         original_conviction=0.5,  # Unknown, use neutral
                         current_conviction=0.5,
                         initial_risk=est_initial_risk,  # Phase 3: R-Multiple tracking
+                        contract_multiplier=multiplier,
                     )
                     logger.info(
                         f"CIO: Started tracking existing position {symbol}: "
@@ -2020,6 +2058,28 @@ class CIOAgent(DecisionAgent):
             if symbol not in self._tracked_positions:
                 logger.warning(f"CIO: Max open positions ({self._max_open_positions}) reached, skipping {symbol}")
                 return
+
+        # FIX-04: LEVERAGE GUARD uses config max_leverage instead of hardcoded 1.5x
+        # Don't open NEW positions when leverage exceeds configured limit
+        if symbol not in self._tracked_positions and self._broker:
+            try:
+                portfolio_state = await self._broker.get_portfolio_state()
+                pv = portfolio_state.net_liquidation
+                if pv and pv > 0 and portfolio_state.positions:
+                    gross_exp = sum(
+                        abs(pos.market_value)
+                        for pos in portfolio_state.positions.values()
+                        if pos.quantity != 0
+                    )
+                    lev = gross_exp / pv
+                    if lev > self._max_leverage:
+                        logger.warning(
+                            f"CIO: LEVERAGE GUARD - Blocking new position for {symbol} "
+                            f"(leverage={lev:.2f}x > {self._max_leverage}x). Reduce existing positions first."
+                        )
+                        return
+            except Exception:
+                pass  # If we can't check leverage, proceed normally
 
         # Aggregate signals
         self._aggregate_signals(agg)
@@ -3093,18 +3153,22 @@ class CIOAgent(DecisionAgent):
                 f"{remaining_exposure_pct:.1f}% remaining)"
             )
 
-        # Step 12: Convert to shares
+        # Step 12: Convert to contracts (FIX-01: include futures multiplier)
         estimated_price = self._price_cache.get(agg.symbol)
         if estimated_price is None or estimated_price <= 0:
             logger.warning(f"CIO: No price data for {agg.symbol}, using conviction sizing")
             return self._calculate_conviction_size(agg)
 
-        size = int(position_value / estimated_price)
+        # FIX-01: Futures multiplier - 1 MES contract = price * 5, 1 MNQ = price * 2
+        spec = CONTRACT_SPECS.get(agg.symbol)
+        multiplier = spec.multiplier if spec else 1.0
+        notional_per_contract = estimated_price * multiplier
+        size = int(position_value / notional_per_contract)
 
-        # Apply max shares limit
+        # Apply max contracts limit
         size = min(size, self._max_position_size)
 
-        # NEW: Apply decision mode size cap
+        # Apply decision mode size cap
         mode = self._get_effective_decision_mode()
         mode_cap = POSITION_SIZE_CAPS.get(mode, 1.0)
         if mode_cap < 1.0:
@@ -3115,10 +3179,14 @@ class CIOAgent(DecisionAgent):
                 f"{original_size} -> {size} ({mode_cap*100:.0f}%)"
             )
 
-        # Minimum viable order
-        if size < 10:
+        # FIX-06: Minimum viable order = 1 for futures
+        if size < 1:
             return 0
 
+        logger.info(
+            f"Kelly sizing: {agg.symbol} ${position_value:.0f} / "
+            f"(${estimated_price:.2f} * {multiplier}) = {size} contracts"
+        )
         return size
 
     def _get_current_exposure_pct(self) -> float:
@@ -3164,7 +3232,19 @@ class CIOAgent(DecisionAgent):
         conviction_factor = agg.weighted_confidence
         strength_factor = abs(agg.weighted_strength)
 
-        size = int(self._base_position_size * conviction_factor * strength_factor)
+        # FIX-01/10: base_position_size is now in DOLLARS, convert to contracts
+        dollar_amount = self._base_position_size * conviction_factor * strength_factor
+
+        # Get price and futures multiplier
+        estimated_price = self._price_cache.get(agg.symbol)
+        if estimated_price is None or estimated_price <= 0:
+            logger.warning(f"CIO: No price for {agg.symbol} in conviction sizing, returning 0")
+            return 0
+
+        spec = CONTRACT_SPECS.get(agg.symbol)
+        multiplier = spec.multiplier if spec else 1.0
+        notional_per_contract = estimated_price * multiplier
+        size = int(dollar_amount / notional_per_contract)
 
         # Apply limits
         size = min(size, self._max_position_size)
@@ -3175,7 +3255,7 @@ class CIOAgent(DecisionAgent):
 
         if regime_multiplier != 1.0:
             logger.debug(
-                f"Kelly: Regime allocation adjustment for {self._current_regime.value}: "
+                f"Conviction: Regime allocation adjustment for {self._current_regime.value}: "
                 f"multiplier={regime_multiplier:.2f}"
             )
 
@@ -3190,9 +3270,14 @@ class CIOAgent(DecisionAgent):
                 f"{original_size} -> {size} ({mode_cap*100:.0f}%)"
             )
 
-        if size < 10:
+        # FIX-06: Minimum viable order = 1 for futures
+        if size < 1:
             return 0
 
+        logger.info(
+            f"Conviction sizing: {agg.symbol} ${dollar_amount:.0f} / "
+            f"(${estimated_price:.2f} * {multiplier}) = {size} contracts"
+        )
         return size
 
     def _get_correlation_discount(self, symbol: str) -> float:

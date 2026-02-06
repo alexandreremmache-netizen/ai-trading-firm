@@ -394,7 +394,7 @@ class MacroAgent(SignalAgent):
         return SignalEvent(
             source_agent=self.name,
             strategy_name="macro_vix_regime",
-            symbol="SPY",  # Signal applies to broad market
+            symbol="MES",  # FIX-30: System trades MES, not SPY
             direction=direction,
             strength=strength,
             confidence=0.6,
@@ -556,7 +556,7 @@ class MacroAgent(SignalAgent):
             return SignalEvent(
                 source_agent=self.name,
                 strategy_name="macro_safe_haven",
-                symbol="SPY",  # Signal affects broad market
+                symbol="MES",  # FIX-30: System trades MES, not SPY
                 direction=SignalDirection.SHORT,
                 strength=-0.3,
                 confidence=0.5,
@@ -615,7 +615,7 @@ class MacroAgent(SignalAgent):
             return SignalEvent(
                 source_agent=self.name,
                 strategy_name="macro_yield_curve",
-                symbol="SPY",
+                symbol="MES",  # FIX-30: System trades MES, not SPY
                 direction=direction,
                 strength=strength,
                 confidence=0.6 if result.is_warning else 0.5,
@@ -679,7 +679,7 @@ class MacroAgent(SignalAgent):
             return SignalEvent(
                 source_agent=self.name,
                 strategy_name="macro_dxy",
-                symbol="SPY",
+                symbol="MES",  # FIX-30: System trades MES, not SPY
                 direction=direction,
                 strength=strength,
                 confidence=0.55,
@@ -725,14 +725,18 @@ class MacroAgent(SignalAgent):
                 # Update HMM detector
                 self._hmm_detector.update(ret)
 
-        # Try to fit HMM if we have enough data and not fitted
+        # FIX-29: Run HMM fit in thread to avoid blocking event loop (500-2000ms)
         if (
             len(self._hmm_returns) >= self._hmm_min_samples
             and not self._hmm_detector._is_fitted
         ):
             try:
-                self._hmm_detector.fit(self._hmm_returns)
-                logger.info("HMM regime detector fitted successfully")
+                import asyncio
+                import concurrent.futures
+                loop = asyncio.get_event_loop()
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    loop.run_in_executor(pool, self._hmm_detector.fit, list(self._hmm_returns))
+                logger.info("HMM regime detector fit submitted to thread pool")
             except Exception as e:
                 logger.warning(f"Could not fit HMM: {e}")
 
@@ -798,7 +802,7 @@ class MacroAgent(SignalAgent):
             return SignalEvent(
                 source_agent=self.name,
                 strategy_name="macro_hmm_regime",
-                symbol="SPY",
+                symbol="MES",  # FIX-30: System trades MES, not SPY
                 direction=direction,
                 strength=signal_strength,
                 confidence=result.confidence,

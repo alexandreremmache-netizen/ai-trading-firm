@@ -306,7 +306,10 @@ class TestPositionSizing:
     """Test position sizing calculations."""
 
     def test_conviction_based_sizing(self, cio_agent):
-        """Test conviction-based position sizing."""
+        """Test conviction-based position sizing (dollar-based with multiplier)."""
+        # Set price in cache for dollar-based sizing (FIX-01)
+        cio_agent._price_cache["AAPL"] = 1.0  # $1 price -> 100 dollars / $1 = 100 contracts
+
         signal = SignalEvent(
             source_agent="MomentumAgent",
             strategy_name="momentum",
@@ -326,11 +329,13 @@ class TestPositionSizing:
 
         size = cio_agent._calculate_conviction_size(agg)
 
-        # With full conviction and strength, should get base_position_size
-        assert size == 100  # base_position_size from config
+        # base_position_size=100 dollars / ($1 * multiplier 1.0) = 100 contracts
+        assert size == 100
 
     def test_conviction_sizing_low_confidence(self, cio_agent):
         """Test that low confidence reduces position size."""
+        cio_agent._price_cache["AAPL"] = 1.0  # Set price for dollar-based sizing
+
         signal = SignalEvent(
             source_agent="MomentumAgent",
             strategy_name="momentum",
@@ -355,9 +360,10 @@ class TestPositionSizing:
 
     def test_position_size_max_limit(self, cio_agent):
         """Test that position size respects max limit."""
-        # Set artificially high base size
+        # Set artificially high base size (dollars)
         cio_agent._base_position_size = 5000
         cio_agent._max_position_size = 1000
+        cio_agent._price_cache["AAPL"] = 1.0  # $1 price for easy math
 
         signal = SignalEvent(
             source_agent="MomentumAgent",
@@ -618,6 +624,7 @@ class TestDecisionMaking:
     async def test_make_decision_with_valid_signal(self, cio_agent):
         """Test decision making with valid signal."""
         cio_agent._min_conviction = 0.5  # Lower threshold for test
+        cio_agent._price_cache["AAPL"] = 1.0  # $1 price for easy sizing math
 
         signal = SignalEvent(
             source_agent="MomentumAgent",
@@ -634,6 +641,8 @@ class TestDecisionMaking:
             signals={"MomentumAgent": signal},
             timestamp=datetime.now(timezone.utc),
         )
+        # Properly aggregate to set weighted_confidence and consensus_direction
+        cio_agent._aggregate_signals(agg)
 
         await cio_agent._make_decision_from_aggregation(agg)
 
