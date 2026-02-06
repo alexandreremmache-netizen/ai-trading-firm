@@ -118,7 +118,8 @@ class TestEventWindow:
 
     def test_outside_window(self, strategy, fomc_event):
         """Test detection of outside window."""
-        current = datetime(2026, 2, 5, 15, 0, 0, tzinfo=timezone.utc)  # 4 hours before
+        # FOMC pre_window is 24h (1440 min Phase 11), so >24h before = outside
+        current = datetime(2026, 2, 4, 17, 0, 0, tzinfo=timezone.utc)  # 26 hours before
         window = strategy.get_event_window(current, fomc_event)
 
         assert window == EventWindow.OUTSIDE_WINDOW

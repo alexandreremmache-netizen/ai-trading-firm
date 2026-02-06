@@ -64,9 +64,13 @@ class EventDrivenAgent(SignalAgent):
         super().__init__(config, event_bus, audit_logger)
 
         # Configuration
-        self._pre_event_hours = config.parameters.get("pre_event_hours", 2)
+        # Pre-event window: 24h for FOMC (was 2h, too short for proper positioning)
+        # Research: institutional positioning starts 24-48h before major Fed events
+        self._pre_event_hours = config.parameters.get("pre_event_hours", 24)
         self._post_event_hours = config.parameters.get("post_event_hours", 4)
-        self._min_surprise_std = config.parameters.get("min_surprise_std", 1.0)
+        # Min surprise: 3.0 std devs for significant moves (was 1.0, too sensitive)
+        # Research: only >2.5 std surprise generates sustained directional moves
+        self._min_surprise_std = config.parameters.get("min_surprise_std", 3.0)
         self._tracked_events = config.parameters.get("tracked_events", [
             "FOMC", "NFP", "CPI", "GDP", "RETAIL_SALES", "ISM_PMI"
         ])
@@ -339,8 +343,8 @@ class EventDrivenAgent(SignalAgent):
 
     def register_event(self, event: EconomicEvent) -> None:
         """Register an upcoming economic event."""
-        self._strategy.register_event(event)
-        logger.info(f"Registered event: {event.event_type.value} at {event.release_time}")
+        self._strategy.add_event(event)
+        logger.info(f"Registered event: {event.event_type.value} at {event.timestamp}")
 
     def get_status(self) -> dict:
         """Get agent status for monitoring."""

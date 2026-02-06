@@ -245,7 +245,8 @@ class RiskState:
     # Risk metrics
     var_95: float = 0.0
     var_99: float = 0.0
-    expected_shortfall: float = 0.0
+    expected_shortfall: float = 0.0  # ES at 95% (legacy)
+    cvar_975: float = 0.0  # CVaR at 97.5% (FRTB/Basel III requirement)
     leverage: float = 0.0
 
     # Enhanced VaR metrics
@@ -771,10 +772,11 @@ class RiskAgent(ValidationAgent):
                     rejection_reason=stress_check.message
                 )
 
-        # 12. Market data staleness check
+        # 12. Market data staleness check (bypass for DELEVERAGING trades - they are urgent)
+        is_deleveraging_trade = decision.rationale and "DELEVERAGING" in decision.rationale.upper()
         staleness_check = await self._check_market_data_staleness(decision)
         checks.append(staleness_check)
-        if not staleness_check.passed:
+        if not staleness_check.passed and not is_deleveraging_trade:
             return RiskValidationResult(
                 approved=False,
                 checks=checks,
@@ -2300,7 +2302,7 @@ class RiskAgent(ValidationAgent):
         std_return = np.std(returns)  # sigma: daily volatility
 
         # Parametric VaR: VaR = -(mu - z * sigma)
-        # Z-scores: 1.645 for 95% (one-tailed), 2.326 for 99%
+        # Z-scores: 1.645 for 95% (one-tailed), 1.960 for 97.5%, 2.326 for 99%
         # The negative sign converts to a positive loss percentage
         self._risk_state.var_95 = -(mean_return - 1.645 * std_return)
         self._risk_state.var_99 = -(mean_return - 2.326 * std_return)
@@ -2310,6 +2312,12 @@ class RiskAgent(ValidationAgent):
         var_95_threshold = np.percentile(returns, 5)
         tail_returns = returns[returns <= var_95_threshold]
         self._risk_state.expected_shortfall = -np.mean(tail_returns) if len(tail_returns) > 0 else self._risk_state.var_95
+
+        # CVaR at 97.5% (FRTB/Basel III mandated confidence level)
+        # Find the 2.5th percentile and average all returns below it
+        var_975_threshold = np.percentile(returns, 2.5)
+        tail_returns_975 = returns[returns <= var_975_threshold]
+        self._risk_state.cvar_975 = -np.mean(tail_returns_975) if len(tail_returns_975) > 0 else self._risk_state.var_99
 
         # Check CVaR alerts (#R13) - schedule async check
         asyncio.create_task(self._check_cvar_alerts())
@@ -2581,9 +2589,22 @@ class RiskAgent(ValidationAgent):
                     )
                     self._risk_state.var_99 = result_99.parametric_var / portfolio_value if result_99.parametric_var else self._risk_state.var_99
 
-                    # Expected Shortfall
+                    # Expected Shortfall at 95%
                     if hasattr(result, 'expected_shortfall') and result.expected_shortfall:
                         self._risk_state.expected_shortfall = result.expected_shortfall / portfolio_value
+
+                    # CVaR at 97.5% (FRTB/Basel III requirement)
+                    # FRTB mandates Expected Shortfall at 97.5% confidence level
+                    result_975 = self._var_calculator.calculate_all_var(
+                        positions=positions,
+                        portfolio_value=portfolio_value,
+                        confidence_level=0.975,
+                    )
+                    if hasattr(result_975, 'expected_shortfall') and result_975.expected_shortfall:
+                        self._risk_state.cvar_975 = result_975.expected_shortfall / portfolio_value
+                    elif result_975.parametric_var:
+                        # Approximate ES as 1.15x VaR (typical ratio for normal distribution)
+                        self._risk_state.cvar_975 = (result_975.parametric_var / portfolio_value) * 1.15
 
                     return
 

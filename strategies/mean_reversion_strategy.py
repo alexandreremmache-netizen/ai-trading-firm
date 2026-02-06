@@ -110,10 +110,13 @@ class MeanReversionStrategy:
         """Initialize mean reversion strategy."""
         config = config or {}
 
-        # RSI settings
-        self._rsi_period = config.get("rsi_period", 14)
-        self._rsi_oversold = config.get("rsi_oversold", 30)
-        self._rsi_overbought = config.get("rsi_overbought", 70)
+        # RSI settings - Connors RSI(2) configuration for mean reversion
+        # RSI(2) is more responsive than RSI(14) for short-term reversions
+        # Extreme thresholds (5/95) required for high-probability entries
+        # Reference: Connors Research "Short Term Trading Strategies That Work"
+        self._rsi_period = config.get("rsi_period", 2)
+        self._rsi_oversold = config.get("rsi_oversold", 5)
+        self._rsi_overbought = config.get("rsi_overbought", 95)
 
         # Bollinger Band settings
         self._bb_period = config.get("bb_period", 20)
@@ -125,7 +128,9 @@ class MeanReversionStrategy:
 
         # Risk settings
         self._stop_atr_mult = config.get("stop_atr_mult", 2.0)
-        self._take_profit_atr_mult = config.get("take_profit_atr_mult", 1.5)
+        # Take profit: 2.5 ATR allows full reversion capture (was 1.5)
+        # Mean reversion often overshoots the mean - capture more upside
+        self._take_profit_atr_mult = config.get("take_profit_atr_mult", 2.5)
         self._max_holding_bars = config.get("max_holding_bars", 20)
 
         # Regime detection

@@ -61,8 +61,9 @@ class TestRSICalculation:
         assert rsi[-1] < 30
 
     def test_rsi_short_series(self, strategy):
-        """Test RSI with short series."""
-        prices = np.array([100, 101, 102])
+        """Test RSI with very short series (less than period+1)."""
+        # With RSI(2), we need at least 3 prices. Test with only 2.
+        prices = np.array([100, 101])
 
         rsi = strategy.calculate_rsi(prices)
 
@@ -407,13 +408,14 @@ class TestFactoryFunction:
     """Tests for factory function."""
 
     def test_create_default(self):
-        """Test default factory creation."""
+        """Test default factory creation with Connors RSI(2) parameters."""
         strategy = create_mean_reversion_strategy()
 
         assert isinstance(strategy, MeanReversionStrategy)
-        assert strategy._rsi_period == 14
-        assert strategy._rsi_oversold == 30
-        assert strategy._rsi_overbought == 70
+        # Connors RSI(2) defaults for short-term mean reversion
+        assert strategy._rsi_period == 2
+        assert strategy._rsi_oversold == 5
+        assert strategy._rsi_overbought == 95
 
     def test_create_custom_config(self):
         """Test factory with custom config."""

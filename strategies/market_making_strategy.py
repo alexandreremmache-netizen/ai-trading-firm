@@ -174,9 +174,10 @@ def calculate_optimal_spread(
     sigma: float,
     k: float,
     A: float,
+    T: float = 1.0,
 ) -> float:
     """
-    Calculate optimal bid-ask spread.
+    Calculate optimal bid-ask spread using Avellaneda-Stoikov formula.
 
     The optimal spread balances:
     - Wider spread = more profit per trade but fewer fills
@@ -184,16 +185,16 @@ def calculate_optimal_spread(
 
     Formula: delta = gamma * sigma^2 * T + (2/gamma) * ln(1 + gamma/k)
 
-    For the simplified case (constant arrival rate):
-    delta = (2/gamma) * ln(1 + gamma/k)
-
-    The full formula includes time-dependent terms.
+    IMPORTANT: sigma should be in the SAME time units as T.
+    - If T=1 (one day), sigma should be DAILY volatility (not annualized)
+    - If using annualized sigma, divide by sqrt(252) first
 
     Args:
         gamma: Risk aversion parameter
-        sigma: Volatility
+        sigma: Volatility (DAILY, not annualized - see note above)
         k: Order arrival intensity
         A: Arrival sensitivity (not used in basic formula)
+        T: Time horizon (fraction of day remaining, 0-1)
 
     Returns:
         Optimal half-spread (bid and ask distance from reservation price)
@@ -204,8 +205,10 @@ def calculate_optimal_spread(
     else:
         spread_component = 0.01  # Default minimum
 
-    # Volatility component
-    vol_component = gamma * (sigma ** 2)
+    # Volatility component: gamma * sigma^2 * T
+    # This compensates for inventory risk over the time horizon
+    # CRITICAL: T factor was missing - caused ~256x spread overestimation
+    vol_component = gamma * (sigma ** 2) * T
 
     optimal_spread = spread_component + vol_component
 
@@ -250,6 +253,7 @@ def calculate_optimal_quotes(
         sigma=params.sigma,
         k=params.k,
         A=params.A,
+        T=params.T,
     ) / 2
 
     # Apply minimum spread
@@ -374,14 +378,17 @@ class AvellanedaStoikovMM:
                 if len(self._returns_history) > self.volatility_lookback + 1:
                     self._returns_history = self._returns_history[-self.volatility_lookback - 1:]
 
-                # Calculate realized volatility
+                # Calculate realized volatility (DAILY, not annualized)
+                # A-S model expects daily volatility when T=1 (one day)
+                # Previously used sqrt(252) which caused ~16x overestimation
                 if len(self._returns_history) >= 3:
                     returns = []
                     for i in range(1, len(self._returns_history)):
                         r = (self._returns_history[i] - self._returns_history[i-1]) / self._returns_history[i-1]
                         returns.append(r)
                     if returns:
-                        self._current_volatility = float(np.std(returns)) * np.sqrt(252)
+                        # Use daily volatility (no annualization factor)
+                        self._current_volatility = float(np.std(returns))
         else:
             self._returns_history.append(price)
 
@@ -655,18 +662,24 @@ class MarketMakingStrategy:
 
         Where:
         - gamma: risk aversion parameter
-        - sigma: volatility
-        - T: time horizon
+        - sigma: volatility (DAILY, not annualized)
+        - T: time horizon (fraction of day remaining, 0-1)
         - k: order arrival rate (lambda in original paper)
+
+        IMPORTANT: volatility should be DAILY volatility.
+        If using annualized volatility, divide by sqrt(252) first.
 
         The first term compensates for inventory risk over time.
         The second term accounts for adverse selection from order flow.
         """
         gamma = self._risk_aversion
-        sigma = volatility
+        # Convert annualized volatility to daily if needed
+        # A-S model expects daily volatility when T is in day units
+        sigma = volatility / np.sqrt(252) if volatility > 0.1 else volatility  # Assume > 10% is annualized
         k = order_arrival_rate if order_arrival_rate is not None else self._order_arrival_rate
 
         # Volatility component: compensates for inventory risk
+        # gamma * sigma^2 * T (with daily sigma and T in day fraction)
         vol_component = gamma * (sigma ** 2) * time_horizon
 
         # Order arrival component: (2/gamma) * ln(1 + gamma/k)

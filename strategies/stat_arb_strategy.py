@@ -430,9 +430,17 @@ class StatArbStrategy:
         self._regime_breakdown_pvalue = config.get("regime_breakdown_pvalue", 0.15)  # p-value threshold
         self._min_correlation_stability = config.get("min_correlation_stability", 0.3)
 
+        # Minimum correlation filter for pair quality
+        # Research: For index futures, correlation should be >= 0.80
+        # Higher correlation pairs have more stable spread relationships
+        self._min_correlation = config.get("min_correlation", 0.80)
+
         # Phase 5.1: Kalman Filter settings for dynamic hedge ratio
+        # Default to Kalman for dynamic adaptation to changing relationships
+        # OLS is static and doesn't adapt to regime changes
+        # Research: Dynamic hedge ratios reduce spread variance by 15-25%
         self._hedge_ratio_method = HedgeRatioMethod(
-            config.get("hedge_ratio_method", "ols")
+            config.get("hedge_ratio_method", "kalman" if HAS_KALMAN else "ols")
         )
         self._kalman_delta = config.get("kalman_delta", 1e-4)  # Process noise
         self._kalman_ve = config.get("kalman_ve", 1e-3)  # Measurement noise
@@ -1021,6 +1029,11 @@ class StatArbStrategy:
                 is_cointegrated = False
                 rationale = f"REJECTED: Half-life {half_life:.1f} outside bounds [{self._min_half_life}, {self._max_half_life}]"
 
+        # Check minimum correlation threshold (quality filter)
+        if is_cointegrated and abs(correlation) < self._min_correlation:
+            is_cointegrated = False
+            rationale = f"REJECTED: Correlation {correlation:.3f} below minimum {self._min_correlation}"
+
         # P2: Calculate rolling correlation and stability
         rolling_corr, corr_stability = self.calculate_rolling_correlation(prices_a, prices_b)
 
@@ -1113,6 +1126,11 @@ class StatArbStrategy:
 
         if not basic_cointegrated:
             rationale = f"REJECTED: ADF p-value={pvalue:.3f}, half_life={half_life:.1f}"
+
+        # Check minimum correlation threshold (quality filter)
+        if is_cointegrated and abs(correlation) < self._min_correlation:
+            is_cointegrated = False
+            rationale = f"REJECTED: Correlation {correlation:.3f} below minimum {self._min_correlation}"
 
         # P2: Calculate rolling correlation and stability
         rolling_corr, corr_stability = self.calculate_rolling_correlation(prices_a, prices_b)

@@ -188,6 +188,9 @@ class MacroAgent(SignalAgent):
             tp_distance = price - target_price
 
         rr_ratio = tp_distance / sl_distance if sl_distance > 0 else 0.0
+        # Round to 2 decimals to avoid floating-point precision issues
+        # (e.g., 1.9999999... should be treated as 2.0)
+        rr_ratio = round(rr_ratio, 2)
         is_valid_rr = rr_ratio >= self._min_rr_ratio
 
         return stop_loss, target_price, rr_ratio, is_valid_rr

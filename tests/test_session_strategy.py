@@ -9,6 +9,7 @@ and breakout signal generation.
 import numpy as np
 import pytest
 from datetime import datetime, time, timezone, timedelta
+from unittest.mock import patch
 
 from strategies.session_strategy import (
     SessionStrategy,
@@ -227,12 +228,15 @@ class TestSessionMomentum:
         # Create trending up prices
         prices = np.array([100.0, 100.2, 100.4, 100.5, 100.7, 100.9, 101.0, 101.2, 101.3, 101.5])
 
-        signal = strategy.generate_session_momentum_signal(
-            symbol="EURUSD",
-            prices=prices,
-            session=TradingSession.LONDON_NY_OVERLAP,
-            atr=0.5,
-        )
+        # Mock get_current_session to return a good session regardless of real time
+        with patch.object(strategy, 'get_current_session',
+                          return_value=(TradingSession.LONDON_NY_OVERLAP, SessionQuality.EXCELLENT)):
+            signal = strategy.generate_session_momentum_signal(
+                symbol="EURUSD",
+                prices=prices,
+                session=TradingSession.LONDON_NY_OVERLAP,
+                atr=0.5,
+            )
 
         assert signal is not None
         assert signal.direction == "LONG"
@@ -243,12 +247,15 @@ class TestSessionMomentum:
         # Create trending down prices
         prices = np.array([101.5, 101.3, 101.2, 101.0, 100.9, 100.7, 100.5, 100.4, 100.2, 100.0])
 
-        signal = strategy.generate_session_momentum_signal(
-            symbol="EURUSD",
-            prices=prices,
-            session=TradingSession.LONDON_NY_OVERLAP,
-            atr=0.5,
-        )
+        # Mock get_current_session to return a good session regardless of real time
+        with patch.object(strategy, 'get_current_session',
+                          return_value=(TradingSession.LONDON_NY_OVERLAP, SessionQuality.EXCELLENT)):
+            signal = strategy.generate_session_momentum_signal(
+                symbol="EURUSD",
+                prices=prices,
+                session=TradingSession.LONDON_NY_OVERLAP,
+                atr=0.5,
+            )
 
         assert signal is not None
         assert signal.direction == "SHORT"
@@ -346,7 +353,8 @@ class TestSessionWindows:
         overlap = SESSION_WINDOWS["london_ny_overlap"]
 
         assert overlap.start_time == time(13, 0)
-        assert overlap.end_time == time(16, 0)
+        # London closes at 17:00 UTC, not 16:00 (corrected per industry standard)
+        assert overlap.end_time == time(17, 0)
         assert overlap.quality == SessionQuality.EXCELLENT
         assert overlap.typical_volume_pct > 0
 

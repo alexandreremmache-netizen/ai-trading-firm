@@ -897,6 +897,57 @@ class CircuitBreaker:
             )
             await self._transition_to(CircuitState.OPEN, reason="half_open_failure")
 
+    def record_success(self) -> None:
+        """
+        Record a successful operation (synchronous public API).
+
+        Schedules the async _record_success on the running event loop.
+        Use this from synchronous callbacks (e.g., IB error handlers).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._async_record_success())
+        except RuntimeError:
+            # No running event loop - update stats synchronously (best-effort)
+            now = datetime.now(timezone.utc)
+            self._call_records.append(CallRecord(now, True))
+            self._stats.total_calls += 1
+            self._stats.successful_calls += 1
+            self._stats.consecutive_successes += 1
+            self._stats.consecutive_failures = 0
+            self._stats.last_success_time = now
+
+    def record_failure(self, exc: Exception) -> None:
+        """
+        Record a failed operation (synchronous public API).
+
+        Schedules the async _record_failure on the running event loop.
+        Use this from synchronous callbacks (e.g., IB error handlers).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._async_record_failure(exc))
+        except RuntimeError:
+            # No running event loop - update stats synchronously (best-effort)
+            now = datetime.now(timezone.utc)
+            self._call_records.append(CallRecord(now, False))
+            self._last_failure_time = now
+            self._stats.total_calls += 1
+            self._stats.failed_calls += 1
+            self._stats.consecutive_failures += 1
+            self._stats.consecutive_successes = 0
+            self._stats.last_failure_time = now
+
+    async def _async_record_success(self) -> None:
+        """Async helper for record_success - acquires lock and delegates."""
+        async with self._lock:
+            await self._record_success()
+
+    async def _async_record_failure(self, exc: Exception) -> None:
+        """Async helper for record_failure - acquires lock and delegates."""
+        async with self._lock:
+            await self._record_failure(exc)
+
     async def call(
         self,
         func: Callable[..., Any],

@@ -54,7 +54,8 @@ def mock_event_bus():
     bus.publish_signal = AsyncMock()  # Also mock publish_signal for signal agents
     bus.subscribe = MagicMock()
     bus.unsubscribe = MagicMock()
-    bus.wait_for_signals = AsyncMock(return_value={})
+    from core.event_bus import BarrierResult
+    bus.wait_for_signals = AsyncMock(return_value=BarrierResult(signals={}))
     bus.register_signal_agent = MagicMock()
 
     # Track published events

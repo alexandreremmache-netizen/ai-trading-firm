@@ -2200,14 +2200,52 @@ class IBBroker:
             return []
 
         try:
-            # Create and qualify contract
-            contract = Stock(symbol, exchange, currency)
-            qualified = await self._ib.qualifyContractsAsync(contract)
-            if not qualified:
-                logger.error(f"Failed to qualify contract for {symbol}")
-                return []
+            # Determine contract type based on symbol
+            FUTURES_SYMBOLS = {
+                "ES", "NQ", "YM", "RTY",
+                "MES", "MNQ", "MYM", "M2K",
+                "CL", "MCL", "NG", "RB", "HO",
+                "GC", "MGC", "SI", "SIL", "PL", "HG",
+                "ZC", "ZW", "ZS", "ZM", "ZL",
+                "ZB", "ZN", "ZF", "ZT",
+            }
+            FOREX_SYMBOLS = {
+                "EUR", "GBP", "JPY", "CHF", "AUD", "CAD", "NZD",
+                "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD",
+            }
 
-            contract = qualified[0]
+            if symbol in FUTURES_SYMBOLS:
+                # Try cached contract first, then get front month
+                cached_key = None
+                for exch in ("CME", "CBOT", "NYMEX", "COMEX"):
+                    key = f"{symbol}:{exch}:{currency}"
+                    if key in self._contracts:
+                        cached_key = key
+                        break
+
+                if cached_key:
+                    contract = self._contracts[cached_key]
+                else:
+                    # Determine exchange for the symbol
+                    fut_exchange = exchange if exchange != "SMART" else "CME"
+                    contract = await self._get_front_month_future(symbol, fut_exchange, currency)
+                    if not contract:
+                        logger.warning(f"No front month future for {symbol}, skipping historical data")
+                        return []
+            elif symbol in FOREX_SYMBOLS:
+                contract = self._create_contract(symbol, "IDEALPRO", currency, "CASH")
+                qualified = await self._ib.qualifyContractsAsync(contract)
+                if not qualified:
+                    logger.error(f"Failed to qualify forex contract for {symbol}")
+                    return []
+                contract = qualified[0]
+            else:
+                contract = Stock(symbol, exchange, currency)
+                qualified = await self._ib.qualifyContractsAsync(contract)
+                if not qualified:
+                    logger.error(f"Failed to qualify contract for {symbol}")
+                    return []
+                contract = qualified[0]
 
             # P0-6: Check rate limits before requesting historical data
             # IB is very strict about historical data pacing - violations cause 24h bans

@@ -144,9 +144,9 @@ class StatArbAgent(SignalAgent):
         # Correlation divergence detection (MoonDev-inspired)
         self._divergence_enabled = config.parameters.get("divergence_enabled", True)
         self._divergence_pairs = config.parameters.get("divergence_pairs", [
-            ["SPY", "QQQ"],   # Index ETFs
-            ["ES", "NQ"],     # Index futures
-            ["GC", "SI"],     # Precious metals
+            ["SPY", "QQQ"],   # Index ETFs (data only)
+            ["MES", "MNQ"],   # Micro index futures
+            ["MGC", "MCL"],   # Micro metals/energy
             ["AAPL", "MSFT"], # Tech leaders
         ])
         self._divergence_lookback = config.parameters.get("divergence_lookback", 20)

@@ -37,7 +37,8 @@ def mock_event_bus():
     bus = MagicMock()
     bus.publish = AsyncMock()
     bus.subscribe = MagicMock()
-    bus.wait_for_signals = AsyncMock(return_value={})
+    from core.event_bus import BarrierResult
+    bus.wait_for_signals = AsyncMock(return_value=BarrierResult(signals={}))
     return bus
 
 
@@ -1358,13 +1359,24 @@ class TestPositionManagement:
         assert pos_short.pnl_pct == 5.0  # 5% gain on short
 
     def test_position_management_config_defaults(self, cio_agent):
-        """Test position management configuration defaults."""
+        """Test position management configuration defaults (Phase 12 values)."""
         config = cio_agent._position_management_config
         assert config.max_loss_pct == 5.0
         assert config.extended_loss_pct == 8.0
-        assert config.profit_target_pct == 15.0
-        assert config.trailing_profit_pct == 3.0
+        assert config.profit_target_pct == 4.0  # Phase 12: was 15.0
+        assert config.trailing_profit_pct == 1.5  # Phase 12: was 3.0
         assert config.min_conviction_to_hold == 0.4
+        # Phase 12: Active Position Protection
+        assert config.breakeven_r_trigger == 1.0
+        assert config.trailing_activation_r == 1.5
+        assert config.trailing_distance_r == 0.5
+        assert config.partial_profit_1_r == 1.5
+        assert config.partial_profit_2_r == 2.5
+        assert config.partial_profit_3_r == 3.5
+        assert config.max_holding_hours_intraday == 4.0
+        assert config.max_holding_hours_swing == 48.0
+        assert config.max_holding_hours_pairs == 120.0
+        assert config.max_holding_days == 2.0  # Phase 12: was 30.0
 
     def test_position_management_stats_tracking(self, cio_agent):
         """Test position management statistics tracking."""
@@ -1478,17 +1490,17 @@ class TestPositionManagement:
         assert threshold == 4.0  # 5.0 * 0.8
 
     def test_regime_adjusted_profit_threshold(self, cio_agent):
-        """Test that profit thresholds adjust for market regime."""
-        # Default regime (NEUTRAL)
-        assert cio_agent._get_regime_adjusted_profit_threshold(MarketRegime.NEUTRAL) == 15.0
+        """Test that profit thresholds adjust for market regime (Phase 12: base=4.0%)."""
+        # Default regime (NEUTRAL) - Phase 12: 4.0% base
+        assert cio_agent._get_regime_adjusted_profit_threshold(MarketRegime.NEUTRAL) == 4.0
 
         # Trending regime - should let profits run longer
         threshold = cio_agent._get_regime_adjusted_profit_threshold(MarketRegime.TRENDING)
-        assert threshold == 22.5  # 15.0 * 1.5
+        assert threshold == 6.0  # 4.0 * 1.5
 
         # Volatile regime - should take profits earlier
         threshold = cio_agent._get_regime_adjusted_profit_threshold(MarketRegime.VOLATILE)
-        assert threshold == 10.5  # 15.0 * 0.7
+        assert threshold == pytest.approx(2.8)  # 4.0 * 0.7
 
     @pytest.mark.asyncio
     async def test_evaluate_position_emergency_loss(self, cio_agent):

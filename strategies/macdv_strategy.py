@@ -111,6 +111,20 @@ class MACDvStrategy:
         # Signal line cross sensitivity
         self._require_zone_exit = config.get("require_zone_exit", True)
 
+        # Neutral zone filter (Charles H. Dow Award 2022 recommendation)
+        # Signals in the -50 to +50 range are typically noise
+        # Only trade when MACD-v shows clear directional bias
+        self._neutral_zone_filter = config.get("neutral_zone_filter", True)
+        self._neutral_zone_upper = config.get("neutral_zone_upper", 50.0)
+        self._neutral_zone_lower = config.get("neutral_zone_lower", -50.0)
+
+        # Ranging market detection (Spiroglou 2022)
+        # MACD-v staying in neutral zone for 20-30+ bars indicates sideways/ranging market
+        # Suppress all signals during ranging conditions to avoid whipsaws
+        self._ranging_detection_enabled = config.get("ranging_detection_enabled", True)
+        self._ranging_bar_threshold = config.get("ranging_bar_threshold", 25)
+        self._bars_in_neutral: dict[str, int] = {}  # Track per symbol
+
         # Stop-loss and take-profit settings
         self._stop_loss_pct = config.get("stop_loss_pct", 2.0)  # 2%
         self._take_profit_pct = config.get("take_profit_pct", 4.0)  # 4% (2:1 R:R)
@@ -674,6 +688,40 @@ class MACDvStrategy:
                 # We're above signal but histogram is negative and not increasing
                 # This could be a weakening long
                 pass  # Exit signals handled at agent level with position tracking
+
+        # Neutral zone filter (Charles H. Dow Award 2022)
+        # Reject signals when MACD-v is in the noise zone (-50 to +50)
+        if self._neutral_zone_filter and direction != "flat":
+            if self._neutral_zone_lower < curr_macdv < self._neutral_zone_upper:
+                logger.debug(
+                    f"{symbol}: Signal rejected - MACD-v {curr_macdv:.1f} in neutral zone "
+                    f"[{self._neutral_zone_lower}, {self._neutral_zone_upper}]"
+                )
+                direction = "flat"
+                strength = 0.0
+                confidence = 0.0
+
+        # Ranging market detection (Spiroglou 2022)
+        # Track how many bars MACD-v has been in the neutral zone
+        # 25+ bars in neutral zone = ranging/sideways market = suppress all signals
+        if self._ranging_detection_enabled:
+            in_neutral = self._neutral_zone_lower < curr_macdv < self._neutral_zone_upper
+            if in_neutral:
+                self._bars_in_neutral[symbol] = self._bars_in_neutral.get(symbol, 0) + 1
+            else:
+                self._bars_in_neutral[symbol] = 0
+
+            bars_neutral = self._bars_in_neutral.get(symbol, 0)
+            if bars_neutral >= self._ranging_bar_threshold and direction != "flat":
+                logger.debug(
+                    f"{symbol}: Signal rejected - ranging market detected "
+                    f"({bars_neutral} bars in neutral zone >= {self._ranging_bar_threshold})"
+                )
+                direction = "flat"
+                strength = 0.0
+                confidence = 0.0
+                indicators["ranging_market"] = True
+                indicators["bars_in_neutral"] = bars_neutral
 
         # Calculate stop-loss and take-profit for directional signals
         current_price = prices[-1]

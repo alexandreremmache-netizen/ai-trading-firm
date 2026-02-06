@@ -77,6 +77,10 @@ class PositionEntry:
     take_profit_price: float | None = None
     trailing_stop_enabled: bool = True
     trailing_distance_pct: float = 3.0  # 3% trailing by default
+    # Phase 12: Broker order tracking for dynamic stop updates
+    stop_order_id: int | None = None  # IB broker order ID for stop order
+    last_stop_update_price: float | None = None  # Last stop price sent to broker
+    breakeven_set: bool = False  # Whether breakeven has been activated
 
 
 @dataclass
@@ -96,18 +100,23 @@ class StopLossConfig:
     # Fixed percentage stop-loss (fallback when ATR unavailable)
     fixed_stop_loss_pct: float = 5.0  # 5% default
 
-    # Trailing stop settings
+    # Trailing stop settings (Phase 12: tighter for intraday)
     trailing_stop_enabled: bool = True
-    trailing_activation_pct: float = 2.0  # Activate after 2% profit
-    trailing_distance_pct: float = 3.0  # Trail by 3%
+    trailing_activation_pct: float = 1.0  # Activate after 1% profit (was 2%)
+    trailing_distance_pct: float = 1.5  # Trail by 1.5% (was 3%)
 
-    # Take profit settings
+    # Take profit settings (Phase 12: realistic for futures)
     take_profit_enabled: bool = True
-    take_profit_pct: float = 10.0  # 10% profit target
+    take_profit_pct: float = 4.0  # 4% profit target (was 10%)
     trailing_take_profit: bool = True
 
-    # Time-based exit
-    max_holding_hours: float = 0.0  # 0 = disabled
+    # Time-based exit (Phase 12: default 48h)
+    max_holding_hours: float = 48.0  # 48h default (was 0=disabled)
+
+    # Phase 12: Breakeven stop settings
+    breakeven_enabled: bool = True
+    breakeven_activation_pct: float = 1.5  # Move to breakeven after 1.5% profit
+    breakeven_buffer_pct: float = 0.1  # 0.1% buffer above entry
 
     # Drawdown response (closes positions instead of kill-switch)
     drawdown_close_threshold_pct: float = 15.0  # Close worst positions at 15% drawdown
@@ -187,6 +196,9 @@ class StopLossManager:
             "take_profits_triggered": 0,
             "time_exits_triggered": 0,
             "drawdown_closes": 0,
+            # Phase 12
+            "breakeven_stops_set": 0,
+            "broker_stop_updates": 0,
         }
 
         logger.info(
@@ -249,11 +261,106 @@ class StopLossManager:
         else:
             position.lowest_price = min(position.lowest_price, current_price)
 
+        # Phase 12: Dynamic stop management (breakeven + trailing)
+        await self._update_dynamic_stops(position, current_price)
+
         # Use exit rule manager for evaluation
         exit_signals = self._exit_manager.evaluate(position.symbol, current_price)
 
         for signal in exit_signals:
             await self._handle_exit_signal(signal)
+
+    async def _update_dynamic_stops(
+        self,
+        position: PositionEntry,
+        current_price: float,
+    ) -> None:
+        """
+        Phase 12: Dynamically update stop-loss orders via broker.
+
+        1. Move to breakeven when position is sufficiently profitable
+        2. Trail stop behind peak price as position moves in our favor
+        """
+        if position.entry_price <= 0:
+            return
+
+        # Calculate current PnL %
+        if position.is_long:
+            pnl_pct = (current_price - position.entry_price) / position.entry_price * 100
+        else:
+            pnl_pct = (position.entry_price - current_price) / position.entry_price * 100
+
+        new_stop = None
+
+        # 1. BREAKEVEN STOP
+        if (
+            self._config.breakeven_enabled
+            and not position.breakeven_set
+            and pnl_pct >= self._config.breakeven_activation_pct
+        ):
+            buffer = position.entry_price * (self._config.breakeven_buffer_pct / 100)
+            if position.is_long:
+                new_stop = position.entry_price + buffer
+            else:
+                new_stop = position.entry_price - buffer
+
+            position.breakeven_set = True
+            position.stop_loss_price = new_stop
+            logger.info(
+                f"BREAKEVEN STOP: {position.symbol} at ${new_stop:.2f} "
+                f"(PnL: {pnl_pct:.1f}%, entry: ${position.entry_price:.2f})"
+            )
+
+        # 2. TRAILING STOP (only after breakeven is set)
+        if (
+            position.trailing_stop_enabled
+            and position.breakeven_set
+            and pnl_pct >= self._config.trailing_activation_pct
+        ):
+            trail_distance = position.entry_price * (self._config.trailing_distance_pct / 100)
+            if position.is_long:
+                trailing_stop = position.highest_price - trail_distance
+                # Only move up, never down
+                if position.stop_loss_price is None or trailing_stop > position.stop_loss_price:
+                    new_stop = trailing_stop
+            else:
+                trailing_stop = position.lowest_price + trail_distance
+                # Only move down, never up
+                if position.stop_loss_price is None or trailing_stop < position.stop_loss_price:
+                    new_stop = trailing_stop
+
+        # 3. UPDATE BROKER STOP ORDER if price changed
+        if new_stop is not None and new_stop != position.last_stop_update_price:
+            position.stop_loss_price = new_stop
+            position.last_stop_update_price = new_stop
+
+            # Wire to broker if available
+            if self._broker and position.stop_order_id is not None:
+                try:
+                    success = await self._broker.modify_order(
+                        broker_order_id=position.stop_order_id,
+                        new_stop_price=new_stop,
+                    )
+                    if success:
+                        logger.info(
+                            f"BROKER STOP UPDATED: {position.symbol} "
+                            f"stop → ${new_stop:.2f} (PnL: {pnl_pct:.1f}%)"
+                        )
+                    else:
+                        logger.warning(
+                            f"Failed to update broker stop for {position.symbol}"
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"Error updating broker stop for {position.symbol}: {e}"
+                    )
+
+            # Update exit rule manager with new stop
+            new_stop_pct = abs((new_stop - position.entry_price) / position.entry_price * 100)
+            try:
+                self._exit_manager.update_stop_loss(position.symbol, new_stop_pct)
+            except Exception:
+                pass  # Exit manager may not support dynamic updates
 
     async def _handle_exit_signal(self, signal: ExitSignal) -> None:
         """Handle an exit signal by generating a close decision."""

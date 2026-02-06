@@ -124,7 +124,7 @@ EVENT_CHARACTERISTICS = {
     EventType.FOMC: {
         "typical_vol_mult": 1.5,
         "reaction_minutes": 120,
-        "pre_window_minutes": 60,
+        "pre_window_minutes": 1440,  # 24 hours (Phase 11 correction)
         "sensitive_assets": ["ES", "NQ", "ZN", "ZB", "DX", "GC", "EURUSD"],
         "surprise_threshold_std": 0.5,
     },

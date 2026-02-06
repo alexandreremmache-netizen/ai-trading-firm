@@ -22,11 +22,13 @@ Enhanced features:
 from __future__ import annotations
 
 import asyncio
+import csv
 import logging
+import os
 import threading
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time as dt_time
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -176,6 +178,8 @@ class TrackedPosition:
     - Take profits on winning positions
     - Reduce position size when conviction drops
     - Override individual stop-losses in special situations
+    - Move stop to breakeven at 1R (Phase 12)
+    - Trail stop behind price at 1.5R+ (Phase 12)
     """
     symbol: str
     quantity: int
@@ -194,6 +198,13 @@ class TrackedPosition:
     stop_loss_overridden: bool = False  # True if CIO has overridden individual stop
     # R-Multiple Tracking (Phase 3 Enhancement)
     initial_risk: float = 0.0  # Distance from entry to stop-loss (1R unit)
+    # Phase 12: Active Position Protection
+    stop_moved_to_breakeven: bool = False  # True once stop moved to entry price
+    trailing_stop_active: bool = False  # True once trailing stop engages
+    trailing_stop_level: float | None = None  # Current trailing stop price
+    peak_r_multiple: float = 0.0  # Highest R-multiple reached
+    partial_exits_taken: int = 0  # Number of partial exits (0, 1, 2, 3)
+    strategy_type: str = ""  # For time-based exit rules (intraday, swing, pairs)
 
     @property
     def pnl_pct(self) -> float:
@@ -263,6 +274,10 @@ class TrackedPosition:
             self.highest_price = max(self.highest_price, price)
         else:
             self.lowest_price = min(self.lowest_price, price)
+        # Track peak R-multiple
+        current_r = self.r_multiple
+        if current_r > self.peak_r_multiple:
+            self.peak_r_multiple = current_r
 
 
 @dataclass
@@ -273,18 +288,22 @@ class PositionManagementConfig:
     extended_loss_pct: float = 8.0  # Definitely close at -8%
     loss_time_threshold_hours: float = 48.0  # Close if losing for 48+ hours
 
-    # Profit taking thresholds
-    profit_target_pct: float = 15.0  # Start taking profit at +15%
-    trailing_profit_pct: float = 3.0  # Take profit if drops 3% from peak
-    partial_profit_pct: float = 50.0  # Partial exit: sell 50% at target
+    # Profit taking thresholds (Phase 12: realistic for intraday futures)
+    profit_target_pct: float = 4.0  # Start taking profit at +4% (was 15%)
+    trailing_profit_pct: float = 1.5  # Take profit if drops 1.5% from peak (was 3%)
+    partial_profit_pct: float = 33.0  # Partial exit: sell 33% at each level
 
     # Conviction-based position reduction
     conviction_drop_threshold: float = 0.3  # Reduce if conviction drops > 30%
     min_conviction_to_hold: float = 0.4  # Close if conviction below this
 
-    # Time-based rules
-    max_holding_days: float = 30.0  # Maximum holding period (days)
-    stale_signal_hours: float = 24.0  # Signal is stale after 24 hours
+    # Time-based rules (Phase 12: per-strategy-type holding limits)
+    max_holding_days: float = 2.0  # Default max holding 2 days (was 30)
+    stale_signal_hours: float = 12.0  # Signal is stale after 12h (was 24h)
+    # Per-strategy-type max holding hours
+    max_holding_hours_intraday: float = 4.0  # Session, TTM, MeanReversion
+    max_holding_hours_swing: float = 48.0  # Momentum, MACD-v, Macro
+    max_holding_hours_pairs: float = 120.0  # StatArb, IndexSpread (5 days)
 
     # Market regime adjustments
     volatile_regime_loss_pct: float = 3.0  # Tighter stop in volatile markets
@@ -293,6 +312,16 @@ class PositionManagementConfig:
     # Stop-loss override rules
     allow_stop_override_in_trending: bool = True  # Can override stops in strong trends
     stop_override_min_conviction: float = 0.8  # Need 80%+ conviction to override
+
+    # Phase 12: Breakeven & Trailing Stop Configuration
+    breakeven_r_trigger: float = 1.0  # Move stop to breakeven at 1R profit
+    breakeven_buffer_pct: float = 0.1  # Add 0.1% above entry for spread protection
+    trailing_activation_r: float = 1.5  # Activate trailing stop at 1.5R
+    trailing_distance_r: float = 0.5  # Trail 0.5R behind peak
+    # Graduated partial profit levels
+    partial_profit_1_r: float = 1.5  # First partial exit at 1.5R (33%)
+    partial_profit_2_r: float = 2.5  # Second partial exit at 2.5R (33%)
+    partial_profit_3_r: float = 3.5  # Final exit at 3.5R or trailing stop
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for status reporting."""
@@ -311,6 +340,12 @@ class PositionManagementConfig:
             "trending_regime_profit_mult": self.trending_regime_profit_mult,
             "allow_stop_override_in_trending": self.allow_stop_override_in_trending,
             "stop_override_min_conviction": self.stop_override_min_conviction,
+            "breakeven_r_trigger": self.breakeven_r_trigger,
+            "trailing_activation_r": self.trailing_activation_r,
+            "trailing_distance_r": self.trailing_distance_r,
+            "max_holding_hours_intraday": self.max_holding_hours_intraday,
+            "max_holding_hours_swing": self.max_holding_hours_swing,
+            "max_holding_hours_pairs": self.max_holding_hours_pairs,
         }
 
 
@@ -420,6 +455,23 @@ class CIOAgent(DecisionAgent):
         self._deleveraging_active = False
         self._last_deleverage_check = datetime.now(timezone.utc)
 
+        # Market hours filtering - prevent decisions for US stocks/ETFs outside market hours
+        self._us_equity_symbols: set[str] = set(
+            s.upper() for s in config.parameters.get("_us_equity_symbols", [])
+        )
+        self._us_etf_symbols: set[str] = set(
+            s.upper() for s in config.parameters.get("_us_etf_symbols", [])
+        )
+        self._forex_symbols: set[str] = set(
+            s.upper() for s in config.parameters.get("_forex_symbols", [])
+        )
+        self._us_stock_symbols = self._us_equity_symbols | self._us_etf_symbols
+        self._filter_market_hours = config.parameters.get("filter_market_hours", True)
+
+        # No-trade symbols: ETFs are used for analysis (MacroAgent regime detection)
+        # but we never open positions on them
+        self._no_trade_symbols: set[str] = set(self._us_etf_symbols) | set(self._forex_symbols)
+
         # Signal history for correlation tracking (#Q5)
         self._signal_history: dict[str, list[tuple[datetime, float]]] = {}  # agent -> [(time, direction_val)]
         self._signal_correlation_matrix: dict[tuple[str, str], float] = {}  # (agent1, agent2) -> correlation
@@ -500,17 +552,28 @@ class CIOAgent(DecisionAgent):
             max_loss_pct=pm_config.get("max_loss_pct", 5.0),
             extended_loss_pct=pm_config.get("extended_loss_pct", 8.0),
             loss_time_threshold_hours=pm_config.get("loss_time_threshold_hours", 48.0),
-            profit_target_pct=pm_config.get("profit_target_pct", 15.0),
-            trailing_profit_pct=pm_config.get("trailing_profit_pct", 3.0),
-            partial_profit_pct=pm_config.get("partial_profit_pct", 50.0),
+            profit_target_pct=pm_config.get("profit_target_pct", 4.0),
+            trailing_profit_pct=pm_config.get("trailing_profit_pct", 1.5),
+            partial_profit_pct=pm_config.get("partial_profit_pct", 33.0),
             conviction_drop_threshold=pm_config.get("conviction_drop_threshold", 0.3),
             min_conviction_to_hold=pm_config.get("min_conviction_to_hold", 0.4),
-            max_holding_days=pm_config.get("max_holding_days", 30.0),
-            stale_signal_hours=pm_config.get("stale_signal_hours", 24.0),
+            max_holding_days=pm_config.get("max_holding_days", 2.0),
+            stale_signal_hours=pm_config.get("stale_signal_hours", 12.0),
             volatile_regime_loss_pct=pm_config.get("volatile_regime_loss_pct", 3.0),
             trending_regime_profit_mult=pm_config.get("trending_regime_profit_mult", 1.5),
             allow_stop_override_in_trending=pm_config.get("allow_stop_override_in_trending", True),
             stop_override_min_conviction=pm_config.get("stop_override_min_conviction", 0.8),
+            # Phase 12: Active Position Protection
+            breakeven_r_trigger=pm_config.get("breakeven_r_trigger", 1.0),
+            breakeven_buffer_pct=pm_config.get("breakeven_buffer_pct", 0.1),
+            trailing_activation_r=pm_config.get("trailing_activation_r", 1.5),
+            trailing_distance_r=pm_config.get("trailing_distance_r", 0.5),
+            partial_profit_1_r=pm_config.get("partial_profit_1_r", 1.5),
+            partial_profit_2_r=pm_config.get("partial_profit_2_r", 2.5),
+            partial_profit_3_r=pm_config.get("partial_profit_3_r", 3.5),
+            max_holding_hours_intraday=pm_config.get("max_holding_hours_intraday", 4.0),
+            max_holding_hours_swing=pm_config.get("max_holding_hours_swing", 48.0),
+            max_holding_hours_pairs=pm_config.get("max_holding_hours_pairs", 120.0),
         )
 
         # Position management state
@@ -531,6 +594,12 @@ class CIOAgent(DecisionAgent):
             "r_multiple_exits_3r": 0,
             "total_r_multiple_closed": 0.0,  # Sum of R-multiples at exit
             "closed_trade_count": 0,
+            # Phase 12: Active Position Protection
+            "breakeven_stops_set": 0,
+            "trailing_stops_triggered": 0,
+            "partial_profits_1r5": 0,
+            "partial_profits_2r5": 0,
+            "full_profit_exits": 0,
         }
 
         # =====================================================================
@@ -574,6 +643,104 @@ class CIOAgent(DecisionAgent):
         self._market_data_cache: dict[str, dict[str, deque]] = {}
         self._market_data_maxlen = 100  # Keep last 100 data points
 
+        # Decision analysis CSV file
+        self._decision_csv_path = "logs/decision_analysis.csv"
+        self._decision_csv_initialized = False
+        self._init_decision_csv()
+
+    def _init_decision_csv(self) -> None:
+        """Initialize the decision analysis CSV file with headers."""
+        os.makedirs(os.path.dirname(self._decision_csv_path), exist_ok=True)
+
+        # Define all possible agent columns
+        self._csv_agents = [
+            "MacroAgent", "MomentumAgent", "StatArbAgent", "MarketMakingAgent",
+            "SessionAgent", "IndexSpreadAgent", "TTMSqueezeAgent", "EventDrivenAgent",
+            "MeanReversionAgent", "MACDvAgent", "SentimentAgent", "ChartAnalysisAgent",
+            "ForecastingAgent"
+        ]
+
+        # Build headers: timestamp, symbol, then for each agent: direction, confidence, weight
+        headers = ["timestamp", "symbol"]
+        for agent in self._csv_agents:
+            headers.extend([f"{agent}_dir", f"{agent}_conf", f"{agent}_weight"])
+        headers.extend([
+            "long_votes", "short_votes", "total_weight", "threshold_40pct",
+            "consensus_direction", "weighted_confidence", "final_decision", "quantity"
+        ])
+
+        # Write headers if file doesn't exist or is empty
+        write_headers = True
+        if os.path.exists(self._decision_csv_path):
+            try:
+                with open(self._decision_csv_path, 'r') as f:
+                    first_line = f.readline()
+                    if first_line.startswith("timestamp"):
+                        write_headers = False
+            except Exception:
+                pass
+
+        if write_headers:
+            with open(self._decision_csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+            logger.info(f"Decision analysis CSV initialized: {self._decision_csv_path}")
+
+        self._decision_csv_initialized = True
+
+    def _log_decision_to_csv(
+        self,
+        agg: "SignalAggregation",
+        filtered_signals: dict[str, SignalEvent],
+        adjusted_weights: dict[str, float],
+        long_votes: float,
+        short_votes: float,
+        total_weight: float,
+        final_decision: str = "NONE",
+        quantity: int = 0
+    ) -> None:
+        """Log decision details to CSV for analysis."""
+        if not self._decision_csv_initialized:
+            return
+
+        try:
+            row = [
+                datetime.now(timezone.utc).isoformat(),
+                agg.symbol
+            ]
+
+            # Add each agent's data (direction, confidence, weight)
+            for agent in self._csv_agents:
+                if agent in filtered_signals:
+                    signal = filtered_signals[agent]
+                    row.extend([
+                        signal.direction.value,
+                        f"{signal.confidence:.3f}",
+                        f"{adjusted_weights.get(agent, 0):.3f}"
+                    ])
+                else:
+                    row.extend(["", "", ""])  # Empty if agent didn't contribute
+
+            # Add aggregation results
+            row.extend([
+                f"{long_votes:.3f}",
+                f"{short_votes:.3f}",
+                f"{total_weight:.3f}",
+                f"{total_weight * 0.4:.3f}",
+                agg.consensus_direction.value,
+                f"{agg.weighted_confidence:.3f}",
+                final_decision,
+                str(quantity)
+            ])
+
+            # Append to CSV
+            with open(self._decision_csv_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(row)
+
+        except Exception as e:
+            logger.warning(f"Failed to write decision to CSV: {e}")
+
     async def initialize(self) -> None:
         """Initialize CIO agent."""
         logger.info(f"CIOAgent initializing with weights: {self._weights}")
@@ -615,21 +782,52 @@ class CIOAgent(DecisionAgent):
 
         This is the correct fan-in implementation per CLAUDE.md:
         - Wait for ALL signal agents to report (or timeout)
+        - CHECK BARRIER VALIDITY before making decisions (Architecture Invariant #2)
         - Process signals together after synchronization
-        - Avoid making decisions on partial signals
+        - Avoid making decisions on partial/invalid signals
         """
         while self._running:
             try:
-                # Wait for barrier to complete (blocking call with timeout)
-                signals = await self._event_bus.wait_for_signals()
+                # Wait for barrier to complete (returns BarrierResult with validity)
+                result = await self._event_bus.wait_for_signals()
 
-                if signals:
-                    logger.info(f"CIO: Barrier complete with {len(signals)} signals")
-                    await self._process_barrier_signals(signals)
-                else:
-                    # CONC-003: No signals, wait longer to avoid busy wait
-                    # Use 0.5s minimum when no barrier is active to reduce CPU usage
+                if not result.signals:
+                    # No barrier active, wait to avoid busy loop
                     await asyncio.sleep(0.5)
+                    continue
+
+                # ============================================================
+                # Phase 12: CHECK BARRIER VALIDITY (Architecture Invariant #2)
+                # ============================================================
+                if not result.is_valid:
+                    # CRITICAL agents missing - DO NOT make new trading decisions
+                    logger.error(
+                        f"CIO: BARRIER INVALID - {len(result.missing_critical)} CRITICAL "
+                        f"agent(s) missing: {result.missing_critical}. "
+                        f"Skipping new signal processing. "
+                        f"({result.total_received}/{result.total_expected} agents responded)"
+                    )
+                    # Still manage existing positions (exits, breakeven, trailing)
+                    # but do NOT open new positions based on incomplete signals
+                    if self._position_management_enabled:
+                        await self._review_and_manage_positions(result.signals)
+                    self._position_management_stats.setdefault("barrier_failures", 0)
+                    self._position_management_stats["barrier_failures"] += 1
+                    continue
+
+                if not result.quorum_met:
+                    logger.warning(
+                        f"CIO: Barrier quorum NOT met "
+                        f"({result.total_received}/{result.total_expected}). "
+                        f"Missing: {result.missing_agents}. "
+                        f"Proceeding with reduced confidence."
+                    )
+
+                logger.info(
+                    f"CIO: Barrier complete with {len(result.signals)} signals "
+                    f"(valid={result.is_valid}, quorum={result.quorum_met})"
+                )
+                await self._process_barrier_signals(result.signals)
 
             except asyncio.CancelledError:
                 break
@@ -740,15 +938,23 @@ class CIOAgent(DecisionAgent):
                 if excess_exposure <= 0:
                     break
 
-                price = abs(pos.market_value / pos.quantity) if pos.quantity != 0 else pos.avg_cost
+                # For futures: market_value = price × multiplier × quantity
+                # So market_value / quantity = notional per contract (NOT the price!)
+                notional_per_contract = abs(pos.market_value / pos.quantity) if pos.quantity != 0 else pos.avg_cost
                 position_value = abs(pos.market_value)
 
                 # Determine how much of this position to close
                 close_value = min(position_value * 0.5, excess_exposure)  # Close max 50% at a time
-                close_qty = int(close_value / price)
+                # Calculate contracts to close (minimum 1 to make progress)
+                close_qty = max(1, int(close_value / notional_per_contract)) if notional_per_contract > 0 else 1
+
+                # Don't close more than we have
+                close_qty = min(close_qty, abs(pos.quantity))
 
                 if close_qty <= 0:
                     continue
+
+                logger.info(f"CIO DELEVERAGING calc: {symbol} notional/contract=${notional_per_contract:,.0f} close_value=${close_value:,.0f} -> close_qty={close_qty}")
 
                 # Determine sell direction based on current position
                 action = OrderSide.SELL if pos.quantity > 0 else OrderSide.BUY
@@ -962,10 +1168,14 @@ class CIOAgent(DecisionAgent):
         Decision hierarchy (evaluated in order):
         1. Emergency loss cut (extended_loss_pct)
         2. Standard loss cut (max_loss_pct + time condition)
-        3. Take profit (profit_target_pct + trailing)
-        4. Conviction-based reduction
-        5. Time-based exit (max_holding_days)
-        6. Stop-loss override check (special situations)
+        3. BREAKEVEN STOP at 1R (Phase 12 - move stop to entry)
+        4. TRAILING STOP at 1.5R+ (Phase 12 - trail behind peak)
+        5. GRADUATED PARTIAL PROFITS at 1.5R, 2.5R, 3.5R (Phase 12)
+        6. Take profit (profit_target_pct + trailing from peak)
+        7. Conviction-based reduction
+        8. TIME-BASED EXIT per strategy type (Phase 12)
+        9. Stale signal exit
+        10. Stop-loss override check (trending markets)
         """
         config = self._position_management_config
         regime = self._current_regime
@@ -1001,54 +1211,140 @@ class CIOAgent(DecisionAgent):
                     ),
                 )
 
-        # 3. TAKE PROFIT - Profit target reached
+        # =====================================================================
+        # Phase 12: ACTIVE POSITION PROTECTION SYSTEM
+        # =====================================================================
+        r_mult = pos.r_multiple
+
+        # 3. BREAKEVEN STOP - Move stop to entry price at 1R profit
+        if (
+            r_mult >= config.breakeven_r_trigger
+            and not pos.stop_moved_to_breakeven
+            and pos.initial_risk > 0
+        ):
+            buffer = pos.entry_price * (config.breakeven_buffer_pct / 100)
+            if pos.is_long:
+                new_stop = pos.entry_price + buffer  # Slightly above entry
+            else:
+                new_stop = pos.entry_price - buffer  # Slightly below entry
+            pos.stop_loss_level = new_stop
+            pos.stop_moved_to_breakeven = True
+            self._position_management_stats["breakeven_stops_set"] += 1
+            logger.info(
+                f"CIO: {pos.symbol} reached {r_mult:.1f}R - BREAKEVEN STOP set at "
+                f"${new_stop:.2f} (entry ${pos.entry_price:.2f})"
+            )
+
+        # 4. TRAILING STOP - Activate at 1.5R, trail 0.5R behind peak
+        if (
+            r_mult >= config.trailing_activation_r
+            and pos.initial_risk > 0
+        ):
+            trail_distance = pos.initial_risk * config.trailing_distance_r
+            if pos.is_long:
+                new_trailing = pos.highest_price - trail_distance
+            else:
+                new_trailing = pos.lowest_price + trail_distance
+
+            # Only update if new trailing level is better than current
+            if pos.trailing_stop_level is None or (
+                (pos.is_long and new_trailing > pos.trailing_stop_level) or
+                (not pos.is_long and new_trailing < pos.trailing_stop_level)
+            ):
+                pos.trailing_stop_level = new_trailing
+                pos.trailing_stop_active = True
+                pos.stop_loss_level = new_trailing  # Update actual stop
+                logger.debug(
+                    f"CIO: {pos.symbol} trailing stop updated to ${new_trailing:.2f} "
+                    f"(peak R: {pos.peak_r_multiple:.1f}R, current: {r_mult:.1f}R)"
+                )
+
+        # 4b. CHECK TRAILING STOP HIT
+        if pos.trailing_stop_active and pos.trailing_stop_level is not None:
+            trailing_hit = (
+                (pos.is_long and pos.current_price <= pos.trailing_stop_level) or
+                (not pos.is_long and pos.current_price >= pos.trailing_stop_level)
+            )
+            if trailing_hit:
+                self._position_management_stats["trailing_stops_triggered"] += 1
+                return self._create_take_profit_decision(
+                    pos,
+                    reason=(
+                        f"TRAILING STOP hit at ${pos.trailing_stop_level:.2f} "
+                        f"(peak {pos.peak_r_multiple:.1f}R, exit {r_mult:.1f}R)"
+                    ),
+                    partial_exit=False,
+                )
+
+        # 5. GRADUATED PARTIAL PROFIT TAKING (1.5R → 2.5R → 3.5R)
+        if r_mult > 0 and pos.initial_risk > 0:
+            # First partial: 33% at 1.5R
+            if r_mult >= config.partial_profit_1_r and pos.partial_exits_taken == 0:
+                pos.partial_exits_taken = 1
+                self._position_management_stats["partial_profits_1r5"] += 1
+                logger.info(
+                    f"CIO: {pos.symbol} reached {r_mult:.1f}R - "
+                    f"taking 33% partial profit (1st tranche)"
+                )
+                return self._create_take_profit_decision(
+                    pos,
+                    reason=f"R-Multiple {r_mult:.1f}R - partial profit 1/3 at {config.partial_profit_1_r}R",
+                    partial_exit=True,
+                    partial_pct=33.0,
+                )
+
+            # Second partial: 33% at 2.5R
+            if r_mult >= config.partial_profit_2_r and pos.partial_exits_taken == 1:
+                pos.partial_exits_taken = 2
+                self._position_management_stats["partial_profits_2r5"] += 1
+                logger.info(
+                    f"CIO: {pos.symbol} reached {r_mult:.1f}R - "
+                    f"taking 33% partial profit (2nd tranche)"
+                )
+                return self._create_take_profit_decision(
+                    pos,
+                    reason=f"R-Multiple {r_mult:.1f}R - partial profit 2/3 at {config.partial_profit_2_r}R",
+                    partial_exit=True,
+                    partial_pct=50.0,  # 50% of remaining = ~33% of original
+                )
+
+            # Final exit: 100% at 3.5R or let trailing stop handle it
+            if r_mult >= config.partial_profit_3_r and pos.partial_exits_taken == 2:
+                pos.partial_exits_taken = 3
+                self._position_management_stats["full_profit_exits"] += 1
+                logger.info(
+                    f"CIO: {pos.symbol} reached {r_mult:.1f}R - "
+                    f"FULL EXIT at {config.partial_profit_3_r}R"
+                )
+                return self._create_take_profit_decision(
+                    pos,
+                    reason=f"R-Multiple {r_mult:.1f}R - full exit at {config.partial_profit_3_r}R target",
+                    partial_exit=False,
+                )
+
+            # Log R-multiple for tracking
+            if abs(r_mult) >= 0.5:
+                logger.debug(
+                    f"CIO: {pos.symbol} R={r_mult:.2f} (peak={pos.peak_r_multiple:.2f}R, "
+                    f"partials={pos.partial_exits_taken}, BE={pos.stop_moved_to_breakeven}, "
+                    f"trail={pos.trailing_stop_active})"
+                )
+
+        # 6. TAKE PROFIT - Percentage-based (fallback for positions without R-multiple)
         if pos.pnl_pct >= effective_profit_pct:
             # Check trailing condition
-            if pos.is_long and pos.drawdown_from_peak_pct >= config.trailing_profit_pct:
+            pullback = pos.drawdown_from_peak_pct if pos.is_long else pos.rally_from_trough_pct
+            if pullback >= config.trailing_profit_pct:
                 return self._create_take_profit_decision(
                     pos,
                     reason=(
                         f"Take profit: Gain {pos.pnl_pct:.1f}% with "
-                        f"{pos.drawdown_from_peak_pct:.1f}% pullback from peak"
+                        f"{pullback:.1f}% pullback from peak"
                     ),
-                    partial_exit=(config.partial_profit_pct < 100),
-                )
-            elif not pos.is_long and pos.rally_from_trough_pct >= config.trailing_profit_pct:
-                return self._create_take_profit_decision(
-                    pos,
-                    reason=(
-                        f"Take profit on short: Gain {pos.pnl_pct:.1f}% with "
-                        f"{pos.rally_from_trough_pct:.1f}% rally from trough"
-                    ),
-                    partial_exit=(config.partial_profit_pct < 100),
-                )
-
-        # 3.5 R-MULTIPLE BASED MANAGEMENT (Phase 3 Enhancement)
-        r_mult = pos.r_multiple
-        if r_mult != 0.0:
-            # Take partial profit at 2R
-            if r_mult >= 2.0 and not getattr(pos, '_took_2r_profit', False):
-                logger.info(f"CIO: {pos.symbol} reached 2R ({r_mult:.1f}R) - taking partial profit")
-                pos._took_2r_profit = True  # type: ignore
-                return self._create_take_profit_decision(
-                    pos,
-                    reason=f"R-Multiple reached {r_mult:.1f}R - partial profit taking",
-                    partial_exit=True,
-                )
-
-            # At 3R, consider full exit if conviction dropping
-            if r_mult >= 3.0 and pos.current_conviction < pos.original_conviction * 0.8:
-                return self._create_take_profit_decision(
-                    pos,
-                    reason=f"R-Multiple {r_mult:.1f}R with declining conviction - full exit",
                     partial_exit=False,
                 )
 
-            # Log R-multiple periodically for tracking
-            if abs(r_mult) >= 1.0:
-                logger.debug(f"CIO: {pos.symbol} R-Multiple: {r_mult:.2f}R (PnL: {pos.pnl_pct:.1f}%)")
-
-        # 4. CONVICTION-BASED REDUCTION
+        # 7. CONVICTION-BASED REDUCTION
         if pos.original_conviction > 0:
             conviction_drop = (pos.original_conviction - pos.current_conviction) / pos.original_conviction
             if conviction_drop >= config.conviction_drop_threshold:
@@ -1061,7 +1357,29 @@ class CIOAgent(DecisionAgent):
                     ),
                 )
 
-        # 5. CONVICTION TOO LOW TO HOLD
+        # 8. TIME-BASED EXIT (Phase 12: per-strategy-type holding limits)
+        max_hours = self._get_max_holding_hours(pos, config)
+        if pos.holding_hours >= max_hours:
+            # If profitable, take profit; if losing, close loser
+            if pos.pnl_pct > 0:
+                return self._create_take_profit_decision(
+                    pos,
+                    reason=(
+                        f"Time exit: held {pos.holding_hours:.1f}h (max {max_hours:.0f}h for "
+                        f"{pos.strategy_type or 'default'}), locking in {pos.pnl_pct:.1f}% gain"
+                    ),
+                    partial_exit=False,
+                )
+            else:
+                return self._create_close_loser_decision(
+                    pos,
+                    reason=(
+                        f"Time exit: held {pos.holding_hours:.1f}h (max {max_hours:.0f}h for "
+                        f"{pos.strategy_type or 'default'}), cutting {pos.pnl_pct:.1f}% loss"
+                    ),
+                )
+
+        # 9. STALE SIGNAL EXIT
         if pos.current_conviction < config.min_conviction_to_hold:
             stale_hours = config.stale_signal_hours
             if pos.last_signal_time:
@@ -1075,21 +1393,14 @@ class CIOAgent(DecisionAgent):
                         ),
                     )
 
-        # 6. TIME-BASED EXIT
-        max_hours = config.max_holding_days * 24
-        if pos.holding_hours >= max_hours:
-            return self._create_close_loser_decision(
-                pos,
-                reason=f"Maximum holding period exceeded ({pos.holding_hours / 24:.1f} days)",
-            )
-
-        # 7. STOP-LOSS OVERRIDE CHECK (for trending markets)
+        # 10. STOP-LOSS OVERRIDE CHECK (for trending markets)
         if (
             config.allow_stop_override_in_trending and
             regime == MarketRegime.TRENDING and
             pos.stop_loss_level and
             pos.current_conviction >= config.stop_override_min_conviction and
             not pos.stop_loss_overridden
+            and not pos.stop_moved_to_breakeven  # Don't override breakeven stops
         ):
             # Check if price is near stop-loss but position still looks good
             if pos.is_long:
@@ -1101,9 +1412,39 @@ class CIOAgent(DecisionAgent):
                     )
                     pos.stop_loss_overridden = True
                     self._position_management_stats["stop_overrides"] += 1
-                    # Don't return a decision - just override the stop
 
         return None
+
+    def _get_max_holding_hours(
+        self,
+        pos: TrackedPosition,
+        config: PositionManagementConfig,
+    ) -> float:
+        """
+        Get maximum holding hours based on strategy type.
+
+        Phase 12: Different strategies have different optimal holding periods.
+        Intraday strategies (Session, TTM, MeanReversion) should close within 4h.
+        Swing strategies (Momentum, MACD-v, Macro) can hold 48h.
+        Pairs/spread strategies (StatArb, IndexSpread) can hold 5 days.
+        """
+        strategy_type = pos.strategy_type.lower() if pos.strategy_type else ""
+
+        # Map contributing strategies to type
+        intraday_agents = {"SessionAgent", "TTMSqueezeAgent", "MeanReversionAgent", "EventDrivenAgent"}
+        swing_agents = {"MomentumAgent", "MACDvAgent", "MacroAgent", "MarketMakingAgent"}
+        pairs_agents = {"StatArbAgent", "IndexSpreadAgent"}
+
+        strategies = set(pos.contributing_strategies)
+
+        if strategy_type == "intraday" or strategies & intraday_agents:
+            return config.max_holding_hours_intraday
+        elif strategy_type == "pairs" or strategies & pairs_agents:
+            return config.max_holding_hours_pairs
+        elif strategy_type == "swing" or strategies & swing_agents:
+            return config.max_holding_hours_swing
+        else:
+            return config.max_holding_days * 24
 
     def _get_regime_adjusted_loss_threshold(self, regime: MarketRegime) -> float:
         """Get loss threshold adjusted for market regime."""
@@ -1167,10 +1508,14 @@ class CIOAgent(DecisionAgent):
         pos: TrackedPosition,
         reason: str,
         partial_exit: bool = False,
+        partial_pct: float = 33.0,
     ) -> DecisionEvent:
         """Create a decision to take profit on a winning position."""
         action = OrderSide.SELL if pos.is_long else OrderSide.BUY
-        quantity = pos.quantity if not partial_exit else int(pos.quantity * 0.5)
+        if partial_exit:
+            quantity = max(1, int(pos.quantity * partial_pct / 100))
+        else:
+            quantity = pos.quantity
 
         decision = DecisionEvent(
             source_agent=self.name,
@@ -1304,6 +1649,10 @@ class CIOAgent(DecisionAgent):
             # Default to 2% of entry price if no stop-loss defined
             initial_risk = entry_price * 0.02
 
+        # Phase 12: Determine strategy type for time-based exits
+        strategies = contributing_strategies or []
+        strategy_type = self._classify_strategy_type(strategies)
+
         self._tracked_positions[symbol] = TrackedPosition(
             symbol=symbol,
             quantity=quantity,
@@ -1316,17 +1665,33 @@ class CIOAgent(DecisionAgent):
             original_conviction=conviction,
             current_conviction=conviction,
             last_signal_time=datetime.now(timezone.utc),
-            contributing_strategies=contributing_strategies or [],
+            contributing_strategies=strategies,
             stop_loss_level=stop_loss,
             take_profit_level=take_profit,
             initial_risk=initial_risk,  # Phase 3: R-Multiple tracking
+            strategy_type=strategy_type,  # Phase 12: for time-based exits
         )
 
         logger.info(
             f"CIO: Registered new position {symbol}: "
             f"{'LONG' if is_long else 'SHORT'} {quantity} @ ${entry_price:.2f} "
-            f"(conviction: {conviction:.1%})"
+            f"(conviction: {conviction:.1%}, type: {strategy_type}, "
+            f"1R=${initial_risk:.2f}, SL=${stop_loss or 0:.2f})"
         )
+
+    def _classify_strategy_type(self, strategies: list[str]) -> str:
+        """Classify position as intraday/swing/pairs based on contributing strategies."""
+        intraday = {"SessionAgent", "TTMSqueezeAgent", "MeanReversionAgent", "EventDrivenAgent"}
+        pairs = {"StatArbAgent", "IndexSpreadAgent"}
+        # swing is the default
+
+        strategy_set = set(strategies)
+        if strategy_set & intraday:
+            return "intraday"
+        elif strategy_set & pairs:
+            return "pairs"
+        else:
+            return "swing"
 
     def get_tracked_positions(self) -> dict[str, dict[str, Any]]:
         """Get all tracked positions with their status."""
@@ -1347,6 +1712,14 @@ class CIOAgent(DecisionAgent):
                 "highest_price": pos.highest_price,
                 "drawdown_from_peak_pct": pos.drawdown_from_peak_pct,
                 "contributing_strategies": pos.contributing_strategies,
+                # Phase 12: Active Position Protection
+                "r_multiple": pos.r_multiple,
+                "peak_r_multiple": pos.peak_r_multiple,
+                "breakeven_stop_set": pos.stop_moved_to_breakeven,
+                "trailing_stop_active": pos.trailing_stop_active,
+                "trailing_stop_level": pos.trailing_stop_level,
+                "partial_exits_taken": pos.partial_exits_taken,
+                "strategy_type": pos.strategy_type,
             }
             for symbol, pos in self._tracked_positions.items()
         }
@@ -1489,6 +1862,38 @@ class CIOAgent(DecisionAgent):
         """
         self._stress_correlation_cache = dict(stress_correlations)
 
+    def _is_market_open_for_symbol(self, symbol: str) -> bool:
+        """
+        Check if trading is currently allowed for this symbol.
+
+        US stocks/ETFs: only during regular market hours (9:30-16:00 ET, Mon-Fri).
+        Futures: always allowed (nearly 24h trading).
+        """
+        sym = symbol.upper()
+
+        # Only filter US stocks/ETFs by market hours
+        if sym not in self._us_stock_symbols:
+            return True  # Futures, pairs, etc. - always allowed
+
+        try:
+            from zoneinfo import ZoneInfo
+            et_tz = ZoneInfo("America/New_York")
+        except ImportError:
+            from datetime import timezone as tz
+            # Fallback: approximate ET as UTC-5
+            et_tz = timezone(timedelta(hours=-5))
+
+        now_et = datetime.now(timezone.utc).astimezone(et_tz)
+
+        # Weekend check
+        if now_et.weekday() >= 5:
+            return False
+
+        # Regular US market hours: 9:30 AM - 4:00 PM ET
+        market_open = dt_time(9, 30)
+        market_close = dt_time(16, 0)
+        return market_open <= now_et.time() <= market_close
+
     async def _make_decision_from_aggregation(self, agg: SignalAggregation) -> None:
         """
         Make a trading decision from aggregated signals (post-barrier).
@@ -1498,6 +1903,14 @@ class CIOAgent(DecisionAgent):
         """
         symbol = agg.symbol
 
+        # No-trade filter: ETFs (data-only for regime detection) and forex (IB paper rejects)
+        if symbol.upper() in self._no_trade_symbols:
+            return
+
+        # Filter by market hours - prevent decisions for US stocks when market is closed
+        if self._filter_market_hours and not self._is_market_open_for_symbol(symbol):
+            return
+
         # Aggregate signals
         self._aggregate_signals(agg)
 
@@ -1506,7 +1919,7 @@ class CIOAgent(DecisionAgent):
             rejection_reason = (
                 f"Insufficient conviction: {agg.weighted_confidence:.2f} < {self._min_conviction}"
             )
-            logger.debug(f"CIO: {rejection_reason} for {symbol}")
+            logger.info(f"CIO: {rejection_reason} for {symbol}")
             # Audit log rejected decision (COMPLIANCE REQUIREMENT)
             self._audit_logger.log_agent_event(
                 agent_name=self.name,
@@ -1607,6 +2020,7 @@ class CIOAgent(DecisionAgent):
 
         # Determine action
         if agg.consensus_direction == SignalDirection.FLAT:
+            logger.info(f"CIO: No consensus for {symbol} (FLAT) - skipping decision")
             # Audit log rejected decision (COMPLIANCE REQUIREMENT)
             self._audit_logger.log_agent_event(
                 agent_name=self.name,
@@ -1626,6 +2040,7 @@ class CIOAgent(DecisionAgent):
         quantity = self._calculate_position_size(agg)
 
         if quantity == 0:
+            logger.info(f"CIO: Position size=0 for {symbol} (conf={agg.weighted_confidence:.2f}, str={agg.weighted_strength:.2f}) - skipping")
             # Audit log rejected decision (COMPLIANCE REQUIREMENT)
             self._audit_logger.log_agent_event(
                 agent_name=self.name,
@@ -1872,6 +2287,25 @@ class CIOAgent(DecisionAgent):
             agg.consensus_direction = SignalDirection.SHORT
         else:
             agg.consensus_direction = SignalDirection.FLAT
+
+        # DEBUG: Log aggregation details
+        logger.info(
+            f"CIO AGG {agg.symbol}: LONG={long_votes:.2f} SHORT={short_votes:.2f} "
+            f"total={total_weight:.2f} (40%={total_weight*0.4:.2f}) "
+            f"-> {agg.consensus_direction.value} conf={agg.weighted_confidence:.2f}"
+        )
+
+        # Log to CSV for analysis (final_decision and quantity will be updated later if decision is made)
+        self._log_decision_to_csv(
+            agg=agg,
+            filtered_signals=filtered_signals,
+            adjusted_weights=adjusted_weights,
+            long_votes=long_votes,
+            short_votes=short_votes,
+            total_weight=total_weight,
+            final_decision="PENDING",
+            quantity=0
+        )
 
         agg.regime_adjusted = self._use_dynamic_weights
 

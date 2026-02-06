@@ -765,10 +765,11 @@ class TestConfiguration:
         assert execution_agent._algo_timeout_seconds == 3600
 
     def test_vwap_configuration(self, execution_agent):
-        """Test VWAP configuration."""
+        """Test VWAP configuration with industry-standard limits."""
         assert execution_agent._vwap_target_participation == 0.10
         assert execution_agent._vwap_min_participation == 0.05
-        assert execution_agent._vwap_max_participation == 0.25
+        # Max 12% to avoid market impact detection (industry standard)
+        assert execution_agent._vwap_max_participation == 0.12
 
     def test_market_impact_params(self, execution_agent):
         """Test market impact model parameters."""
@@ -777,6 +778,76 @@ class TestConfiguration:
         assert "eta" in params
         assert "gamma" in params
         assert "alpha" in params
+
+    def test_almgren_chriss_eta_gamma_ratio_5_to_1(self):
+        """Verify Almgren-Chriss η/γ=5:1 ratio (Phase 11 correction)."""
+        # Use default config (no max_slippage_bps override) to test code defaults
+        config = AgentConfig(
+            name="ExecutionAgent",
+            enabled=True,
+            parameters={},
+        )
+        bus = MagicMock()
+        bus.publish = AsyncMock()
+        bus.subscribe = MagicMock()
+        logger_mock = MagicMock()
+        logger_mock.log_event = MagicMock()
+        logger_mock.log_agent_event = MagicMock()
+        logger_mock.log_order = MagicMock()
+        broker = MagicMock()
+        broker.on_fill = MagicMock()
+
+        agent = ExecutionAgentImpl(config, bus, logger_mock, broker)
+        params = agent._market_impact_params
+
+        ratio = params["eta"] / params["gamma"]
+        assert abs(ratio - 5.0) < 0.01, (
+            f"Almgren-Chriss η/γ ratio should be 5:1, got {ratio:.2f}:1"
+        )
+
+    def test_slippage_cap_default_10bps(self):
+        """Verify default slippage cap is 10bps (Phase 11 correction from 50bps)."""
+        config = AgentConfig(
+            name="ExecutionAgent",
+            enabled=True,
+            parameters={},
+        )
+        bus = MagicMock()
+        bus.publish = AsyncMock()
+        bus.subscribe = MagicMock()
+        logger_mock = MagicMock()
+        logger_mock.log_event = MagicMock()
+        logger_mock.log_agent_event = MagicMock()
+        logger_mock.log_order = MagicMock()
+        broker = MagicMock()
+        broker.on_fill = MagicMock()
+
+        agent = ExecutionAgentImpl(config, bus, logger_mock, broker)
+        assert agent._max_slippage_bps == 10, (
+            f"Default slippage cap should be 10bps, got {agent._max_slippage_bps}"
+        )
+
+    def test_zombie_order_timeout_default_30s(self):
+        """Verify zombie order timeout is 30s (Phase 10)."""
+        config = AgentConfig(
+            name="ExecutionAgent",
+            enabled=True,
+            parameters={},
+        )
+        bus = MagicMock()
+        bus.publish = AsyncMock()
+        bus.subscribe = MagicMock()
+        logger_mock = MagicMock()
+        logger_mock.log_event = MagicMock()
+        logger_mock.log_agent_event = MagicMock()
+        logger_mock.log_order = MagicMock()
+        broker = MagicMock()
+        broker.on_fill = MagicMock()
+
+        agent = ExecutionAgentImpl(config, bus, logger_mock, broker)
+        assert agent._zombie_order_timeout_seconds == 30.0, (
+            f"Zombie timeout should be 30s, got {agent._zombie_order_timeout_seconds}"
+        )
 
 
 # ============================================================================

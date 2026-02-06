@@ -165,7 +165,7 @@ class HistoricalWarmup:
                     volume=bar.get("volume", 0),
                     high=bar.get("high", 0),
                     low=bar.get("low", 0),
-                    open=bar.get("open", 0),
+                    open_price=bar.get("open", 0),
                 )
 
                 # Publish directly to event bus (bypasses normal flow)

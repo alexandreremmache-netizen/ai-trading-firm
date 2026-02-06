@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trading Firm | Bloomberg V2</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- ApexCharts -->
+    <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.44.0/dist/apexcharts.min.js"></script>
+    <!-- Alpine.js -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.3/dist/cdn.min.js"></script>
+    <!-- Font -->
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'bb-bg': '#0a0e17',
+                        'bb-panel': '#111827',
+                        'bb-border': '#1f2937',
+                        'bb-card': '#1a1f2e',
+                        'bb-hover': '#252b3b',
+                        'bb-green': '#00d4aa',
+                        'bb-red': '#ff4757',
+                        'bb-blue': '#1e90ff',
+                        'bb-amber': '#ffa726',
+                        'bb-text': '#e8eaed',
+                        'bb-muted': '#6b7280',
+                    },
+                    fontFamily: {
+                        'mono': ['JetBrains Mono', 'monospace'],
+                        'sans': ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        body { background: #0a0e17; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #111827; }
+        ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #4b5563; }
+
+        .kpi-card {
+            background: linear-gradient(135deg, #1a1f2e 0%, #111827 100%);
+            border: 1px solid #1f2937;
+            transition: all 0.2s ease;
+        }
+        .kpi-card:hover {
+            border-color: #374151;
+            transform: translateY(-1px);
+        }
+
+        .panel {
+            background: #111827;
+            border: 1px solid #1f2937;
+            border-radius: 8px;
+        }
+
+        .panel-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid #1f2937;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .status-dot.active { background: #00d4aa; box-shadow: 0 0 6px #00d4aa; }
+        .status-dot.warning { background: #ffa726; box-shadow: 0 0 6px #ffa726; }
+        .status-dot.danger { background: #ff4757; box-shadow: 0 0 6px #ff4757; }
+        .status-dot.inactive { background: #4b5563; }
+
+        .apexcharts-tooltip { background: #1a1f2e !important; border: 1px solid #374151 !important; }
+        .apexcharts-tooltip-title { background: #252b3b !important; border-bottom: 1px solid #374151 !important; }
+
+        .signal-badge {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+        .signal-long { background: rgba(0,212,170,0.15); color: #00d4aa; border: 1px solid rgba(0,212,170,0.3); }
+        .signal-short { background: rgba(255,71,87,0.15); color: #ff4757; border: 1px solid rgba(255,71,87,0.3); }
+        .signal-flat { background: rgba(107,114,128,0.15); color: #9ca3af; border: 1px solid rgba(107,114,128,0.3); }
+
+        @keyframes pulse-green { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+        .pulse-green { animation: pulse-green 2s infinite; }
+
+        .position-row:hover { background: #1a1f2e; }
+
+        /* Progress bar for TP/SL */
+        .tp-sl-bar {
+            height: 4px;
+            border-radius: 2px;
+            background: #1f2937;
+            position: relative;
+            overflow: hidden;
+        }
+        .tp-sl-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.5s ease;
+        }
+    </style>
+</head>
+
+<body class="font-mono text-bb-text min-h-screen" x-data="dashboard()">
+
+    <!-- ============================================================ -->
+    <!-- HEADER BAR -->
+    <!-- ============================================================ -->
+    <header class="bg-bb-panel border-b border-bb-border px-4 py-2">
+        <div class="flex items-center justify-between">
+            <!-- Left: Logo + Title -->
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2">
+                    <span class="text-bb-blue font-bold text-lg">&#9670;</span>
+                    <div>
+                        <div class="text-sm font-bold tracking-wider">AI TRADING FIRM</div>
+                        <div class="text-[10px] text-bb-muted tracking-widest">BLOOMBERG V2</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Center: Key Metrics -->
+            <div class="flex items-center gap-6 text-xs">
+                <div class="text-center">
+                    <div class="text-bb-muted">P&L</div>
+                    <div class="font-semibold" :class="data.performance?.today_pnl >= 0 ? 'text-bb-green' : 'text-bb-red'">
+                        <span x-text="formatCurrency(data.performance?.today_pnl || 0)"></span>
+                    </div>
+                </div>
+                <div class="text-center">
+                    <div class="text-bb-muted">SHARPE</div>
+                    <div class="font-semibold text-bb-text" x-text="formatNum(data.performance?.kpis?.sharpe_ratio, 2)">-</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-bb-muted">WIN</div>
+                    <div class="font-semibold text-bb-text" x-text="formatPct(data.performance?.kpis?.win_rate)">-</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-bb-muted">DD</div>
+                    <div class="font-semibold text-bb-red" x-text="formatPct(data.risk?.current_drawdown_pct)">-</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-bb-muted">VaR</div>
+                    <div class="font-semibold text-bb-amber" x-text="formatCurrency(data.risk?.var_95 || 0)">-</div>
+                </div>
+            </div>
+
+            <!-- Right: Status -->
+            <div class="flex items-center gap-3 text-xs">
+                <div class="flex items-center gap-1.5">
+                    <span class="status-dot" :class="connected ? 'active pulse-green' : 'danger'"></span>
+                    <span x-text="connected ? 'LIVE' : 'OFFLINE'" :class="connected ? 'text-bb-green' : 'text-bb-red'"></span>
+                </div>
+                <div class="text-bb-muted" x-text="currentTime"></div>
+                <template x-if="data.risk?.kill_switch_active">
+                    <div class="bg-bb-red/20 text-bb-red px-2 py-0.5 rounded text-[10px] font-bold tracking-wider">
+                        KILL SWITCH
+                    </div>
+                </template>
+            </div>
+        </div>
+    </header>
+
+    <!-- ============================================================ -->
+    <!-- MAIN 6-PANEL GRID -->
+    <!-- ============================================================ -->
+    <main class="p-3 grid grid-cols-1 lg:grid-cols-3 gap-3" style="height: calc(100vh - 52px);">
+
+        <!-- ======================================================== -->
+        <!-- PANEL 1: PERFORMANCE -->
+        <!-- ======================================================== -->
+        <div class="panel flex flex-col overflow-hidden">
+            <div class="panel-header">
+                <span class="text-sm font-semibold tracking-wider text-bb-blue">PERFORMANCE</span>
+                <span class="text-[10px] text-bb-muted" x-text="data.performance?.kpis?.total_trades + ' trades'">0 trades</span>
+            </div>
+            <div class="p-3 flex-1 overflow-y-auto">
+                <!-- KPI Cards Row -->
+                <div class="grid grid-cols-4 gap-2 mb-3">
+                    <div class="kpi-card rounded-lg p-2.5 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-1">SHARPE</div>
+                        <div class="text-lg font-bold" :class="kpiColor(data.performance?.kpis?.sharpe_ratio, 1.0)"
+                             x-text="formatNum(data.performance?.kpis?.sharpe_ratio, 2)">-</div>
+                    </div>
+                    <div class="kpi-card rounded-lg p-2.5 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-1">SORTINO</div>
+                        <div class="text-lg font-bold" :class="kpiColor(data.performance?.kpis?.sortino_ratio, 1.5)"
+                             x-text="formatNum(data.performance?.kpis?.sortino_ratio, 2)">-</div>
+                    </div>
+                    <div class="kpi-card rounded-lg p-2.5 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-1">CALMAR</div>
+                        <div class="text-lg font-bold" :class="kpiColor(data.performance?.kpis?.calmar_ratio, 2.0)"
+                             x-text="formatNum(data.performance?.kpis?.calmar_ratio, 2)">-</div>
+                    </div>
+                    <div class="kpi-card rounded-lg p-2.5 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-1">PROFIT F.</div>
+                        <div class="text-lg font-bold" :class="kpiColor(data.performance?.kpis?.profit_factor, 1.5)"
+                             x-text="formatNum(data.performance?.kpis?.profit_factor, 2)">-</div>
+                    </div>
+                </div>
+
+                <!-- Second row KPIs -->
+                <div class="grid grid-cols-4 gap-2 mb-3">
+                    <div class="kpi-card rounded-lg p-2 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-0.5">EXPECT.</div>
+                        <div class="text-sm font-semibold" :class="(data.performance?.kpis?.expectancy || 0) >= 0 ? 'text-bb-green' : 'text-bb-red'"
+                             x-text="formatCurrency(data.performance?.kpis?.expectancy || 0)">-</div>
+                    </div>
+                    <div class="kpi-card rounded-lg p-2 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-0.5">RECOVERY</div>
+                        <div class="text-sm font-semibold text-bb-text"
+                             x-text="formatNum(data.performance?.kpis?.recovery_factor, 2)">-</div>
+                    </div>
+                    <div class="kpi-card rounded-lg p-2 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-0.5">PAYOFF</div>
+                        <div class="text-sm font-semibold text-bb-text"
+                             x-text="formatNum(data.performance?.kpis?.payoff_ratio, 2)">-</div>
+                    </div>
+                    <div class="kpi-card rounded-lg p-2 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-0.5">AVG R</div>
+                        <div class="text-sm font-semibold" :class="(data.performance?.kpis?.avg_r_multiple || 0) >= 0 ? 'text-bb-green' : 'text-bb-red'"
+                             x-text="formatNum(data.performance?.kpis?.avg_r_multiple, 2)">-</div>
+                    </div>
+                </div>
+
+                <!-- Equity Curve Chart -->
+                <div id="equity-chart" class="w-full" style="height: 160px;"></div>
+
+                <!-- Daily P&L Bar Chart -->
+                <div id="daily-pnl-chart" class="w-full mt-2" style="height: 100px;"></div>
+            </div>
+        </div>
+
+        <!-- ======================================================== -->
+        <!-- PANEL 2: RISK MONITOR -->
+        <!-- ======================================================== -->
+        <div class="panel flex flex-col overflow-hidden">
+            <div class="panel-header">
+                <span class="text-sm font-semibold tracking-wider text-bb-amber">RISK MONITOR</span>
+                <span class="status-dot" :class="data.risk?.kill_switch_active ? 'danger' : 'active'"></span>
+            </div>
+            <div class="p-3 flex-1 overflow-y-auto">
+                <!-- Risk Gauges -->
+                <div class="grid grid-cols-2 gap-3 mb-3">
+                    <!-- VaR Gauge -->
+                    <div class="kpi-card rounded-lg p-3">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-1">VaR 95%</div>
+                        <div class="text-xl font-bold text-bb-amber" x-text="formatCurrency(data.risk?.var_95 || 0)">$0</div>
+                    </div>
+                    <!-- CVaR -->
+                    <div class="kpi-card rounded-lg p-3">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-1">CVaR 97.5%</div>
+                        <div class="text-xl font-bold text-bb-red" x-text="formatCurrency(data.risk?.cvar_975 || 0)">$0</div>
+                    </div>
+                </div>
+
+                <!-- Leverage Bar -->
+                <div class="mb-3">
+                    <div class="flex justify-between text-[10px] text-bb-muted mb-1">
+                        <span>LEVERAGE</span>
+                        <span x-text="formatNum(data.risk?.current_leverage, 1) + 'x / ' + formatNum(data.risk?.max_leverage, 1) + 'x'"></span>
+                    </div>
+                    <div class="h-2 bg-bb-card rounded-full overflow-hidden">
+                        <div class="h-full rounded-full transition-all duration-500"
+                             :style="'width:' + Math.min(100, (data.risk?.current_leverage || 0) / (data.risk?.max_leverage || 3) * 100) + '%'"
+                             :class="leverageColor(data.risk?.current_leverage, data.risk?.max_leverage)">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Drawdown Bar -->
+                <div class="mb-3">
+                    <div class="flex justify-between text-[10px] text-bb-muted mb-1">
+                        <span>DRAWDOWN</span>
+                        <span x-text="formatPct(data.risk?.current_drawdown_pct) + ' (max: ' + formatPct(data.performance?.kpis?.max_drawdown_pct) + ')'"></span>
+                    </div>
+                    <div class="h-2 bg-bb-card rounded-full overflow-hidden">
+                        <div class="h-full bg-bb-red rounded-full transition-all duration-500"
+                             :style="'width:' + Math.min(100, (data.risk?.current_drawdown_pct || 0) * 100 / 10) + '%'">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Weekly Loss -->
+                <div class="mb-3">
+                    <div class="flex justify-between text-[10px] text-bb-muted mb-1">
+                        <span>WEEKLY LOSS</span>
+                        <span x-text="formatPct(data.risk?.weekly_loss_pct) + ' / ' + formatPct(data.risk?.max_weekly_loss_pct / 100)"></span>
+                    </div>
+                    <div class="h-2 bg-bb-card rounded-full overflow-hidden">
+                        <div class="h-full bg-bb-amber rounded-full transition-all duration-500"
+                             :style="'width:' + Math.min(100, Math.abs(data.risk?.weekly_loss_pct || 0) * 100 / (data.risk?.max_weekly_loss_pct || 5)) + '%'">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Ulcer Index -->
+                <div class="mb-3">
+                    <div class="flex justify-between text-[10px] text-bb-muted mb-1">
+                        <span>ULCER INDEX</span>
+                        <span x-text="formatNum(data.performance?.kpis?.ulcer_index, 3)">-</span>
+                    </div>
+                </div>
+
+                <!-- Drawdown Curve -->
+                <div id="drawdown-chart" class="w-full" style="height: 140px;"></div>
+            </div>
+        </div>
+
+        <!-- ======================================================== -->
+        <!-- PANEL 3: SIGNAL FLOW -->
+        <!-- ======================================================== -->
+        <div class="panel flex flex-col overflow-hidden">
+            <div class="panel-header">
+                <span class="text-sm font-semibold tracking-wider text-bb-green">SIGNAL FLOW</span>
+                <span class="text-[10px] text-bb-muted" x-text="(data.signals?.active_count || 0) + '/' + (data.signals?.agent_count || 0) + ' active'"></span>
+            </div>
+            <div class="p-3 flex-1 overflow-y-auto">
+                <!-- Agent Signal Grid -->
+                <div class="space-y-1.5">
+                    <template x-for="agent in (data.signals?.agents || [])" :key="agent.name">
+                        <div class="flex items-center justify-between p-2 rounded bg-bb-card hover:bg-bb-hover transition-colors">
+                            <div class="flex items-center gap-2">
+                                <span class="status-dot" :class="agent.enabled ? 'active' : 'inactive'"></span>
+                                <span class="text-xs font-medium" x-text="agent.name.replace('Agent','')"></span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <template x-if="agent.last_signal?.direction">
+                                    <span class="signal-badge"
+                                          :class="signalBadgeClass(agent.last_signal?.direction)"
+                                          x-text="agent.last_signal?.direction">
+                                    </span>
+                                </template>
+                                <template x-if="agent.last_signal?.confidence">
+                                    <span class="text-[10px] text-bb-muted" x-text="(agent.last_signal.confidence * 100).toFixed(0) + '%'"></span>
+                                </template>
+                                <template x-if="!agent.last_signal?.direction">
+                                    <span class="text-[10px] text-bb-muted">--</span>
+                                </template>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+
+                <!-- Consensus -->
+                <div class="mt-3 p-3 rounded bg-bb-card border border-bb-border">
+                    <div class="text-[10px] text-bb-muted tracking-wider mb-2">CIO CONSENSUS</div>
+                    <div class="grid grid-cols-2 gap-2 text-xs">
+                        <div>
+                            <span class="text-bb-muted">Mode: </span>
+                            <span class="font-semibold" x-text="data.signals?.consensus?.decision_mode || 'NORMAL'"></span>
+                        </div>
+                        <div>
+                            <span class="text-bb-muted">Positions: </span>
+                            <span class="font-semibold" x-text="data.signals?.consensus?.tracked_positions || 0"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ======================================================== -->
+        <!-- PANEL 4: STRATEGY ATTRIBUTION -->
+        <!-- ======================================================== -->
+        <div class="panel flex flex-col overflow-hidden">
+            <div class="panel-header">
+                <span class="text-sm font-semibold tracking-wider text-bb-blue">STRATEGY ATTRIBUTION</span>
+                <span class="text-[10px] text-bb-muted" x-text="formatCurrency(data.strategies?.total_pnl || 0)"></span>
+            </div>
+            <div class="p-3 flex-1 overflow-y-auto">
+                <!-- Strategy P&L Chart -->
+                <div id="strategy-chart" class="w-full" style="height: 180px;"></div>
+
+                <!-- Strategy Table -->
+                <div class="mt-2 space-y-1">
+                    <template x-for="strat in (data.strategies?.strategies || [])" :key="strat.name">
+                        <div class="flex items-center justify-between p-2 rounded bg-bb-card hover:bg-bb-hover text-xs">
+                            <div class="flex items-center gap-2 min-w-0">
+                                <div class="w-2 h-2 rounded-full" :class="strat.pnl >= 0 ? 'bg-bb-green' : 'bg-bb-red'"></div>
+                                <span class="truncate font-medium" x-text="strat.name.replace('Agent','')"></span>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <span :class="strat.pnl >= 0 ? 'text-bb-green' : 'text-bb-red'" x-text="formatCurrency(strat.pnl)"></span>
+                                <span class="text-bb-muted w-12 text-right" x-text="(strat.win_rate * 100).toFixed(0) + '%'"></span>
+                                <span class="text-bb-muted w-8 text-right" x-text="strat.trades"></span>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+
+        <!-- ======================================================== -->
+        <!-- PANEL 5: POSITIONS -->
+        <!-- ======================================================== -->
+        <div class="panel flex flex-col overflow-hidden">
+            <div class="panel-header">
+                <div class="flex items-center gap-3">
+                    <span class="text-sm font-semibold tracking-wider text-bb-text">POSITIONS</span>
+                    <button @click="posTab = 'open'"
+                            class="text-[10px] px-2 py-0.5 rounded transition-colors"
+                            :class="posTab === 'open' ? 'bg-bb-blue/20 text-bb-blue' : 'text-bb-muted hover:text-bb-text'">
+                        OPEN (<span x-text="data.positions?.open_count || 0"></span>)
+                    </button>
+                    <button @click="posTab = 'closed'"
+                            class="text-[10px] px-2 py-0.5 rounded transition-colors"
+                            :class="posTab === 'closed' ? 'bg-bb-blue/20 text-bb-blue' : 'text-bb-muted hover:text-bb-text'">
+                        CLOSED (<span x-text="data.positions?.closed_count || 0"></span>)
+                    </button>
+                </div>
+            </div>
+            <div class="flex-1 overflow-y-auto">
+                <!-- Open Positions -->
+                <template x-if="posTab === 'open'">
+                    <div class="p-2">
+                        <template x-if="!data.positions?.open?.length">
+                            <div class="text-center text-bb-muted text-xs py-8">No open positions</div>
+                        </template>
+                        <div class="space-y-1">
+                            <template x-for="pos in (data.positions?.open || [])" :key="pos.symbol">
+                                <div class="position-row p-2.5 rounded bg-bb-card">
+                                    <div class="flex items-center justify-between mb-1.5">
+                                        <div class="flex items-center gap-2">
+                                            <span class="signal-badge" :class="pos.direction === 'LONG' ? 'signal-long' : 'signal-short'"
+                                                  x-text="pos.direction"></span>
+                                            <span class="text-sm font-bold" x-text="pos.symbol"></span>
+                                            <span class="text-[10px] text-bb-muted" x-text="'x' + pos.quantity"></span>
+                                        </div>
+                                        <div class="text-right">
+                                            <span class="text-sm font-semibold" :class="pos.pnl >= 0 ? 'text-bb-green' : 'text-bb-red'"
+                                                  x-text="formatCurrency(pos.pnl)"></span>
+                                            <span class="text-[10px] ml-1" :class="pos.pnl_pct >= 0 ? 'text-bb-green' : 'text-bb-red'"
+                                                  x-text="'(' + pos.pnl_pct.toFixed(1) + '%)'"></span>
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center justify-between text-[10px] text-bb-muted mb-1">
+                                        <span x-text="'Entry: ' + pos.entry_price.toFixed(2)"></span>
+                                        <span x-text="'Now: ' + pos.current_price.toFixed(2)"></span>
+                                        <span x-text="'R: ' + (pos.r_multiple || 0).toFixed(1)"></span>
+                                    </div>
+                                    <!-- TP/SL Progress Bar -->
+                                    <template x-if="pos.sl_price && pos.tp_price">
+                                        <div>
+                                            <div class="tp-sl-bar">
+                                                <div class="tp-sl-fill"
+                                                     :class="pos.pnl >= 0 ? 'bg-bb-green' : 'bg-bb-red'"
+                                                     :style="'width:' + tpSlProgress(pos) + '%'">
+                                                </div>
+                                            </div>
+                                            <div class="flex justify-between text-[9px] text-bb-muted mt-0.5">
+                                                <span x-text="'SL: ' + pos.sl_price.toFixed(2)"></span>
+                                                <div class="flex gap-2">
+                                                    <template x-if="pos.stop_at_breakeven"><span class="text-bb-blue">BE</span></template>
+                                                    <template x-if="pos.trailing_active"><span class="text-bb-amber">TRAIL</span></template>
+                                                </div>
+                                                <span x-text="'TP: ' + pos.tp_price.toFixed(2)"></span>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Closed Positions -->
+                <template x-if="posTab === 'closed'">
+                    <div class="p-2">
+                        <template x-if="!data.positions?.closed?.length">
+                            <div class="text-center text-bb-muted text-xs py-8">No closed positions</div>
+                        </template>
+                        <table class="w-full text-xs" x-show="data.positions?.closed?.length">
+                            <thead>
+                                <tr class="text-bb-muted text-[10px] border-b border-bb-border">
+                                    <th class="text-left py-1.5 px-2">Symbol</th>
+                                    <th class="text-left py-1.5">Strategy</th>
+                                    <th class="text-right py-1.5">P&L</th>
+                                    <th class="text-right py-1.5">R</th>
+                                    <th class="text-right py-1.5 px-2">Hours</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="(trade, i) in (data.positions?.closed || [])" :key="i">
+                                    <tr class="border-b border-bb-border/30 hover:bg-bb-card">
+                                        <td class="py-1.5 px-2 font-medium" x-text="trade.symbol"></td>
+                                        <td class="py-1.5 text-bb-muted" x-text="trade.strategy.replace('Agent','')"></td>
+                                        <td class="py-1.5 text-right font-medium"
+                                            :class="trade.pnl >= 0 ? 'text-bb-green' : 'text-bb-red'"
+                                            x-text="formatCurrency(trade.pnl)"></td>
+                                        <td class="py-1.5 text-right" x-text="trade.r_multiple.toFixed(1)"></td>
+                                        <td class="py-1.5 text-right px-2 text-bb-muted" x-text="trade.hold_time_hours.toFixed(1)"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </template>
+            </div>
+        </div>
+
+        <!-- ======================================================== -->
+        <!-- PANEL 6: EXECUTION QUALITY -->
+        <!-- ======================================================== -->
+        <div class="panel flex flex-col overflow-hidden">
+            <div class="panel-header">
+                <span class="text-sm font-semibold tracking-wider text-bb-green">EXECUTION QUALITY</span>
+                <span class="text-[10px] text-bb-muted" x-text="(data.execution?.total_fills || 0) + ' fills'"></span>
+            </div>
+            <div class="p-3 flex-1 overflow-y-auto">
+                <!-- Execution KPIs -->
+                <div class="grid grid-cols-2 gap-2 mb-3">
+                    <div class="kpi-card rounded-lg p-2.5 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-1">FILL RATE</div>
+                        <div class="text-lg font-bold"
+                             :class="(data.execution?.fill_rate_pct || 0) >= 95 ? 'text-bb-green' : 'text-bb-amber'"
+                             x-text="(data.execution?.fill_rate_pct || 0).toFixed(1) + '%'">-</div>
+                    </div>
+                    <div class="kpi-card rounded-lg p-2.5 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-1">AVG SLIP.</div>
+                        <div class="text-lg font-bold"
+                             :class="(data.execution?.avg_slippage_bps || 0) <= 10 ? 'text-bb-green' : 'text-bb-amber'"
+                             x-text="(data.execution?.avg_slippage_bps || 0).toFixed(1) + ' bps'">-</div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-2 mb-3">
+                    <div class="kpi-card rounded-lg p-2 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-0.5">VWAP DEV.</div>
+                        <div class="text-sm font-semibold text-bb-text"
+                             x-text="(data.execution?.vwap_deviation_bps || 0).toFixed(1) + ' bps'">-</div>
+                    </div>
+                    <div class="kpi-card rounded-lg p-2 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-0.5">IMPL. SF.</div>
+                        <div class="text-sm font-semibold text-bb-text"
+                             x-text="(data.execution?.implementation_shortfall_bps || 0).toFixed(1) + ' bps'">-</div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-3 gap-2 mb-3">
+                    <div class="kpi-card rounded-lg p-2 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-0.5">ORDERS</div>
+                        <div class="text-sm font-semibold text-bb-text" x-text="data.execution?.total_orders || 0">0</div>
+                    </div>
+                    <div class="kpi-card rounded-lg p-2 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-0.5">FILLS</div>
+                        <div class="text-sm font-semibold text-bb-text" x-text="data.execution?.total_fills || 0">0</div>
+                    </div>
+                    <div class="kpi-card rounded-lg p-2 text-center">
+                        <div class="text-[10px] text-bb-muted tracking-wider mb-0.5">ZOMBIES</div>
+                        <div class="text-sm font-bold"
+                             :class="(data.execution?.zombie_orders || 0) > 0 ? 'text-bb-red' : 'text-bb-green'"
+                             x-text="data.execution?.zombie_orders || 0">0</div>
+                    </div>
+                </div>
+
+                <!-- Fill Latency -->
+                <div class="mb-3">
+                    <div class="flex justify-between text-[10px] text-bb-muted mb-1">
+                        <span>FILL LATENCY</span>
+                        <span x-text="(data.execution?.avg_fill_latency_ms || 0).toFixed(0) + ' ms'"></span>
+                    </div>
+                    <div class="h-2 bg-bb-card rounded-full overflow-hidden">
+                        <div class="h-full bg-bb-blue rounded-full transition-all duration-500"
+                             :style="'width:' + Math.min(100, (data.execution?.avg_fill_latency_ms || 0) / 10) + '%'">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Algo Distribution -->
+                <div id="algo-chart" class="w-full" style="height: 140px;"></div>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- ============================================================ -->
+    <!-- ALPINE.JS APPLICATION -->
+    <!-- ============================================================ -->
+    <script>
+    function dashboard() {
+        return {
+            data: {},
+            connected: false,
+            ws: null,
+            posTab: 'open',
+            currentTime: '',
+
+            // Chart instances
+            charts: {
+                equity: null,
+                dailyPnl: null,
+                drawdown: null,
+                strategy: null,
+                algo: null,
+            },
+
+            init() {
+                this.updateTime();
+                setInterval(() => this.updateTime(), 1000);
+                this.fetchInitial();
+                this.connectWS();
+            },
+
+            updateTime() {
+                this.currentTime = new Date().toISOString().slice(11, 19) + ' UTC';
+            },
+
+            async fetchInitial() {
+                try {
+                    const resp = await fetch('/api/v2/kpis');
+                    if (resp.ok) {
+                        this.data = await resp.json();
+                        this.$nextTick(() => this.initCharts());
+                    }
+                } catch (e) {
+                    console.error('Initial fetch error:', e);
+                }
+            },
+
+            connectWS() {
+                const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const url = `${proto}//${location.host}/ws/v2`;
+                try {
+                    this.ws = new WebSocket(url);
+                    this.ws.onopen = () => { this.connected = true; };
+                    this.ws.onclose = () => {
+                        this.connected = false;
+                        setTimeout(() => this.connectWS(), 3000);
+                    };
+                    this.ws.onerror = () => { this.connected = false; };
+                    this.ws.onmessage = (evt) => {
+                        try {
+                            const msg = JSON.parse(evt.data);
+                            if (msg.type === 'update' || msg.type === 'full_update') {
+                                this.data = msg;
+                                this.updateCharts();
+                            }
+                        } catch (e) {}
+                    };
+                } catch (e) {
+                    setTimeout(() => this.connectWS(), 5000);
+                }
+            },
+
+            // ========================================================
+            // CHARTS
+            // ========================================================
+            initCharts() {
+                this.initEquityChart();
+                this.initDailyPnlChart();
+                this.initDrawdownChart();
+                this.initStrategyChart();
+                this.initAlgoChart();
+            },
+
+            initEquityChart() {
+                const el = document.getElementById('equity-chart');
+                if (!el) return;
+                const series = this.data.performance?.equity_curve || [];
+                this.charts.equity = new ApexCharts(el, {
+                    chart: { type: 'area', height: 160, sparkline: { enabled: false },
+                             toolbar: { show: false }, background: 'transparent', animations: { enabled: false } },
+                    series: [{ name: 'Equity', data: series }],
+                    colors: ['#1e90ff'],
+                    fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.4, opacityTo: 0.05 } },
+                    stroke: { width: 2, curve: 'smooth' },
+                    grid: { borderColor: '#1f2937', strokeDashArray: 3, padding: { left: 0, right: 0 } },
+                    xaxis: { labels: { show: false }, axisBorder: { show: false }, axisTicks: { show: false } },
+                    yaxis: { labels: { style: { colors: '#6b7280', fontSize: '10px', fontFamily: 'JetBrains Mono' },
+                             formatter: (v) => '$' + (v/1000).toFixed(0) + 'k' } },
+                    tooltip: { theme: 'dark', y: { formatter: (v) => '$' + v.toLocaleString() } },
+                });
+                this.charts.equity.render();
+            },
+
+            initDailyPnlChart() {
+                const el = document.getElementById('daily-pnl-chart');
+                if (!el) return;
+                const series = this.data.performance?.daily_pnl || [];
+                this.charts.dailyPnl = new ApexCharts(el, {
+                    chart: { type: 'bar', height: 100, toolbar: { show: false },
+                             background: 'transparent', animations: { enabled: false } },
+                    series: [{ name: 'Daily P&L', data: series }],
+                    colors: [({ value }) => value >= 0 ? '#00d4aa' : '#ff4757'],
+                    plotOptions: { bar: { columnWidth: '80%', borderRadius: 1,
+                                   colors: { ranges: [
+                                       { from: -Infinity, to: 0, color: '#ff4757' },
+                                       { from: 0, to: Infinity, color: '#00d4aa' }
+                                   ] } } },
+                    grid: { borderColor: '#1f2937', strokeDashArray: 3, padding: { left: 0, right: 0 } },
+                    xaxis: { labels: { show: false }, axisBorder: { show: false }, axisTicks: { show: false } },
+                    yaxis: { labels: { style: { colors: '#6b7280', fontSize: '10px', fontFamily: 'JetBrains Mono' },
+                             formatter: (v) => '$' + v.toFixed(0) } },
+                    tooltip: { theme: 'dark' },
+                });
+                this.charts.dailyPnl.render();
+            },
+
+            initDrawdownChart() {
+                const el = document.getElementById('drawdown-chart');
+                if (!el) return;
+                const series = this.data.risk?.drawdown_curve || [];
+                this.charts.drawdown = new ApexCharts(el, {
+                    chart: { type: 'area', height: 140, toolbar: { show: false },
+                             background: 'transparent', animations: { enabled: false } },
+                    series: [{ name: 'Drawdown', data: series }],
+                    colors: ['#ff4757'],
+                    fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.4, opacityTo: 0.05 } },
+                    stroke: { width: 2, curve: 'smooth' },
+                    grid: { borderColor: '#1f2937', strokeDashArray: 3, padding: { left: 0, right: 0 } },
+                    xaxis: { labels: { show: false }, axisBorder: { show: false }, axisTicks: { show: false } },
+                    yaxis: { labels: { style: { colors: '#6b7280', fontSize: '10px', fontFamily: 'JetBrains Mono' },
+                             formatter: (v) => v.toFixed(1) + '%' }, max: 0 },
+                    tooltip: { theme: 'dark', y: { formatter: (v) => v.toFixed(2) + '%' } },
+                });
+                this.charts.drawdown.render();
+            },
+
+            initStrategyChart() {
+                const el = document.getElementById('strategy-chart');
+                if (!el) return;
+                const strategies = this.data.strategies?.strategies || [];
+                const names = strategies.map(s => s.name.replace('Agent', ''));
+                const pnls = strategies.map(s => s.pnl);
+                this.charts.strategy = new ApexCharts(el, {
+                    chart: { type: 'bar', height: 180, toolbar: { show: false },
+                             background: 'transparent', animations: { enabled: false } },
+                    series: [{ name: 'P&L', data: pnls }],
+                    plotOptions: { bar: { horizontal: true, borderRadius: 3,
+                                   colors: { ranges: [
+                                       { from: -Infinity, to: 0, color: '#ff4757' },
+                                       { from: 0, to: Infinity, color: '#00d4aa' }
+                                   ] } } },
+                    grid: { borderColor: '#1f2937', strokeDashArray: 3 },
+                    xaxis: { labels: { style: { colors: '#6b7280', fontSize: '10px', fontFamily: 'JetBrains Mono' },
+                             formatter: (v) => '$' + v.toFixed(0) } },
+                    yaxis: { labels: { style: { colors: '#e8eaed', fontSize: '10px', fontFamily: 'JetBrains Mono' } } },
+                    categories: names,
+                    xaxis: { categories: names },
+                    tooltip: { theme: 'dark' },
+                });
+                this.charts.strategy.render();
+            },
+
+            initAlgoChart() {
+                const el = document.getElementById('algo-chart');
+                if (!el) return;
+                const dist = this.data.execution?.algo_distribution || {};
+                const labels = Object.keys(dist);
+                const values = Object.values(dist);
+                if (!labels.length) {
+                    labels.push('TWAP', 'VWAP', 'MARKET');
+                    values.push(0, 0, 0);
+                }
+                this.charts.algo = new ApexCharts(el, {
+                    chart: { type: 'donut', height: 140, background: 'transparent', animations: { enabled: false } },
+                    series: values,
+                    labels: labels,
+                    colors: ['#1e90ff', '#00d4aa', '#ffa726', '#ff4757', '#9b59b6'],
+                    legend: { position: 'right', labels: { colors: '#e8eaed' },
+                              fontSize: '10px', fontFamily: 'JetBrains Mono' },
+                    dataLabels: { enabled: false },
+                    stroke: { show: false },
+                    plotOptions: { pie: { donut: { size: '65%',
+                                   labels: { show: true, total: { show: true, label: 'ORDERS',
+                                             color: '#6b7280', fontSize: '10px', fontFamily: 'JetBrains Mono' } } } } },
+                    tooltip: { theme: 'dark' },
+                });
+                this.charts.algo.render();
+            },
+
+            updateCharts() {
+                try {
+                    if (this.charts.equity && this.data.performance?.equity_curve) {
+                        this.charts.equity.updateSeries([{ data: this.data.performance.equity_curve }], false);
+                    }
+                    if (this.charts.dailyPnl && this.data.performance?.daily_pnl) {
+                        this.charts.dailyPnl.updateSeries([{ data: this.data.performance.daily_pnl }], false);
+                    }
+                    if (this.charts.drawdown && this.data.risk?.drawdown_curve) {
+                        this.charts.drawdown.updateSeries([{ data: this.data.risk.drawdown_curve }], false);
+                    }
+                    if (this.charts.strategy && this.data.strategies?.strategies) {
+                        const pnls = this.data.strategies.strategies.map(s => s.pnl);
+                        const names = this.data.strategies.strategies.map(s => s.name.replace('Agent', ''));
+                        this.charts.strategy.updateOptions({ xaxis: { categories: names } }, false);
+                        this.charts.strategy.updateSeries([{ data: pnls }], false);
+                    }
+                } catch (e) {}
+            },
+
+            // ========================================================
+            // HELPERS
+            // ========================================================
+            formatCurrency(v) {
+                if (v == null) return '-';
+                const sign = v >= 0 ? '+' : '';
+                return sign + '$' + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+            },
+
+            formatNum(v, dec) {
+                if (v == null) return '-';
+                return Number(v).toFixed(dec || 2);
+            },
+
+            formatPct(v) {
+                if (v == null) return '-';
+                return (Number(v) * 100).toFixed(2) + '%';
+            },
+
+            kpiColor(value, threshold) {
+                if (value == null) return 'text-bb-muted';
+                return value >= threshold ? 'text-bb-green' : value >= 0 ? 'text-bb-amber' : 'text-bb-red';
+            },
+
+            leverageColor(current, max) {
+                if (!current || !max) return 'bg-bb-green';
+                const pct = current / max;
+                if (pct >= 0.9) return 'bg-bb-red';
+                if (pct >= 0.7) return 'bg-bb-amber';
+                return 'bg-bb-green';
+            },
+
+            signalBadgeClass(direction) {
+                if (!direction) return 'signal-flat';
+                const d = direction.toUpperCase();
+                if (d === 'LONG' || d === 'BUY') return 'signal-long';
+                if (d === 'SHORT' || d === 'SELL') return 'signal-short';
+                return 'signal-flat';
+            },
+
+            tpSlProgress(pos) {
+                if (!pos.sl_price || !pos.tp_price) return 50;
+                const range = pos.tp_price - pos.sl_price;
+                if (range === 0) return 50;
+                const progress = (pos.current_price - pos.sl_price) / range * 100;
+                return Math.max(0, Math.min(100, progress));
+            },
+        };
+    }
+    </script>
+</body>
+</html>

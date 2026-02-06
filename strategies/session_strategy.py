@@ -142,7 +142,7 @@ SESSION_WINDOWS: dict[str, SessionWindow] = {
         name="London/NY Overlap",
         session=TradingSession.LONDON_NY_OVERLAP,
         start_time=time(13, 0),  # 13:00 UTC
-        end_time=time(16, 0),    # 16:00 UTC
+        end_time=time(17, 0),    # 17:00 UTC (London closes at 17:00, not 16:00)
         quality=SessionQuality.EXCELLENT,
         typical_volume_pct=25.0,
         best_for=["forex", "gold", "oil", "indices"],
@@ -173,7 +173,9 @@ class SessionStrategy:
 
         # Opening range settings
         self._opening_range_minutes = config.get("opening_range_minutes", 30)
-        self._breakout_threshold_atr = config.get("breakout_threshold_atr", 0.5)
+        # Breakout threshold: 1.5 ATR reduces false breakouts (was 0.5, too sensitive)
+        # Research: Toby Crabel's ORB uses 1.0-2.0 ATR for reliable breakouts
+        self._breakout_threshold_atr = config.get("breakout_threshold_atr", 1.5)
         self._breakout_confirmation_bars = config.get("breakout_confirmation_bars", 2)
 
         # Volume settings
@@ -188,8 +190,11 @@ class SessionStrategy:
         ])
 
         # Risk settings
-        self._stop_loss_atr_mult = config.get("stop_loss_atr_mult", 1.5)
-        self._take_profit_atr_mult = config.get("take_profit_atr_mult", 2.5)
+        # Stop-loss: 2.0 ATR prevents early stop-outs (was 1.5, too tight)
+        # Take-profit: 4.0 ATR for proper trend capture (was 2.5)
+        # ORB research shows session trends often run 3-5 ATR
+        self._stop_loss_atr_mult = config.get("stop_loss_atr_mult", 2.0)
+        self._take_profit_atr_mult = config.get("take_profit_atr_mult", 4.0)
         self._min_risk_reward = config.get("min_risk_reward", 1.5)
 
         # State tracking

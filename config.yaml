@@ -36,7 +36,7 @@ broker:
   #   7497 = TWS Paper Trading
   #   7496 = TWS Live Trading (DANGEROUS - real money!)
   port: 4002                      # [int, 4001|4002|7496|7497] IB API port
-  client_id: 5                    # [int, 1-32] Unique client ID (each app needs different ID)
+  client_id: 10                   # [int, 1-32] Unique client ID (each app needs different ID)
   timeout_seconds: 30             # [int, 10-120] Connection timeout
   readonly: false                 # [bool] If true, cannot place orders
   # SAFE: Use delayed data (free, no subscription needed)
@@ -63,7 +63,7 @@ event_bus:
   # Agent criticality levels for quorum
   # CRITICAL = must respond, HIGH = preferred, NORMAL = can skip if quorum met
   agent_criticality:
-    MacroAgent: critical
+    MacroAgent: high              # Not critical: depends on stock data (unavailable outside US market hours)
     RiskAgent: critical
     MomentumAgent: high
     StatArbAgent: high
@@ -423,7 +423,7 @@ strategies:
 # Enables autonomous decision-making for position exit/reduction
 cio:
   position_management_enabled: true   # [bool] Enable autonomous position management
-  position_review_interval_seconds: 60  # [int] How often to review positions
+  position_review_interval_seconds: 30  # [int] How often to review positions (was 60, Phase 12)
 
   position_management:
     # Loss thresholds - when to close losing positions
@@ -431,18 +431,21 @@ cio:
     extended_loss_pct: 8.0            # [float] Emergency close at this % loss
     loss_time_threshold_hours: 48.0   # [float] Close losing positions held > this many hours
 
-    # Profit taking thresholds
-    profit_target_pct: 15.0           # [float] Start taking profit at this % gain
-    trailing_profit_pct: 3.0          # [float] Take profit if drops this % from peak
-    partial_profit_pct: 50.0          # [float] Percentage to sell at profit target (50 = half)
+    # Profit taking thresholds (Phase 12: realistic for intraday futures)
+    profit_target_pct: 4.0            # [float] Start taking profit at this % gain (was 15%)
+    trailing_profit_pct: 1.5          # [float] Take profit if drops this % from peak (was 3%)
+    partial_profit_pct: 33.0          # [float] Percentage to sell at each partial level (was 50)
 
     # Conviction-based position reduction
     conviction_drop_threshold: 0.3    # [float] Reduce position if conviction drops by this %
     min_conviction_to_hold: 0.5       # [float] INCREASED from 0.4 - exit faster on weak conviction
 
-    # Time-based rules
-    max_holding_days: 30.0            # [float] Maximum holding period in days
-    stale_signal_hours: 24.0          # [float] Signal is stale after this many hours
+    # Time-based rules (Phase 12: per-strategy-type holding limits)
+    max_holding_days: 2.0             # [float] Default max holding 2 days (was 30)
+    stale_signal_hours: 12.0          # [float] Signal is stale after 12h (was 24h)
+    max_holding_hours_intraday: 4.0   # [float] Session/TTM/MeanReversion/EventDriven
+    max_holding_hours_swing: 48.0     # [float] Momentum/MACD-v/Macro/MarketMaking
+    max_holding_hours_pairs: 120.0    # [float] StatArb/IndexSpread (5 days)
 
     # Market regime adjustments
     volatile_regime_loss_pct: 3.0     # [float] Tighter stop in volatile markets
@@ -451,6 +454,15 @@ cio:
     # Stop-loss override rules
     allow_stop_override_in_trending: true  # [bool] Allow CIO to override stops in strong trends
     stop_override_min_conviction: 0.8 # [float] Min conviction to override a stop-loss
+
+    # Phase 12: Active Position Protection (breakeven + trailing + graduated exits)
+    breakeven_r_trigger: 1.0          # [float] Move stop to breakeven at this R-multiple
+    breakeven_buffer_pct: 0.1         # [float] Buffer above entry for spread (0.1%)
+    trailing_activation_r: 1.5        # [float] Activate trailing stop at this R-multiple
+    trailing_distance_r: 0.5          # [float] Trail this many R behind peak price
+    partial_profit_1_r: 1.5           # [float] 1st partial exit (33%) at this R-multiple
+    partial_profit_2_r: 2.5           # [float] 2nd partial exit (33%) at this R-multiple
+    partial_profit_3_r: 3.5           # [float] Final full exit at this R-multiple
 
   # Signal Quality Scoring (Phase 2 Enhancement)
   # Filters out low-quality signals before aggregation
@@ -517,23 +529,9 @@ universe:
       exchange: "SMART"
       currency: "USD"
 
-  # Futures (continuous contracts)
+  # Futures - Micro contracts only (limited account for live testing)
   futures:
-    # Index Futures - E-mini
-    - symbol: "ES"         # E-mini S&P 500
-      exchange: "CME"
-      currency: "USD"
-    - symbol: "NQ"         # E-mini NASDAQ 100
-      exchange: "CME"
-      currency: "USD"
-    - symbol: "YM"         # E-mini Dow
-      exchange: "CBOT"
-      currency: "USD"
-    - symbol: "RTY"        # E-mini Russell 2000
-      exchange: "CME"
-      currency: "USD"
-
-    # Index Futures - Micro (1/10th of E-mini)
+    # Micro Index Futures (1/10th of E-mini)
     - symbol: "MES"        # Micro E-mini S&P 500
       exchange: "CME"
       currency: "USD"
@@ -547,69 +545,14 @@ universe:
       exchange: "CME"
       currency: "USD"
 
-    # Energy Futures
-    - symbol: "CL"         # Crude Oil WTI
-      exchange: "NYMEX"
-      currency: "USD"
+    # Micro Energy
     - symbol: "MCL"        # Micro WTI Crude Oil
       exchange: "NYMEX"
       currency: "USD"
-    - symbol: "NG"         # Natural Gas
-      exchange: "NYMEX"
-      currency: "USD"
-    - symbol: "RB"         # RBOB Gasoline
-      exchange: "NYMEX"
-      currency: "USD"
-    - symbol: "HO"         # Heating Oil
-      exchange: "NYMEX"
-      currency: "USD"
 
-    # Precious Metals
-    - symbol: "GC"         # Gold
-      exchange: "COMEX"
-      currency: "USD"
+    # Micro Metals
     - symbol: "MGC"        # Micro Gold
       exchange: "COMEX"
-      currency: "USD"
-    - symbol: "SI"         # Silver
-      exchange: "COMEX"
-      currency: "USD"
-    - symbol: "SIL"        # Micro Silver
-      exchange: "COMEX"
-      currency: "USD"
-    - symbol: "PL"         # Platinum
-      exchange: "NYMEX"
-      currency: "USD"
-    - symbol: "HG"         # Copper
-      exchange: "COMEX"
-      currency: "USD"
-
-    # Agriculture
-    - symbol: "ZC"         # Corn
-      exchange: "CBOT"
-      currency: "USD"
-    - symbol: "ZW"         # Wheat
-      exchange: "CBOT"
-      currency: "USD"
-    - symbol: "ZS"         # Soybeans
-      exchange: "CBOT"
-      currency: "USD"
-    - symbol: "ZM"         # Soybean Meal
-      exchange: "CBOT"
-      currency: "USD"
-    - symbol: "ZL"         # Soybean Oil
-      exchange: "CBOT"
-      currency: "USD"
-
-    # Bonds
-    - symbol: "ZB"         # 30-Year Treasury Bond
-      exchange: "CBOT"
-      currency: "USD"
-    - symbol: "ZN"         # 10-Year Treasury Note
-      exchange: "CBOT"
-      currency: "USD"
-    - symbol: "ZF"         # 5-Year Treasury Note
-      exchange: "CBOT"
       currency: "USD"
 
   # Forex (cash pairs)
@@ -654,19 +597,18 @@ agents:
     pairs:
       - ["AAPL", "MSFT"]
       - ["GOOGL", "META"]
-      - ["ES", "NQ"]       # Index futures pair
-      - ["GC", "SI"]       # Metals pair
+      - ["MES", "MNQ"]     # Micro index futures pair
+      - ["MGC", "MCL"]     # Micro metals/energy pair
     # Correlation divergence detection (MoonDev-inspired)
     divergence_enabled: true
     divergence_threshold: 2.0           # Z-score threshold for divergence signal
     divergence_lookback: 20             # Periods for correlation calculation
     correlation_breakdown_threshold: 0.3 # Drop in correlation to trigger alert
     divergence_pairs:                   # Pairs to monitor for divergence
-      - ["SPY", "QQQ"]    # Index ETFs
-      - ["ES", "NQ"]      # Index futures
-      - ["GC", "SI"]      # Precious metals
+      - ["SPY", "QQQ"]    # Index ETFs (data only)
+      - ["MES", "MNQ"]    # Micro index futures
+      - ["MGC", "MCL"]    # Micro metals/energy
       - ["AAPL", "MSFT"]  # Tech leaders
-      - ["XLF", "JPM"]    # Financials
 
   momentum:
     enabled: true
@@ -787,8 +729,6 @@ agents:
     enabled: false                      # DISABLED BY DEFAULT - uses Claude API tokens
     model: "claude-sonnet-4-5-20250929"   # Vision-capable model
     symbols:                            # Symbols to analyze
-      - "SPY"
-      - "QQQ"
       - "AAPL"
       - "MSFT"
       - "NVDA"
@@ -808,12 +748,10 @@ agents:
     forecast_interval_seconds: 300      # Minimum time between forecasts
     price_history_length: 100           # Price points to keep for context
     symbols:                            # Symbols to forecast
-      - "SPY"
-      - "QQQ"
       - "AAPL"
       - "MSFT"
-      - "ES"
-      - "NQ"
+      - "MES"
+      - "MNQ"
     llm:
       llm_provider: "anthropic"
       model: "claude-sonnet-4-5-20250929"  # Claude Sonnet 4 for forecasts
@@ -827,16 +765,13 @@ agents:
     breakout_threshold_atr: 0.5          # Breakout distance in ATR
     session_momentum_enabled: true
     symbols:
-      - "ES"
-      - "NQ"
-      - "SPY"
-      - "QQQ"
+      - "MES"
+      - "MNQ"
 
   index_spread:
     enabled: true                        # ENABLED: Fixed agent-strategy interface
     spread_pairs:
       - ["MES", "MNQ"]                   # Micro futures
-      - ["ES", "NQ"]                     # E-mini futures
     zscore_entry: 2.0
     zscore_exit: 0.5
     lookback_periods: 20
@@ -849,11 +784,8 @@ agents:
     kc_mult: 1.5
     momentum_length: 12
     symbols:
-      - "ES"
-      - "NQ"
-      - "SPY"
-      - "AAPL"
-      - "MSFT"
+      - "MES"
+      - "MNQ"
 
   event_driven:
     enabled: true                        # ENABLED: Fixed to use analyze_event() and generate_signal()
@@ -875,12 +807,10 @@ agents:
     zscore_threshold: 2.0
     lookback_periods: 50
     symbols:
-      - "SPY"
-      - "QQQ"
+      - "MES"
+      - "MNQ"
       - "AAPL"
       - "MSFT"
-      - "GOOGL"
-      - "META"
 
   # MACD-v Agent (Volatility-Normalized MACD) - Charles H. Dow Award 2022
   macdv:
@@ -908,17 +838,15 @@ agents:
     histogram_momentum_bars: 3           # Bars to check for momentum confirmation
     # Symbols to analyze
     symbols:
-      - "ES"
-      - "NQ"
       - "MES"
       - "MNQ"
-      - "SPY"
-      - "QQQ"
+      - "M2K"
+      - "MYM"
       - "AAPL"
       - "MSFT"
       - "NVDA"
-      - "GC"
-      - "CL"
+      - "MGC"
+      - "MCL"
 
   # ========== EXIT RULES (TakeProfit/StopLoss) ==========
   # CRITICAL: Position-level stop-loss management for 100% automation
@@ -927,17 +855,17 @@ agents:
     enabled: true
     # Stop-loss settings
     use_atr_stops: true                  # Use ATR-based dynamic stops (recommended)
-    stop_loss_atr_multiplier: 2.5        # Stop distance = 2.5x ATR
-    default_stop_loss_pct: 5.0           # Fallback: 5% fixed stop if no ATR
+    stop_loss_atr_multiplier: 2.0        # Stop distance = 2.0x ATR (was 2.5)
+    default_stop_loss_pct: 3.0           # Fallback: 3% fixed stop if no ATR (was 5%)
     # Take profit settings
-    default_take_profit_pct: 10.0        # 10% profit target
+    default_take_profit_pct: 4.0         # 4% profit target (was 10%)
     trailing_take_profit: true           # Trailing take profit enabled
-    # Trailing stop settings
+    # Trailing stop settings (Phase 12: tighter for intraday)
     trailing_enabled: true               # Enable trailing stops to lock in gains
-    trailing_activation_pct: 2.0         # Activate trailing after 2% profit
-    trailing_distance_pct: 3.0           # Trail 3% below peak
+    trailing_activation_pct: 1.0         # Activate trailing after 1% profit (was 2%)
+    trailing_distance_pct: 1.5           # Trail 1.5% below peak (was 3%)
     # Time-based exit
-    time_exit_hours: 0                   # 0 = disabled, else max holding time in hours
+    time_exit_hours: 48                  # Default 48h max hold (was 0=disabled)
 
   # ========== DECISION & VALIDATION AGENTS ==========
   cio:

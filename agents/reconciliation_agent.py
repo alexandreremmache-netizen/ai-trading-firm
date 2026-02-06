@@ -28,7 +28,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from core.agent_base import BaseAgent, AgentConfig
-from core.events import Event, EventType, RiskAlertEvent
+from core.events import Event, EventType, RiskAlertEvent, RiskAlertSeverity
 
 if TYPE_CHECKING:
     from core.event_bus import EventBus
@@ -362,8 +362,25 @@ class ReconciliationAgent(BaseAgent):
             return []
 
         try:
-            positions = await self._get_theoretical_positions()
-            return positions if positions else []
+            # get_tracked_positions() is a sync function returning a dict
+            raw_positions = self._get_theoretical_positions()
+            if not raw_positions:
+                return []
+
+            # Convert dict format to TheoreticalPosition objects
+            result = []
+            for symbol, pos_data in raw_positions.items():
+                if isinstance(pos_data, dict):
+                    result.append(TheoreticalPosition(
+                        symbol=symbol,
+                        quantity=abs(pos_data.get("quantity", 0)),
+                        side="long" if pos_data.get("is_long", True) else "short",
+                        entry_price=pos_data.get("entry_price", 0.0),
+                        entry_time=pos_data.get("entry_time", datetime.now(timezone.utc)),
+                        stop_loss=pos_data.get("stop_loss_level"),
+                        take_profit=pos_data.get("take_profit_level"),
+                    ))
+            return result
         except Exception as e:
             logger.error(f"Failed to get theoretical positions: {e}")
             return []
@@ -371,17 +388,17 @@ class ReconciliationAgent(BaseAgent):
     async def _get_broker_positions_safe(self) -> List[BrokerPosition]:
         """Get broker positions with error handling."""
         try:
-            raw_positions = await self._broker.get_positions()
+            portfolio_state = await self._broker.get_portfolio_state()
 
             positions = []
-            for symbol, data in raw_positions.items():
+            for symbol, pos in portfolio_state.positions.items():
                 positions.append(BrokerPosition(
                     symbol=symbol,
-                    quantity=data.get("position", 0),
-                    avg_cost=data.get("avg_cost", 0),
-                    market_value=data.get("market_value", 0),
-                    unrealized_pnl=data.get("unrealized_pnl", 0),
-                    realized_pnl=data.get("realized_pnl", 0),
+                    quantity=pos.quantity,
+                    avg_cost=pos.avg_cost,
+                    market_value=pos.market_value,
+                    unrealized_pnl=pos.unrealized_pnl,
+                    realized_pnl=pos.realized_pnl,
                 ))
             return positions
 
@@ -512,14 +529,15 @@ class ReconciliationAgent(BaseAgent):
         """Emit a critical alert event for the discrepancy."""
         alert = RiskAlertEvent(
             alert_type="RECONCILIATION_CRITICAL",
-            message=f"[RECONCILIATION] {discrepancy.message}",
-            severity="critical",
+            message=(
+                f"[RECONCILIATION] {discrepancy.message} "
+                f"(id={discrepancy.discrepancy_id}, "
+                f"type={discrepancy.discrepancy_type.value}, "
+                f"symbol={discrepancy.symbol})"
+            ),
+            severity=RiskAlertSeverity.CRITICAL,
             source_agent=self._config.name,
-            metadata={
-                "discrepancy_id": discrepancy.discrepancy_id,
-                "discrepancy_type": discrepancy.discrepancy_type.value,
-                "symbol": discrepancy.symbol,
-            },
+            affected_symbols=(discrepancy.symbol,),
         )
         await self._event_bus.publish(alert, priority=True)
         logger.critical(f"RECONCILIATION ALERT: {discrepancy.message}")

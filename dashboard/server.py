@@ -593,8 +593,9 @@ class DashboardState:
         # Lock for thread safety
         self._lock = asyncio.Lock()
 
-        # Latest event record for broadcasting (set by _handle_event)
-        self._latest_event_record: dict | None = None
+        # Event records pending broadcast (set by _handle_event, consumed by periodic loop)
+        # Using a deque instead of single-slot to avoid dropping events between cycles
+        self._pending_event_records: deque[dict] = deque(maxlen=200)
 
         # Advanced Analytics Components (Phase 8)
         analytics = create_all_analytics_components()
@@ -785,8 +786,8 @@ class DashboardState:
                 elif event.event_type == EventType.MARKET_DATA:
                     self._handle_market_data_event(event)
 
-            # Store event record for broadcasting (outside lock)
-            self._latest_event_record = event_record
+            # Queue event record for broadcasting (outside lock)
+            self._pending_event_records.append(event_record)
 
         except Exception as e:
             logger.exception(f"Error handling event: {e}")
@@ -1940,6 +1941,18 @@ class DashboardState:
         # Fall back to tracked positions if broker not available
         if not positions:
             positions = [pos.to_dict() for pos in self._positions.values()]
+        else:
+            # Merge with internal tracking for positions not yet synced to IB
+            # (IB portfolio updates can be delayed after fills)
+            broker_symbols = {p["symbol"] for p in positions}
+            for symbol, pos in self._positions.items():
+                if symbol not in broker_symbols:
+                    # Position exists in internal tracking but not in IB yet
+                    pos_dict = pos.to_dict()
+                    # Mark as pending sync
+                    pos_dict["pending_sync"] = True
+                    positions.append(pos_dict)
+                    logger.debug(f"Added internally tracked position {symbol} (pending IB sync)")
 
         return positions
 
@@ -2350,10 +2363,20 @@ class DashboardState:
         self._broadcast_callback = callback
 
     def get_latest_event_record(self) -> dict | None:
-        """Get and clear the latest event record for broadcasting."""
-        record = self._latest_event_record
-        self._latest_event_record = None
-        return record
+        """Get and clear the latest event record for broadcasting (legacy single-event)."""
+        if self._pending_event_records:
+            return self._pending_event_records.popleft()
+        return None
+
+    def drain_pending_events(self) -> list[dict]:
+        """Drain all pending event records for broadcasting.
+
+        Returns all events that have accumulated since the last drain,
+        preventing event loss when multiple events arrive between cycles.
+        """
+        events = list(self._pending_event_records)
+        self._pending_event_records.clear()
+        return events
 
     async def get_agent_health_summary(self) -> dict[str, Any]:
         """
@@ -2717,6 +2740,7 @@ class DashboardServer:
                     "signals": self._state.get_signals(),
                     "decisions": self._state.get_decisions(),
                     "alerts": self._state.get_alerts(),
+                    "events": self._state.get_events(),  # CRITICAL FIX: Include event history on connect/reconnect
                     "risk": {
                         "limits": self._state.get_risk_limits(),
                     },
@@ -2881,6 +2905,10 @@ class DashboardServer:
         Background task that pushes updates to WebSocket clients.
 
         Updates are pushed every 500ms to provide real-time feedback.
+
+        CRITICAL: Event broadcasting must happen FIRST and independently of
+        broker data fetching, so that event stream updates are never blocked
+        by broker errors (e.g., IB disconnection/reconnection).
         """
         update_counter = 0
         while self._running:
@@ -2892,42 +2920,25 @@ class DashboardServer:
 
                 update_counter += 1
 
-                # Broadcast positions first (use async to get from broker)
-                positions = await self._state.get_positions_async()
-                await self._connection_manager.broadcast({
-                    "type": "positions",
-                    "payload": positions,
-                })
-
-                # Broadcast metrics (calculated from positions for consistency)
-                metrics = await self._state.get_metrics_async(positions=positions)
-                await self._connection_manager.broadcast({
-                    "type": "metrics",
-                    "payload": metrics,
-                })
-
-                # Broadcast latest event if available
-                latest_event = self._state.get_latest_event_record()
-                if latest_event:
+                # CRITICAL FIX: Broadcast ALL pending events FIRST, before any
+                # broker calls that might fail. This prevents event stream from
+                # going silent when IB is disconnected/reconnecting.
+                # Previously used single-slot _latest_event_record which dropped
+                # all but the last event per cycle. Now drains entire queue.
+                pending_events = self._state.drain_pending_events()
+                for event_record in pending_events:
                     await self._connection_manager.broadcast({
                         "type": "event",
-                        "payload": latest_event,
+                        "payload": event_record,
                     })
 
-                # Broadcast agents every update
+                # Broadcast agents every update (no broker dependency)
                 await self._connection_manager.broadcast({
                     "type": "agents",
                     "payload": self._state.get_agents(),
                 })
 
-                # Broadcast closed positions (every 4th update)
-                if update_counter % 4 == 0:
-                    await self._connection_manager.broadcast({
-                        "type": "closed_positions",
-                        "payload": self._state.get_closed_positions(),
-                    })
-
-                # Broadcast signals
+                # Broadcast signals (no broker dependency)
                 await self._connection_manager.broadcast({
                     "type": "signals",
                     "payload": self._state.get_signals(),
@@ -2940,6 +2951,30 @@ class DashboardServer:
                         "payload": self._state.get_decisions(),
                     })
 
+                # Broker-dependent data in its own try-except so failures
+                # don't block event broadcasting above
+                try:
+                    # Broadcast positions (use async to get from broker)
+                    positions = await self._state.get_positions_async()
+                    await self._connection_manager.broadcast({
+                        "type": "positions",
+                        "payload": positions,
+                    })
+
+                    # Broadcast metrics (calculated from positions for consistency)
+                    metrics = await self._state.get_metrics_async(positions=positions)
+                    await self._connection_manager.broadcast({
+                        "type": "metrics",
+                        "payload": metrics,
+                    })
+                except Exception as e:
+                    logger.warning(f"Broker data fetch failed in periodic update: {e}")
+                    # Still broadcast with empty/cached data so UI doesn't freeze
+                    await self._connection_manager.broadcast({
+                        "type": "positions",
+                        "payload": [],
+                    })
+
                 # Broadcast risk
                 await self._connection_manager.broadcast({
                     "type": "risk",
@@ -2947,6 +2982,13 @@ class DashboardServer:
                         "limits": self._state.get_risk_limits(),
                     }
                 })
+
+                # Broadcast closed positions (every 4th update)
+                if update_counter % 4 == 0:
+                    await self._connection_manager.broadcast({
+                        "type": "closed_positions",
+                        "payload": self._state.get_closed_positions(),
+                    })
 
                 # Broadcast equity curve (every 4th update to reduce load)
                 if update_counter % 4 == 0:

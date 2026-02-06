@@ -235,6 +235,72 @@ class TestRiskState:
 
 
 # ============================================================================
+# CVaR 97.5% TESTS (Phase 11 - FRTB/Basel III)
+# ============================================================================
+
+class TestCVaR:
+    """Test Conditional Value at Risk (CVaR) at 97.5% confidence level."""
+
+    def test_cvar_975_field_exists(self):
+        """Verify RiskState has cvar_975 field (FRTB/Basel III requirement)."""
+        state = RiskState()
+        assert hasattr(state, "cvar_975"), "RiskState must have cvar_975 field"
+        assert state.cvar_975 == 0.0  # Default value
+
+    def test_expected_shortfall_field_exists(self):
+        """Verify RiskState has expected_shortfall field (legacy 95%)."""
+        state = RiskState()
+        assert hasattr(state, "expected_shortfall"), "RiskState must have expected_shortfall"
+        assert state.expected_shortfall == 0.0
+
+    @pytest.mark.asyncio
+    async def test_cvar_975_calculated_on_update(self, risk_agent):
+        """Verify CVaR 97.5% is calculated when returns are updated."""
+        import numpy as np
+        np.random.seed(42)
+        returns = np.random.normal(-0.001, 0.02, 300)
+
+        for r in returns:
+            risk_agent._returns_history.append(r)
+
+        # _calculate_var calls asyncio.create_task, needs event loop
+        risk_agent._calculate_var()
+
+        # CVaR should be calculated and positive (represents a loss)
+        assert risk_agent._risk_state.cvar_975 > 0, (
+            "CVaR 97.5% should be positive for loss data"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cvar_975_greater_than_or_equal_to_var_95(self, risk_agent):
+        """Verify CVaR 97.5% >= VaR 95% (mathematical property)."""
+        import numpy as np
+        np.random.seed(42)
+        returns = np.random.normal(-0.001, 0.02, 300)
+
+        for r in returns:
+            risk_agent._returns_history.append(r)
+
+        risk_agent._calculate_var()
+
+        # CVaR at 97.5% must be >= VaR at 95% (deeper tail)
+        assert risk_agent._risk_state.cvar_975 >= risk_agent._risk_state.var_95, (
+            f"CVaR 97.5% ({risk_agent._risk_state.cvar_975:.4f}) must be >= "
+            f"VaR 95% ({risk_agent._risk_state.var_95:.4f})"
+        )
+
+    def test_cvar_975_accessible_on_risk_state(self, risk_agent):
+        """Verify CVaR 97.5% is on the risk state for monitoring."""
+        # cvar_975 should be accessible on the risk state object
+        assert hasattr(risk_agent._risk_state, "cvar_975"), (
+            "CVaR 97.5% must be on RiskState for FRTB/Basel III compliance"
+        )
+        assert hasattr(risk_agent._risk_state, "expected_shortfall"), (
+            "Expected Shortfall (legacy 95%) must be on RiskState"
+        )
+
+
+# ============================================================================
 # KILL SWITCH TESTS
 # ============================================================================
 

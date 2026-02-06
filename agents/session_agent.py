@@ -68,7 +68,9 @@ class SessionAgent(SignalAgent):
         self._orb_minutes = config.parameters.get("orb_minutes", 30)
         self._breakout_threshold = config.parameters.get("breakout_threshold", 0.002)
         self._volume_confirmation = config.parameters.get("volume_confirmation", True)
-        self._min_volume_ratio = config.parameters.get("min_volume_ratio", 1.2)
+        # Volume ratio: 1.5x minimum per industry research (was 1.2x, too low)
+        # Research shows 1.5x minimum, 2.0x optimal for breakout confirmation
+        self._min_volume_ratio = config.parameters.get("min_volume_ratio", 1.5)
         self._allowed_sessions = config.parameters.get(
             "allowed_sessions", ["london", "new_york", "london_ny_overlap"]
         )

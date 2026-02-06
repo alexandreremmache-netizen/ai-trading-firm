@@ -19,18 +19,23 @@ class TestStopLossConfig:
     """Tests for StopLossConfig dataclass."""
 
     def test_default_values(self):
-        """Test default configuration values."""
+        """Test default configuration values (Phase 12 updated)."""
         config = StopLossConfig()
 
         assert config.use_atr_stops is True
         assert config.atr_multiplier == 2.5
         assert config.fixed_stop_loss_pct == 5.0
         assert config.trailing_stop_enabled is True
-        assert config.trailing_activation_pct == 2.0
-        assert config.trailing_distance_pct == 3.0
+        assert config.trailing_activation_pct == 1.0  # Phase 12: was 2.0
+        assert config.trailing_distance_pct == 1.5  # Phase 12: was 3.0
         assert config.take_profit_enabled is True
-        assert config.take_profit_pct == 10.0
+        assert config.take_profit_pct == 4.0  # Phase 12: was 10.0
         assert config.drawdown_close_threshold_pct == 15.0
+        # Phase 12: Breakeven settings
+        assert config.breakeven_enabled is True
+        assert config.breakeven_activation_pct == 1.5
+        assert config.breakeven_buffer_pct == 0.1
+        assert config.max_holding_hours == 48.0  # Phase 12: was 0.0
 
     def test_custom_values(self):
         """Test custom configuration values."""

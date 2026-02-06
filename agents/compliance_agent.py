@@ -16,7 +16,7 @@ import re
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta, time
-from typing import TYPE_CHECKING, Optional, Set, Callable, Any
+from typing import TYPE_CHECKING, Optional, Set, Any
 from enum import Enum
 from zoneinfo import ZoneInfo
 
@@ -464,15 +464,14 @@ class ComplianceAgent(ValidationAgent):
         self._report_retention_days = audit_schedule_config.get("retention_days", 365)
 
         # Compliance notifier for officer notifications (MON-012)
-        # Callable signature: (severity: str, alert_type: str, message: str, details: dict) -> None
-        self._compliance_notifier: Optional[Callable[[str, str, str, dict], Any]] = None
+        self._compliance_notifier: Optional[Any] = None
 
-    def set_compliance_notifier(self, compliance_notifier: Callable[[str, str, str, dict], Any]) -> None:
+    def set_compliance_notifier(self, compliance_notifier: Any) -> None:
         """
         Set compliance officer notifier for real-time violation alerts (MON-012).
 
         Args:
-            compliance_notifier: Callable that accepts (severity, alert_type, message, details)
+            compliance_notifier: ComplianceOfficerNotifier instance with notify_violation() method
         """
         self._compliance_notifier = compliance_notifier
         logger.info("ComplianceNotifier connected to ComplianceAgent for real-time alerts")
@@ -495,7 +494,13 @@ class ComplianceAgent(ValidationAgent):
         """
         if self._compliance_notifier is not None:
             try:
-                result = self._compliance_notifier(severity, alert_type, message, details)
+                result = self._compliance_notifier.notify_violation(
+                    violation_type=alert_type,
+                    description=message,
+                    symbol=details.get("symbol") if details else None,
+                    trade_id=details.get("decision_id") if details else None,
+                    details=details,
+                )
                 # Handle async notifiers
                 if hasattr(result, '__await__'):
                     await result

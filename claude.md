@@ -7,6 +7,106 @@ Ce n'est **PAS** un jouet, **PAS** un chatbot, et **PAS** un agent autonome uniq
 
 ---
 
+## Quick Start
+
+```bash
+# 1. Installation des dependances
+pip install -r requirements.txt
+
+# 2. (Optionnel) Installer Ollama pour agents LLM locaux
+# https://ollama.ai - puis: ollama pull llama3:8b
+
+# 3. Configurer IB Gateway/TWS
+# Paper Trading: TWS > Edit > Global Config > API > Port 4002
+# Cocher "Enable ActiveX and Socket Clients"
+# Cocher "Allow connections from localhost only"
+
+# 4. Demarrer le systeme
+python main.py --config config.simple.yaml
+
+# 5. Ouvrir le dashboard
+# http://localhost:8081
+
+# 6. Verifier les logs
+tail -f logs/trading_firm.log
+```
+
+---
+
+## Directives Claude (Claude Code Instructions)
+
+### Mode de Travail
+- **Plan Mode** pour tout changement architectural (nouvelle strategie, nouvel agent, modification event bus)
+- **Auto Mode** pour corrections de bugs, ajouts de tests, refactoring simple
+- Toujours lire ce fichier (`CLAUDE.md`) avant de commencer une tache
+
+### Avant de Coder
+- Verifier l'Architecture Invariant correspondant (section ci-dessous)
+- Lancer les tests existants : `python -m pytest tests/ -q`
+- Identifier les fichiers impactes et les lire
+
+### Verification Obligatoire
+- Apres chaque modification : `python -m pytest tests/ -q` (tous les tests doivent passer)
+- Pour un nouvel agent : ajouter au minimum 20 tests
+- Pour une nouvelle strategie : ajouter walk-forward tests
+
+### Bug Fixing
+- D'abord ecrire un test qui reproduit le bug
+- Puis corriger
+- Verifier que le test passe
+
+### Style et Elegance
+- Async/await pour tous les appels broker
+- Pydantic pour validation des evenements
+- Type hints partout
+- Docstrings pour les fonctions publiques
+- Pas de `while True` ni polling
+- `deque(maxlen=N)` pour les historiques bornes, **jamais de slicing direct** sur deque → `list(deque)[-N:]`
+
+### Core Principles
+- **Un seul decideur** : CIOAgent
+- **Event-driven** : pas de polling, pas de boucles infinies
+- **IB = source de verite** pour les positions
+- **Audit trail** : tout passe par ImmutableAuditLedger
+- **Separation** : signal → decision → risk → compliance → execution
+
+---
+
+## Regles Absolues
+
+### ✅ TOUJOURS
+- Utiliser `async/await` pour les appels IB
+- Passer par `core/broker.py` pour toute interaction IB
+- Valider les types avec Pydantic avant creation d'evenements
+- Ajouter des tests pour toute nouvelle fonctionnalite
+- Utiliser `deque(maxlen=N)` pour les historiques
+- Convertir `list(deque)[-N:]` pour le slicing (Python deque ne supporte pas `[-N:]`)
+- Utiliser `datetime.now(timezone.utc)` pour les timestamps (MiFID II)
+- Respecter le progressive subscription delay (1.5s) pour les souscriptions IB
+- Diviser `avg_cost` par le `multiplier` pour obtenir le vrai entry price
+- Utiliser `get_positions_async()` (pas `get_positions()` sync)
+- Verifier `BarrierResult.is_valid` avant de traiter les signaux dans le CIO
+
+### ❌ JAMAIS
+- Creer un agent "omniscient" qui bypass le CIO
+- Utiliser `while True` ou boucles infinies
+- Appeler IB sans passer par `core/broker.py`
+- Hardcoder les credentials ou API keys
+- Utiliser `datetime.now()` sans timezone (UTC obligatoire)
+- Auto-corriger les positions sans approbation humaine
+- Slicer directement un `deque` → convertir en `list()` d'abord
+- Souscrire 44 symboles simultanement (rate limit IB)
+- Modifier `CapitalAllocationGovernor` depuis un agent autre que CIO
+- Ignorer `is_valid` du `BarrierResult` - CIO doit bloquer si CRITICAL manquant
+
+### ⚠️ ATTENTION
+- Les agents LLM (Sentiment, ChartAnalysis, Forecasting) sont desactives par defaut (tokens)
+- Le mode `--dangerously-skip-permissions` ne doit etre utilise que localement
+- Kill-switch HARD stops (weekly/rolling) necessitent un override manuel
+- `ReconciliationAgent.auto_correct = false` par defaut
+
+---
+
 ## Principes Fondamentaux
 
 ### Architecture Multi-Agents
@@ -35,47 +135,47 @@ Ce n'est **PAS** un jouet, **PAS** un chatbot, et **PAS** un agent autonome uniq
 ## Architecture du Systeme
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     MARKET DATA (IB)                        │
-└─────────────────────────┬───────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                     MARKET DATA (IB)                            │
+└─────────────────────────┬───────────────────────────────────────┘
                           │ MarketDataEvent
                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│              SIGNAL AGENTS (parallel fan-out)               │
-│  [Macro] [StatArb] [Momentum] [MarketMaking]                │
-│  [Session] [IndexSpread] [TTMSqueeze] [EventDriven]         │
-│  [MeanReversion] [MACDv] [Sentiment*] [ChartAnalysis*]      │
-│  [Forecast*] (* = LLM agents, disabled by default)          │
-└─────────────────────────┬───────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│              SIGNAL AGENTS (parallel fan-out)                   │
+│  [Macro] [StatArb] [Momentum] [MarketMaking]                   │
+│  [Session] [IndexSpread] [TTMSqueeze] [EventDriven]            │
+│  [MeanReversion] [MACDv] [Sentiment*] [ChartAnalysis*]         │
+│  [Forecast*] (* = LLM agents, disabled by default)             │
+└─────────────────────────┬───────────────────────────────────────┘
                           │ SignalEvent (barrier sync)
                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    CIO AGENT (single)                       │
-│              THE decision-making authority                  │
-└─────────────────────────┬───────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    CIO AGENT (single)                           │
+│              THE decision-making authority                      │
+└─────────────────────────┬───────────────────────────────────────┘
                           │ DecisionEvent
                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    RISK AGENT                               │
-│   Kill-switch, VaR, Crash Protection, position limits       │
-└─────────────────────────┬───────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    RISK AGENT                                   │
+│   Kill-switch, VaR, CVaR, Crash Protection, position limits    │
+└─────────────────────────┬───────────────────────────────────────┘
                           │ ValidatedDecisionEvent
                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 COMPLIANCE AGENT (EU/AMF)                   │
-│        Blackout, MNPI, restricted instruments              │
-└─────────────────────────┬───────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                 COMPLIANCE AGENT (EU/AMF)                       │
+│        Blackout, MNPI, restricted instruments                  │
+└─────────────────────────┬───────────────────────────────────────┘
                           │ ValidatedDecisionEvent
                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  EXECUTION AGENT                            │
-│    Adaptive TWAP/VWAP, Smart Algo Selection, Fill Quality   │
-└─────────────────────────┬───────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                  EXECUTION AGENT                                │
+│    Adaptive TWAP/VWAP, Smart Algo Selection, Fill Quality      │
+└─────────────────────────┬───────────────────────────────────────┘
                           │ OrderEvent
                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  INTERACTIVE BROKERS                        │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                  INTERACTIVE BROKERS                            │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -89,10 +189,13 @@ Ce n'est **PAS** un jouet, **PAS** un chatbot, et **PAS** un agent autonome uniq
 - `DecisionMode` does NOT modify the EventBus quorum mechanism
 - Barrier release is governed ONLY by `quorum_config`, not by decision mode
 
-### 2. Critical Agent Invariant
+### 2. Critical Agent Invariant (ENFORCED - Phase 12)
 - Barrier MUST NOT release if ANY CRITICAL agent is missing, regardless of quorum percentage
 - MacroAgent and RiskAgent are CRITICAL by default
-- Use `SignalBarrier.is_valid()` to check before making decisions
+- `wait_for_signals()` returns `BarrierResult` with `is_valid` flag
+- CIO MUST check `result.is_valid` before processing new signals
+- If invalid: CIO skips new decisions but continues managing existing positions
+- `RiskAlertEvent` is emitted for missing CRITICAL agents (visible in dashboard)
 
 ### 3. Capital Allocation Governor Caller
 - ONLY `CIOAgent` calls `CapitalAllocationGovernor`
@@ -114,6 +217,125 @@ Ce n'est **PAS** un jouet, **PAS** un chatbot, et **PAS** un agent autonome uniq
 - Weekly loss counters and rolling drawdown are persisted via `StatePersistence`
 - On restart, load counters from persisted state before processing
 - HARD stops (weekly, rolling) require manual override - no auto-reset
+
+---
+
+## Dependances
+
+| Package | Version Min | Usage |
+|---------|-------------|-------|
+| ib_insync | >=0.9.86 | Interactive Brokers API |
+| numpy | >=1.24 | Calculs numeriques |
+| pandas | >=2.0 | DataFrames, series temporelles |
+| hmmlearn | >=0.3 | HMM Regime Detection |
+| scipy | >=1.11 | Optimisation, stats, Cornish-Fisher |
+| fastapi | >=0.100 | Dashboard API |
+| uvicorn | >=0.23 | ASGI server |
+| websockets | >=11.0 | Dashboard real-time |
+| pydantic | >=2.0 | Validation evenements |
+| aiohttp | >=3.8 | HTTP async (Ollama, APIs) |
+| scikit-learn | >=1.3 | Walk-forward, clustering |
+| statsmodels | >=0.14 | Johansen, ADF tests |
+| PyYAML | >=6.0 | Configuration |
+| python-dotenv | >=1.0 | Variables d'environnement |
+
+**Optionnel (agents LLM):**
+| Package | Usage |
+|---------|-------|
+| anthropic | Claude API (Sentiment, ChartAnalysis, Forecasting) |
+| ollama | Backend LLM local gratuit |
+
+---
+
+## Configuration IB (Interactive Brokers)
+
+### Ports
+
+| Mode | TWS | IB Gateway |
+|------|-----|------------|
+| Paper Trading | 7497 | 4002 |
+| Live Trading | 7496 | 4001 |
+
+### TWS Configuration
+1. Edit > Global Configuration > API > Settings
+2. Cocher "Enable ActiveX and Socket Clients"
+3. Cocher "Allow connections from localhost only"
+4. Port: 4002 (paper) ou 4001 (live)
+5. Master API client ID: 1
+
+### Symboles Supportes
+
+| Symbole | Type | Exchange | Multiplier |
+|---------|------|----------|------------|
+| MES | Micro E-mini S&P 500 | CME | 5 |
+| MNQ | Micro E-mini Nasdaq | CME | 2 |
+| MYM | Micro E-mini Dow | CBOT | 0.5 |
+| M2K | Micro E-mini Russell | CME | 5 |
+| GC | Gold Futures | COMEX | 100 |
+| CL | Crude Oil Futures | NYMEX | 1000 |
+| ES | E-mini S&P 500 | CME | 50 |
+| NQ | E-mini Nasdaq | CME | 20 |
+
+---
+
+## Securite
+
+### Fichier .env
+```env
+# Ne JAMAIS committer ce fichier
+ANTHROPIC_API_KEY=sk-ant-xxx     # Si agents LLM Claude actives
+IB_ACCOUNT=DUxxxxxx              # Compte paper trading
+```
+
+### .gitignore (obligatoire)
+```
+.env
+.env.*
+logs/
+*.pyc
+__pycache__/
+reports/
+logs/audit_ledger/
+```
+
+### Kill Switch
+- Accessible depuis la navbar du dashboard
+- Confirmation requise (debounce)
+- Bypass TWAP/VWAP pour fermeture immediate
+- Enregistre dans l'audit ledger
+
+---
+
+## Logging
+
+### Niveaux
+| Niveau | Usage |
+|--------|-------|
+| DEBUG | Signaux individuels, calculs internes |
+| INFO | Decisions CIO, ordres executes, changements de regime |
+| WARNING | Timeouts barrier, signaux rejetes, rate limits |
+| ERROR | Erreurs IB, echecs reconciliation |
+| CRITICAL | Kill switch active, HARD stop triggered |
+
+### Audit Ledger (MiFID II)
+- Fichier: `logs/audit_ledger/`
+- Chaine de hachage SHA-256
+- Timestamps UTC milliseconde
+- Non modifiable (append-only)
+- Export compliance: `ledger.export_compliance_report(start, end, path)`
+
+---
+
+## Limites Connues
+
+| Limite | Valeur | Impact |
+|--------|--------|--------|
+| IB rate limit | 60 req / 10 min | Progressive subscription obligatoire |
+| IB concurrent subscriptions | ~100 | Limiter les symboles |
+| Barrier sync timeout | 5s default | Agents lents emettent heartbeat |
+| deque slicing | Non supporte | Toujours `list(deque)[-N:]` |
+| Ollama inference | ~2-5s / requete | Cache async pour agents LLM |
+| WebSocket dashboard | 1 update/s max | Throttle cote serveur |
 
 ---
 
@@ -190,7 +412,7 @@ ai-trading-firm/
 │   └── components/
 │       └── advanced_analytics.py # Rolling Sharpe, Session Perf, etc.
 │
-├── tests/                  # Tests (1042 tests)
+├── tests/                  # Tests (1127 tests)
 │   ├── test_cio_agent.py        # 72 tests
 │   ├── test_risk_agent.py       # 68 tests
 │   ├── test_walk_forward.py     # 58 tests
@@ -245,13 +467,13 @@ ai-trading-firm/
 
 | Agent | Responsabilite |
 |-------|---------------|
-| `RiskAgent` | VaR, Crash Protection, kill-switch, position limits, Weekly/Rolling drawdown stops (NEW) |
+| `RiskAgent` | VaR, CVaR, Crash Protection, kill-switch, position limits, Weekly/Rolling drawdown stops (NEW) |
 | `ComplianceAgent` | EU/AMF, blackout, MNPI, LEI validation |
 | `ExecutionAgent` | Adaptive TWAP/VWAP, Smart Algo Selection, Zombie order management (NEW) |
 
 ---
 
-## Fonctionnalites Implementees (Phases 1-8)
+## Fonctionnalites Implementees (Phases 1-12)
 
 ### Phase 1-4: Core Enhancements
 - Oscillator parameters par asset class
@@ -314,11 +536,80 @@ ai-trading-firm/
 - **Local LLM Support** - Ollama and llama.cpp backends for free sentiment analysis
 - **Weekly/Rolling Drawdown Stops** - HARD stops with manual override requirement
 - **Decision Modes** - NORMAL, DEFENSIVE, EMERGENCY, HUMAN_CIO with position caps
+
+### Phase 11: Parameter Corrections (Industry Best Practices - Feb 2026)
+**TOP Priority Fixes:**
+- **Market Making** - Fixed 256x volatility overestimation, added T factor to spread calculation
+- **Session Strategy** - ORB end_time 16:00→17:00 UTC, ATR multipliers 0.5→1.5/2.0/4.0
+- **Mean Reversion** - Connors RSI(2): period 14→2, thresholds 30/70→5/95
+- **Execution Agent** - Almgren-Chriss η/γ=5:1, slippage 50→10bps, VWAP 25%→12%
+- **MACD-v** - Added neutral zone filter (-50/+50) per Charles H. Dow Award 2022
+- **Event Driven** - Pre-event window 2→24h for FOMC positioning
+- **StatArb** - Default hedge ratio OLS→Kalman, min_correlation 0.7→0.80
+- **Index Spread** - Added ADF cointegration test
+- **TTM Squeeze** - Momentum formula: linreg→Donchian+SMA
+
+**Week 2-3 Fixes:**
+- **MomentumAgent** - ADX trend filter (ADX>25), slow MA 30→50 days
+- **SessionAgent** - Volume confirmation 1.2x→1.5x
+- **RiskAgent** - Added CVaR 97.5% (FRTB/Basel III requirement)
+- **MACD-v** - Added ranging market detection (25 bars in neutral zone)
 - **Human-in-the-Loop Mode** - Queue decisions for human approval with timeout
 - **Capital Allocation Governor** - Regime-based budgets and drawdown reduction
 - **Immutable Audit Ledger** - Hash-chained logging for MiFID II compliance
 - **IB Failure Simulator** - Test scenarios for zombie orders, missing fills, disconnects
 - **Regime/Session Attribution** - Track entry/exit regime and session for closed positions
+
+### Phase 12: Active Position Protection & Barrier Integrity (Feb 2026)
+
+**Position Protection (win rate fix):**
+- **Breakeven Stop at 1R** - Stop moves to entry price when position reaches 1R profit
+- **Trailing Stop at 1.5R** - Stop trails 0.5R behind peak price, uses broker.modify_order()
+- **Graduated Partial Profits** - 33% at 1.5R, 33% at 2.5R, 100% at 3.5R (was 50% at 2R only)
+- **Realistic Profit Target** - 4% (was 15%), trailing distance 1.5% (was 3%)
+- **Per-Strategy Time Exits** - Intraday 4h, Swing 48h, Pairs 5 days (was 30 days for all)
+- **Position Review** - Every 30s (was 60s)
+- **StopLossManager** - `_update_dynamic_stops()` wired to `broker.modify_order()`
+- **Strategy Classification** - `_classify_strategy_type()` maps agents to intraday/swing/pairs
+
+**Barrier Integrity Fixes:**
+- **BarrierResult dataclass** - `wait_for_signals()` returns full validity info (was just signals dict)
+- **CIO barrier check** - CIO blocks new decisions when CRITICAL agents missing (Architecture Invariant #2)
+- **RiskAlertEvent on barrier failure** - Dashboard shows missing CRITICAL agents as alerts
+- **Position management continues** - Existing positions still managed during barrier failure
+
+**TrackedPosition new fields:**
+```python
+stop_moved_to_breakeven: bool   # True once stop moved to entry
+trailing_stop_active: bool      # True once trailing engages
+trailing_stop_level: float      # Current trailing stop price
+peak_r_multiple: float          # Highest R-multiple reached
+partial_exits_taken: int        # 0, 1, 2, or 3
+strategy_type: str              # intraday/swing/pairs
+```
+
+**Config changes (config.yaml):**
+```yaml
+cio:
+  position_management:
+    profit_target_pct: 4.0          # was 15.0
+    trailing_profit_pct: 1.5        # was 3.0
+    max_holding_days: 2.0           # was 30.0
+    breakeven_r_trigger: 1.0
+    trailing_activation_r: 1.5
+    trailing_distance_r: 0.5
+    partial_profit_1_r: 1.5
+    partial_profit_2_r: 2.5
+    partial_profit_3_r: 3.5
+    max_holding_hours_intraday: 4.0
+    max_holding_hours_swing: 48.0
+    max_holding_hours_pairs: 120.0
+  exit_rules:
+    stop_loss_atr_multiplier: 2.0   # was 2.5
+    trailing_activation_pct: 1.0    # was 2.0
+    trailing_distance_pct: 1.5      # was 3.0
+    time_exit_hours: 48             # was 0 (disabled)
+```
 
 ### Infrastructure Avancee
 - HMM regime detection (Hidden Markov Model)
@@ -413,15 +704,19 @@ Les agents peuvent etre actives/desactives depuis le dashboard:
 ## Tests
 
 ```bash
-# Tous les tests (1042)
+# Tous les tests (1127)
 python -m pytest tests/ -v
 
 # Tests rapides
 python -m pytest tests/ -q
 
 # Tests specifiques
+python -m pytest tests/test_cio_agent.py -v
 python -m pytest tests/test_walk_forward.py -v
 python -m pytest tests/test_integration_full.py -v
+
+# Coverage
+python -m pytest tests/ --cov=core --cov=agents --cov=strategies --cov-report=html
 ```
 
 ### Couverture Tests
@@ -431,21 +726,21 @@ python -m pytest tests/test_integration_full.py -v
 | CIO Agent | 72 |
 | Risk Agent | 68 |
 | Walk-forward Validation | 58 |
-| Integration Tests | 39 |
-| Dashboard Integration | 34 |
-| Ichimoku Strategy | 36 |
-| Volume Indicators | 41 |
-| HMM Regime | 28 |
-| Yield Curve | 35 |
 | DXY Analyzer | 43 |
+| Volume Indicators | 41 |
+| Integration Tests | 39 |
 | Avellaneda-Stoikov | 38 |
-| Session Strategy | 18 |
-| Index Spread | 27 |
-| TTM Squeeze | 21 |
-| Event-Driven | 28 |
-| Mean Reversion | 27 |
+| Ichimoku Strategy | 36 |
+| Yield Curve | 35 |
+| Dashboard Integration | 34 |
 | Advanced Analytics | 29 |
-| **TOTAL** | **1042** |
+| HMM Regime | 28 |
+| Event-Driven | 28 |
+| Index Spread | 27 |
+| Mean Reversion | 27 |
+| TTM Squeeze | 21 |
+| Session Strategy | 18 |
+| **TOTAL** | **1127** |
 
 ---
 
@@ -656,9 +951,10 @@ position.initial_risk   # Distance entry -> stop-loss (1R)
 position.r_multiple     # PnL / initial_risk
 
 # Regles de gestion automatique:
-# - Profit partiel a 2R
-# - Exit complet a 3R si conviction baisse
-# - Stats trackees: r_multiple_exits_2r, r_multiple_exits_3r
+# - Breakeven stop a 1R (Phase 12)
+# - Trailing stop a 1.5R (Phase 12)
+# - Partial profit 33% a 1.5R, 33% a 2.5R, 100% a 3.5R (Phase 12)
+# - Stats trackees: r_multiple_exits par niveau
 ```
 
 ---
@@ -673,12 +969,66 @@ position.r_multiple     # PnL / initial_risk
 | Memory leaks en production | Listes non bornees | Remplace par `deque(maxlen=N)` dans 8 agents |
 | Signal barrier timeout 5 agents | Pas de signal pendant warmup | Ajout `_emit_warmup_heartbeat()` |
 | EventDrivenAgent sans events | Pas de calendrier | Economic Calendar avec 61 events pre-charges |
-| IB rate limit au demarrage | 44 symboles souscrits simultanément | Progressive subscription avec delai 1.5s |
+| IB rate limit au demarrage | 44 symboles souscrits simultanement | Progressive subscription avec delai 1.5s |
 | Deque slice error dashboard | `deque[-N:]` invalide en Python | Conversion `list(deque)[-N:]` dans risk_agent |
 | Risk limits default 2.0x | Pas de `limits` dans get_status() | Ajout section `limits` dans RiskAgent.get_status() |
 | Entry price = notional | IB retourne avg_cost × multiplier | Division par multiplier dans get_positions_async() |
 | Micro futures manquants | MES/MNQ/MYM/M2K pas dans CONTRACT_SPECS | Ajout des 4 micro futures avec multiplicateurs |
-| /api/status positions vide | Utilisait get_positions() sync | Changé pour get_positions_async() |
+| /api/status positions vide | Utilisait get_positions() sync | Change pour get_positions_async() |
+| Positions profitables deviennent negatives | Stop statique, TP=15%, max hold=30j | Phase 12: Breakeven 1R, trailing 1.5R, TP=4%, hold max per strategy |
+| CIO decide sur signaux incomplets | Barrier retourne signaux sans validite | Phase 12: BarrierResult avec is_valid, CIO bloque si CRITICAL manquant |
+| Erreurs barrier invisibles dashboard | Seulement loggees en texte | Phase 12: RiskAlertEvent emis sur barrier failure |
+| Test session momentum time-dependent | get_current_session() utilise datetime.now() | Mock de la session dans les tests |
+
+---
+
+## Contribution (Template Nouvel Agent)
+
+Pour ajouter un nouvel agent de signal:
+
+```python
+# agents/my_new_agent.py
+from core.event_bus import EventBus, SignalEvent
+
+class MyNewAgent:
+    """Docstring obligatoire."""
+
+    def __init__(self, event_bus: EventBus, config: dict):
+        self._event_bus = event_bus
+        self._config = config
+        self._history = deque(maxlen=500)  # Toujours borne
+
+    async def on_market_data(self, event: MarketDataEvent) -> None:
+        # 1. Calcul du signal
+        signal = self._compute_signal(event)
+
+        # 2. Emission via event bus
+        if signal:
+            await self._event_bus.emit(SignalEvent(
+                source=self.__class__.__name__,
+                symbol=event.symbol,
+                direction=signal.direction,
+                confidence=signal.confidence,
+                metadata=signal.metadata,
+            ))
+
+    async def _emit_warmup_heartbeat(self) -> None:
+        """Emit heartbeat pendant warmup pour eviter barrier timeout."""
+        await self._event_bus.emit(SignalEvent(
+            source=self.__class__.__name__,
+            symbol="HEARTBEAT",
+            direction="NEUTRAL",
+            confidence=0.0,
+        ))
+```
+
+### Conventions
+- Nommage: `XxxAgent` / `xxx_strategy.py`
+- Historiques: `deque(maxlen=N)`, jamais de listes non bornees
+- Slicing: `list(self._history)[-N:]` (jamais `self._history[-N:]`)
+- Timestamps: `datetime.now(timezone.utc)`
+- Tests: minimum 20 tests par agent
+- Warmup: emettre heartbeat si pas de signal pendant warmup
 
 ---
 
@@ -757,8 +1107,69 @@ Python `deque` ne supporte pas le slicing `[-N:]`. Corrections:
 
 ---
 
+## Changelog
+
+### v0.12.0 (2026-02-xx) - Phase 12: Active Position Protection & Barrier Integrity
+- ✨ Breakeven stop at 1R, trailing stop at 1.5R
+- ✨ Graduated partial profits (33% at 1.5R, 2.5R, 3.5R)
+- ✨ Per-strategy time exits (intraday 4h, swing 48h, pairs 5d)
+- ✨ BarrierResult dataclass with is_valid flag
+- ✨ Critical Agent Invariant enforced (Architecture Invariant #2)
+- ✨ RiskAlertEvent on barrier failure
+- 🔧 Profit target 15%→4%, trailing 3%→1.5%
+- 🔧 Position review interval 60s→30s
+
+### v0.11.0 (2026-02-05) - Phase 11: Parameter Corrections
+- 🔧 Market Making: 256x volatility fix, T factor
+- 🔧 Mean Reversion: Connors RSI(2) period 14→2
+- 🔧 Execution: Almgren-Chriss η/γ=5:1
+- 🔧 MACD-v: neutral zone (-50/+50)
+- ✨ CVaR 97.5% (FRTB/Basel III)
+- ✨ Capital Allocation Governor
+- ✨ Immutable Audit Ledger (MiFID II)
+- ✨ IB Failure Simulator
+
+### v0.10.0 (2026-02-xx) - Phase 10: Architecture Improvements
+- ✨ Quorum-Based Barrier with agent criticality
+- ✨ Async Signal Cache
+- ✨ CIO State Persistence (hot restart)
+- ✨ Reconciliation Agent
+- ✨ Decision Modes (NORMAL/DEFENSIVE/EMERGENCY/HUMAN_CIO)
+- ✨ Weekly/Rolling Drawdown HARD stops
+- ✨ Zombie Order Management
+- ✨ Local LLM Support (Ollama)
+
+### v0.9.0 (2026-01-xx) - Phase 9: Win Rate Optimization
+- ✨ Signal Quality Scoring (6 dimensions)
+- ✨ R-Multiple Position Tracking
+- 🔧 Memory leak fixes (20+ deque conversions)
+- ✨ Historical Warmup (100 bars)
+- ✨ Economic Calendar (61 events)
+
+### v0.8.0 (2026-01-xx) - Phase 8: Dashboard Upgrades
+- ✨ Agent toggle on/off depuis dashboard
+- ✨ Rolling Sharpe/Sortino display
+- ✨ Correlation heatmap temps reel
+- ✨ Win rate by session panel
+- ✨ Signal consensus panel
+
+### v0.7.0 (2026-01-xx) - Phase 7: Execution
+- ✨ Adaptive TWAP volatility-aware
+- ✨ Smart Algo Selection
+- ✨ Fill Quality Monitoring
+- ✨ Session-Aware Execution Rules
+
+### v0.6.0 (2025-12-xx) - Phase 6: New Strategies
+- ✨ SessionAgent + Opening Range Breakout
+- ✨ IndexSpreadAgent (MES/MNQ)
+- ✨ TTMSqueezeAgent
+- ✨ EventDrivenAgent
+- ✨ MeanReversionAgent
+
+---
+
 *Document mis a jour: 2026-02-05*
 *Total tests: 1127*
-*Total lignes de code: ~32,000+*
-*Phase 10: Architecture Improvements + Expert Review Fixes*
-*Risk Score: 9.5/10 | Compliance Score: 85/100*
+*Total lignes de code: ~33,000+*
+*Phase 12: Active Position Protection & Barrier Integrity*
+*Risk Score: 9.5/10 | Compliance Score: 90/100*

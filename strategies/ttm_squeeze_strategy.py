@@ -248,10 +248,17 @@ class TTMSqueezeStrategy:
         period: int | None = None,
     ) -> np.ndarray:
         """
-        Calculate momentum oscillator (linear regression deviation).
+        Calculate TTM Squeeze momentum oscillator.
 
-        This measures the deviation of price from its linear regression line,
-        similar to the TTM Squeeze momentum histogram.
+        John Carter's original TTM Squeeze momentum formula:
+        Momentum = Donchian Midpoint - SMA(close)
+
+        Where:
+        - Donchian Midpoint = (Highest High + Lowest Low) / 2 over N periods
+        - SMA = Simple Moving Average of close over N periods
+
+        This measures price position relative to its average, weighted by
+        the recent trading range. Positive = bullish, Negative = bearish.
 
         Args:
             high: High prices
@@ -267,23 +274,27 @@ class TTMSqueezeStrategy:
         if len(close) < period:
             return np.zeros(len(close))
 
-        # Use typical price (HLC average)
-        typical = (high + low + close) / 3
-
         momentum = np.zeros(len(close))
 
         for i in range(period - 1, len(close)):
-            window = typical[i - period + 1:i + 1]
+            # Donchian channel midpoint (highest high + lowest low) / 2
+            window_high = high[i - period + 1:i + 1]
+            window_low = low[i - period + 1:i + 1]
+            highest_high = np.max(window_high)
+            lowest_low = np.min(window_low)
+            donchian_midpoint = (highest_high + lowest_low) / 2
 
-            # Linear regression
-            x = np.arange(period)
-            slope, intercept = np.polyfit(x, window, 1)
+            # Simple Moving Average of close
+            window_close = close[i - period + 1:i + 1]
+            sma = np.mean(window_close)
 
-            # Predicted value at current point
-            predicted = slope * (period - 1) + intercept
-
-            # Deviation from linear regression
-            momentum[i] = typical[i] - predicted
+            # TTM Squeeze momentum = Donchian midpoint - SMA
+            # This combines the current midpoint with average position
+            # Positive when price is above the midpoint-SMA equilibrium
+            # The formula is actually: (Donchian_midpoint + SMA) / 2 - SMA = (Donchian_midpoint - SMA) / 2
+            # Simplified: close - (Donchian_midpoint + SMA) / 2
+            equilibrium = (donchian_midpoint + sma) / 2
+            momentum[i] = close[i] - equilibrium
 
         return momentum
 

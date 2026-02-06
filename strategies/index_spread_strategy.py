@@ -34,6 +34,7 @@ from enum import Enum
 from typing import Any
 
 import numpy as np
+from scipy import stats
 
 
 logger = logging.getLogger(__name__)
@@ -278,6 +279,75 @@ class IndexSpreadStrategy:
         half_life = -np.log(2) / np.log(b)
         return max(0.1, half_life)
 
+    def _adf_test(
+        self,
+        spread: np.ndarray,
+        max_lag: int = 4,
+    ) -> tuple[float, float, bool]:
+        """
+        Simplified Augmented Dickey-Fuller test for spread stationarity.
+
+        Tests H0: spread has unit root (non-stationary)
+        vs H1: spread is stationary (mean-reverting)
+
+        Args:
+            spread: Spread series
+            max_lag: Maximum lag for ADF
+
+        Returns:
+            (adf_stat, p_value, is_stationary)
+        """
+        if len(spread) < max_lag + 10:
+            return 0.0, 1.0, False
+
+        # Compute first differences
+        diff_spread = np.diff(spread)
+        lagged_spread = spread[:-1]
+
+        # Simple OLS: diff_spread = alpha + beta * lagged_spread + error
+        n = len(diff_spread)
+        x = lagged_spread[-n:]
+        y = diff_spread
+
+        x_mean = np.mean(x)
+        y_mean = np.mean(y)
+
+        numerator = np.sum((x - x_mean) * (y - y_mean))
+        denominator = np.sum((x - x_mean) ** 2)
+
+        if abs(denominator) < 1e-12:
+            return 0.0, 1.0, False
+
+        beta = numerator / denominator
+        alpha = y_mean - beta * x_mean
+
+        # Residuals and standard error
+        residuals = y - (alpha + beta * x)
+        sse = np.sum(residuals ** 2)
+        mse = sse / (n - 2) if n > 2 else 1.0
+        se_beta = np.sqrt(mse / denominator) if denominator > 0 else 1.0
+
+        # ADF statistic
+        adf_stat = beta / se_beta if se_beta > 0 else 0.0
+
+        # Critical values (approximate for n=100, no trend)
+        # -3.43 (1%), -2.86 (5%), -2.57 (10%)
+        # Convert to approximate p-value
+        if adf_stat < -3.43:
+            p_value = 0.01
+        elif adf_stat < -2.86:
+            p_value = 0.05
+        elif adf_stat < -2.57:
+            p_value = 0.10
+        elif adf_stat < -1.95:
+            p_value = 0.30
+        else:
+            p_value = 0.50 + min(0.49, adf_stat * 0.1)
+
+        is_stationary = p_value < 0.05
+
+        return adf_stat, p_value, is_stationary
+
     def analyze_spread(
         self,
         spread_name: str,
@@ -318,11 +388,22 @@ class IndexSpreadStrategy:
         else:
             relationship = SpreadRelationship.NORMAL
 
-        # Check cointegration (simplified)
+        # Check cointegration using ADF test on spread (Engle-Granger approach)
+        # This is more rigorous than just checking correlation/half-life
+        _, adf_pvalue, is_stationary = self._adf_test(spread)
+
+        # Cointegration requires:
+        # 1. ADF test rejects unit root (spread is stationary)
+        # 2. Correlation is above minimum threshold
+        # 3. Half-life is in tradeable range
         is_cointegrated = (
+            is_stationary and  # ADF test: spread is mean-reverting
             correlation >= self._min_correlation and
             self._min_half_life <= half_life <= self._max_half_life
         )
+
+        if not is_stationary:
+            logger.debug(f"Spread {spread_name} failed ADF test (p={adf_pvalue:.3f})")
 
         state = SpreadState(
             spread_value=spread[-1],

@@ -1956,7 +1956,7 @@
         let ws = null;
         let equityChart = null;
         let reconnectAttempts = 0;
-        const maxReconnectAttempts = 10;
+        const maxReconnectAttempts = Infinity;  // CRITICAL FIX: Never stop reconnecting - trading dashboard must always recover
 
         // Equity data storage for time filtering
         let fullEquityData = { labels: [], values: [], timestamps: [] };
@@ -2088,6 +2088,7 @@
                     if (data.payload.signals) updateSignals(data.payload.signals);
                     if (data.payload.decisions) updateDecisions(data.payload.decisions);
                     if (data.payload.alerts) loadAlerts(data.payload.alerts);
+                    if (data.payload.events) loadEvents(data.payload.events);  // CRITICAL FIX: Load event history on connect/reconnect
                     if (data.payload.risk) updateRisk(data.payload.risk);
                     if (data.payload.equity) updateEquityChart(data.payload.equity);
                     // Advanced analytics data (Phase 8)
@@ -2337,6 +2338,41 @@
             } catch (e) {
                 return utcTimeStr;
             }
+        }
+
+        function loadEvents(events) {
+            // CRITICAL FIX: Load event history on WebSocket connect/reconnect.
+            // Previously, events were only pushed via the periodic update loop's
+            // single-slot _latest_event_record, which meant reconnecting clients
+            // would see an empty event stream. Now the server sends the full
+            // event deque (up to 500 events) in the initial payload.
+            const container = document.getElementById('eventStream');
+            if (!container || !events || events.length === 0) return;
+
+            // Clear existing events to avoid duplicates on reconnect
+            container.innerHTML = '';
+
+            // Events are already in reverse chronological order (newest first)
+            events.slice(0, 100).forEach(event => {
+                const eventType = event.type || 'EVENT';
+                const eventClass = eventType.includes('SIGNAL') ? 'signal' :
+                                  eventType.includes('DECISION') ? 'decision' :
+                                  eventType.includes('RISK') ? 'risk' : '';
+
+                const localTime = utcToLocal(event.time);
+                const eventHtml = `
+                    <div class="event-item ${eventClass}">
+                        <div class="d-flex justify-content-between">
+                            <strong>${eventType}</strong>
+                            <small class="text-secondary">${localTime}</small>
+                        </div>
+                        <div class="text-secondary">${event.source || ''} → ${event.summary || ''}</div>
+                    </div>
+                `;
+                container.insertAdjacentHTML('beforeend', eventHtml);
+            });
+
+            document.getElementById('eventCount').textContent = container.children.length;
         }
 
         function addEvent(event) {

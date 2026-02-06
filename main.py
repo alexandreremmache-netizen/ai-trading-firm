@@ -45,7 +45,7 @@ except ImportError:
 
 import yaml
 
-from core.event_bus import EventBus
+from core.event_bus import EventBus, AgentCriticality
 from core.broker import IBBroker, BrokerConfig
 from core.logger import AuditLogger
 from core.agent_base import AgentConfig
@@ -99,6 +99,7 @@ from agents.execution_agent import ExecutionAgentImpl
 # New Compliance Agents (EU/AMF)
 from agents.surveillance_agent import SurveillanceAgent
 from agents.transaction_reporting_agent import TransactionReportingAgent
+from agents.reconciliation_agent import ReconciliationAgent
 
 from data.market_data import MarketDataManager, SymbolConfig
 
@@ -111,6 +112,7 @@ from core.historical_warmup import HistoricalWarmup, create_historical_warmup
 # Dashboard integration for real-time monitoring
 from dashboard.server import DashboardServer, create_dashboard_server
 from dashboard.broker_sync import BrokerMetricsSync, create_broker_sync
+from dashboard_v2.server import DashboardV2Server, create_dashboard_v2_server
 
 # SOLID Refactoring: AgentFactory for improved SRP
 from core.agent_factory import AgentFactory, AgentFactoryConfig
@@ -200,6 +202,7 @@ class TradingFirmOrchestrator:
 
         # Dashboard server for real-time monitoring
         self._dashboard_server: DashboardServer | None = None
+        self._dashboard_v2_server: DashboardV2Server | None = None
         self._broker_sync: BrokerMetricsSync | None = None
 
         # Infrastructure components
@@ -223,6 +226,7 @@ class TradingFirmOrchestrator:
         self._execution_agent: ExecutionAgentImpl | None = None
         self._surveillance_agent: SurveillanceAgent | None = None
         self._transaction_reporting_agent: TransactionReportingAgent | None = None
+        self._reconciliation_agent: ReconciliationAgent | None = None
 
         # State
         self._running = False
@@ -381,10 +385,24 @@ class TradingFirmOrchestrator:
 
         # Initialize event bus
         event_bus_config = self._config.get("event_bus", {})
+
+        # Parse agent criticality from config.yaml
+        criticality_map = {
+            "critical": AgentCriticality.CRITICAL,
+            "high": AgentCriticality.HIGH,
+            "normal": AgentCriticality.NORMAL,
+        }
+        agent_criticality_config = event_bus_config.get("agent_criticality", {})
+        agent_criticality = {
+            name: criticality_map.get(level.lower(), AgentCriticality.NORMAL)
+            for name, level in agent_criticality_config.items()
+        } if agent_criticality_config else None
+
         self._event_bus = EventBus(
             max_queue_size=event_bus_config.get("max_queue_size", 10000),
             signal_timeout=event_bus_config.get("signal_timeout_seconds", 5.0),
             barrier_timeout=event_bus_config.get("sync_barrier_timeout_seconds", 10.0),
+            agent_criticality=agent_criticality,
         )
 
         # CRITICAL: Initialize and connect immutable audit ledger for MiFID II compliance
@@ -587,9 +605,23 @@ class TradingFirmOrchestrator:
 
         logger.info("=" * 50)
         logger.info("DASHBOARD SERVER:")
-        logger.info(f"  Dashboard:  http://{dashboard_host}:{dashboard_port}/")
-        logger.info(f"  WebSocket:  ws://{dashboard_host}:{dashboard_port}/ws")
-        logger.info(f"  API:        http://{dashboard_host}:{dashboard_port}/api/status")
+        logger.info(f"  Dashboard V1:  http://{dashboard_host}:{dashboard_port}/")
+        logger.info(f"  WebSocket V1:  ws://{dashboard_host}:{dashboard_port}/ws")
+        logger.info(f"  API V1:        http://{dashboard_host}:{dashboard_port}/api/status")
+
+        # Initialize Dashboard V2 (Bloomberg Terminal)
+        v2_config = self._config.get("dashboard_v2", {})
+        if v2_config.get("enabled", True):
+            v2_port = v2_config.get("port", 8082)
+            v2_host = v2_config.get("host", dashboard_host)
+            self._dashboard_v2_server = create_dashboard_v2_server(
+                event_bus=self._event_bus,
+                host=v2_host,
+                port=v2_port,
+            )
+            logger.info(f"  Dashboard V2:  http://{v2_host}:{v2_port}/")
+            logger.info(f"  WebSocket V2:  ws://{v2_host}:{v2_port}/ws/v2")
+
         logger.info("=" * 50)
 
     async def _start_dashboard(self) -> asyncio.Task | None:
@@ -627,6 +659,37 @@ class TradingFirmOrchestrator:
             return None
         except Exception as e:
             logger.exception(f"Failed to start dashboard server: {e}")
+            return None
+
+    async def _start_dashboard_v2(self) -> asyncio.Task | None:
+        """Start the V2 Bloomberg dashboard server in background."""
+        if not self._dashboard_v2_server:
+            return None
+
+        try:
+            import uvicorn
+
+            v2_config = self._config.get("dashboard_v2", {})
+            v2_port = v2_config.get("port", 8082)
+            v2_host = v2_config.get("host", "0.0.0.0")
+
+            config = uvicorn.Config(
+                self._dashboard_v2_server.app,
+                host=v2_host,
+                port=v2_port,
+                log_level="warning",
+                access_log=False,
+            )
+            server = uvicorn.Server(config)
+
+            task = asyncio.create_task(server.serve())
+            logger.info(f"Dashboard V2 Bloomberg started on http://{v2_host}:{v2_port}")
+            return task
+
+        except ImportError:
+            return None
+        except Exception as e:
+            logger.exception(f"Failed to start dashboard V2: {e}")
             return None
 
     async def _start_broker_sync(self) -> None:
@@ -984,7 +1047,12 @@ class TradingFirmOrchestrator:
         # Wire Dashboard Server to orchestrator for real-time data access
         if self._dashboard_server:
             self._dashboard_server.set_orchestrator(self)
-            logger.info("  Orchestrator -> DashboardServer (real-time data)")
+            logger.info("  Orchestrator -> DashboardServer V1 (real-time data)")
+
+        # Wire Dashboard V2 Server to orchestrator
+        if self._dashboard_v2_server:
+            self._dashboard_v2_server.set_orchestrator(self)
+            logger.info("  Orchestrator -> DashboardServer V2 Bloomberg (real-time data)")
 
         logger.info("Component wiring complete")
 
@@ -1208,11 +1276,23 @@ class TradingFirmOrchestrator:
 
         # ========== CIO AGENT (THE decision maker) ==========
         logger.info("Initializing CIO agent...")
+        cio_params = dict(agents_config.get("cio", {}))
+        # Pass universe info for market hours filtering
+        universe = self._config.get("universe", {})
+        cio_params["_us_equity_symbols"] = [
+            s["symbol"] for s in universe.get("equities", [])
+        ]
+        cio_params["_us_etf_symbols"] = [
+            s["symbol"] for s in universe.get("etfs", [])
+        ]
+        cio_params["_forex_symbols"] = [
+            s["symbol"] for s in universe.get("forex", [])
+        ]
         self._cio_agent = CIOAgent(
             config=AgentConfig(
                 name="CIOAgent",
                 enabled=True,
-                parameters=agents_config.get("cio", {}),
+                parameters=cio_params,
             ),
             event_bus=self._event_bus,
             audit_logger=self._audit_logger,
@@ -1333,6 +1413,29 @@ class TradingFirmOrchestrator:
                 reporting_config=reporting_params,
             )
 
+        # ========== RECONCILIATION AGENT (Position Safety) ==========
+        reconciliation_config = self._config.get("reconciliation", {})
+        if reconciliation_config.get("enabled", True):
+            logger.info("Initializing Reconciliation agent...")
+            recon_params = {
+                "reconcile_interval_seconds": reconciliation_config.get("interval_seconds", 60.0),
+                "auto_correct_enabled": reconciliation_config.get("auto_correct", False),
+                "discrepancy_threshold_pct": reconciliation_config.get("discrepancy_threshold_pct", 1.0),
+            }
+            self._reconciliation_agent = ReconciliationAgent(
+                config=AgentConfig(
+                    name="ReconciliationAgent",
+                    enabled=True,
+                    parameters=recon_params,
+                ),
+                event_bus=self._event_bus,
+                audit_logger=self._audit_logger,
+                broker=self._broker,
+                get_theoretical_positions_fn=(
+                    self._cio_agent.get_tracked_positions if self._cio_agent else None
+                ),
+            )
+
         logger.info("All agents initialized")
         logger.info("  Signal agents: " + ", ".join(a.name for a in self._signal_agents))
         logger.info("  Decision: CIOAgent")
@@ -1342,6 +1445,8 @@ class TradingFirmOrchestrator:
             logger.info("  Surveillance: SurveillanceAgent (MAR 2014/596/EU)")
         if self._transaction_reporting_agent:
             logger.info("  Reporting: TransactionReportingAgent (ESMA RTS 22/23)")
+        if self._reconciliation_agent:
+            logger.info("  Reconciliation: ReconciliationAgent (Position Safety)")
 
     async def _initialize_agents_with_factory(self) -> None:
         """
@@ -1411,6 +1516,9 @@ class TradingFirmOrchestrator:
             await self._surveillance_agent.start()
         if self._transaction_reporting_agent:
             await self._transaction_reporting_agent.start()
+        if self._reconciliation_agent:
+            await self._reconciliation_agent.start()
+            await self._reconciliation_agent.start_reconciliation_loop()
 
         # Start stop-loss manager
         if self._stop_loss_manager:
@@ -1441,6 +1549,11 @@ class TradingFirmOrchestrator:
         if dashboard_task:
             agent_tasks.append(dashboard_task)
 
+        # Start Dashboard V2 Bloomberg Terminal
+        dashboard_v2_task = await self._start_dashboard_v2()
+        if dashboard_v2_task:
+            agent_tasks.append(dashboard_v2_task)
+
         # Start broker metrics sync for real P&L in dashboard
         if self._broker and self._dashboard_server:
             await self._start_broker_sync()
@@ -1463,7 +1576,10 @@ class TradingFirmOrchestrator:
         logger.info(f"  Broker: {'CONNECTED' if self._broker.is_connected else 'SIMULATED'}")
         logger.info(f"  Mode: {self._config.get('firm', {}).get('mode', 'paper').upper()}")
         if self._dashboard_server:
-            logger.info(f"  Dashboard: http://localhost:{dashboard_port}/")
+            logger.info(f"  Dashboard V1: http://localhost:{dashboard_port}/")
+        if self._dashboard_v2_server:
+            v2_port = self._config.get("dashboard_v2", {}).get("port", 8082)
+            logger.info(f"  Dashboard V2: http://localhost:{v2_port}/  (Bloomberg)")
         logger.info("  Waiting for market data events...")
         logger.info("=" * 60)
 
@@ -1597,6 +1713,9 @@ class TradingFirmOrchestrator:
             )
         if self._surveillance_agent:
             await _stop_with_timeout(self._surveillance_agent.stop(), "SurveillanceAgent")
+        if self._reconciliation_agent:
+            await self._reconciliation_agent.stop_reconciliation_loop()
+            await _stop_with_timeout(self._reconciliation_agent.stop(), "ReconciliationAgent")
 
         # Stop stop-loss manager before execution agent
         if self._stop_loss_manager:
@@ -1670,13 +1789,19 @@ class TradingFirmOrchestrator:
             logger.warning(f"Risk Alert: {event.message}")
 
     def _on_fill(self, fill: FillEvent) -> None:
-        """Handle fill notifications for monitoring."""
+        """Handle fill notifications for monitoring and dashboard."""
         if self._monitoring:
             self._monitoring.metrics.record_metric(
                 "execution.fill",
                 fill.filled_quantity * fill.fill_price,
             )
             logger.info(f"Fill received: {fill.side.value} {fill.filled_quantity} {fill.symbol} @ {fill.fill_price}")
+
+        # CRITICAL: Publish FillEvent to EventBus so dashboard receives it
+        # Without this, dashboard won't see fills and positions won't update
+        if self._event_bus:
+            # Use fire-and-forget publish (sync callback)
+            asyncio.create_task(self._event_bus.publish(fill))
 
     def _on_market_data(self, data: MarketDataEvent) -> None:
         """Handle market data for monitoring."""

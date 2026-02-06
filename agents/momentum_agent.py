@@ -56,6 +56,15 @@ class MomentumState:
     macd_history: deque = field(default_factory=lambda: deque(maxlen=50))
     signal_ema: float = 0.0  # 9-period EMA of MACD
     ema_initialized: bool = False
+    # ADX (Average Directional Index) state for trend strength
+    adx: float = 0.0  # Current ADX value
+    plus_dm_ema: float = 0.0  # +DM exponential moving average
+    minus_dm_ema: float = 0.0  # -DM exponential moving average
+    tr_ema: float = 0.0  # True Range exponential moving average
+    adx_ema: float = 0.0  # ADX smoothing EMA
+    adx_initialized: bool = False
+    highs: deque = field(default_factory=lambda: deque(maxlen=50))  # High prices for ADX
+    lows: deque = field(default_factory=lambda: deque(maxlen=50))  # Low prices for ADX
     # Demand/Supply zone tracking (MoonDev-inspired)
     zone_detector: DemandZoneDetector | None = None
     at_demand_zone: bool = False
@@ -93,11 +102,20 @@ class MomentumAgent(SignalAgent):
 
         # Configuration
         self._fast_period = config.parameters.get("fast_period", 10)
-        self._slow_period = config.parameters.get("slow_period", 30)
+        # Slow MA period: 50 (industry standard for medium-term trends)
+        # Research: 50/200 "Golden Cross" is institutional standard
+        self._slow_period = config.parameters.get("slow_period", 50)
         self._signal_period = config.parameters.get("signal_period", 9)
         self._rsi_period = config.parameters.get("rsi_period", 14)
         self._rsi_overbought = config.parameters.get("rsi_overbought", 70)
         self._rsi_oversold = config.parameters.get("rsi_oversold", 30)
+
+        # ADX (Average Directional Index) configuration - Wilder's trend strength
+        # ADX > 25 indicates a trending market (Wilder 1978)
+        # Only generate trend-following signals when ADX confirms trend strength
+        self._adx_filter_enabled = config.parameters.get("adx_filter_enabled", True)
+        self._adx_period = config.parameters.get("adx_period", 14)  # Standard Wilder period
+        self._adx_threshold = config.parameters.get("adx_threshold", 25)  # Min ADX for signals
 
         # Demand Zone configuration (MoonDev-inspired)
         self._demand_zones_enabled = config.parameters.get("demand_zones_enabled", True)
@@ -116,13 +134,14 @@ class MomentumAgent(SignalAgent):
 
         # State per symbol
         self._symbols: dict[str, MomentumState] = {}
-        self._max_lookback = max(self._slow_period, self._rsi_period) * 2
+        self._max_lookback = max(self._slow_period, self._rsi_period, self._adx_period * 2) * 2
 
     async def initialize(self) -> None:
         """Initialize momentum tracking."""
         logger.info(
             f"MomentumAgent initializing with MA({self._fast_period}/{self._slow_period}), "
-            f"RSI({self._rsi_period}), DemandZones={self._demand_zones_enabled}"
+            f"RSI({self._rsi_period}), ADX={self._adx_filter_enabled}(>{self._adx_threshold}), "
+            f"DemandZones={self._demand_zones_enabled}"
         )
 
     async def process_event(self, event: Event) -> None:
@@ -152,6 +171,12 @@ class MomentumAgent(SignalAgent):
         # Update price
         prev_price = state.prices[-1] if state.prices else price
         state.prices.append(price)
+
+        # Update high/low for ADX calculation
+        high = event.high if event.high > 0 else price
+        low = event.low if event.low > 0 else price
+        state.highs.append(high)
+        state.lows.append(low)
 
         # Update demand zone detector with candle data
         if self._demand_zones_enabled and state.zone_detector:
@@ -183,11 +208,11 @@ class MomentumAgent(SignalAgent):
         """
         Generate momentum signal based on multiple indicators.
 
-        TODO: Implement more sophisticated momentum models:
-        - ADX for trend strength
-        - Bollinger Bands for volatility-adjusted signals
-        - Volume confirmation
-        - Multiple timeframe analysis
+        Implements:
+        - Moving Average Crossover
+        - RSI (Relative Strength Index)
+        - MACD (Moving Average Convergence Divergence)
+        - ADX trend strength filter (Wilder, ADX > 25)
         """
         prices = np.array(list(state.prices))
 
@@ -202,8 +227,25 @@ class MomentumAgent(SignalAgent):
         current_price = prices[-1]
         state.macd, state.macd_signal = self._calculate_macd(state, current_price)
 
+        # Calculate ADX for trend strength (Wilder 1978)
+        adx = self._calculate_adx(state)
+
         # Determine signal from indicator confluence
         signal_direction, strength, rationale = self._evaluate_indicators(state)
+
+        # Apply ADX trend strength filter
+        # Only generate trend-following signals when ADX > threshold
+        if self._adx_filter_enabled and adx > 0:
+            if adx < self._adx_threshold:
+                # Weak trend - filter out trend-following signals
+                logger.debug(
+                    f"ADX filter: {state.symbol} ADX={adx:.1f} < {self._adx_threshold} - "
+                    f"signal suppressed (weak trend)"
+                )
+                return None
+            else:
+                # Strong trend confirmed - add ADX to rationale
+                rationale = f"{rationale} | ADX={adx:.1f} (strong trend)"
 
         # Phase 2: Apply RSI trend filter
         if self._rsi_trend_filter_enabled:
@@ -417,6 +459,103 @@ class MomentumAgent(SignalAgent):
             return prices[-1] * 0.02
 
         return sum(true_ranges) / len(true_ranges)
+
+    def _calculate_adx(self, state: MomentumState) -> float:
+        """
+        Calculate Average Directional Index (ADX) for trend strength.
+
+        ADX was developed by J. Welles Wilder Jr. (1978) to measure trend strength.
+        It does NOT indicate trend direction, only the strength of the trend.
+
+        ADX Interpretation (Wilder):
+            - ADX < 20: No trend / weak trend
+            - ADX 20-25: Emerging trend
+            - ADX > 25: Strong trend (trade with trend)
+            - ADX > 50: Very strong trend
+            - ADX > 75: Extremely strong trend
+
+        Calculation:
+            1. True Range (TR) = max(H-L, |H-Prev_C|, |L-Prev_C|)
+            2. +DM = H - Prev_H if (H - Prev_H) > (Prev_L - L) else 0
+            3. -DM = Prev_L - L if (Prev_L - L) > (H - Prev_H) else 0
+            4. +DI = 100 * EMA(+DM) / EMA(TR)
+            5. -DI = 100 * EMA(-DM) / EMA(TR)
+            6. DX = 100 * |+DI - -DI| / (+DI + -DI)
+            7. ADX = EMA(DX) over N periods
+
+        Args:
+            state: MomentumState containing highs, lows, and prices
+
+        Returns:
+            ADX value (0-100)
+        """
+        prices = list(state.prices)
+        highs = list(state.highs)
+        lows = list(state.lows)
+
+        if len(prices) < self._adx_period + 1 or len(highs) < 2 or len(lows) < 2:
+            return 0.0
+
+        # Smoothing factor for Wilder's EMA (1/N instead of 2/(N+1))
+        alpha = 1.0 / self._adx_period
+
+        # Calculate current +DM, -DM, and TR
+        curr_high = highs[-1]
+        prev_high = highs[-2]
+        curr_low = lows[-1]
+        prev_low = lows[-2]
+        prev_close = prices[-2] if len(prices) > 1 else prices[-1]
+
+        # True Range
+        tr = max(
+            curr_high - curr_low,
+            abs(curr_high - prev_close),
+            abs(curr_low - prev_close)
+        )
+
+        # Directional Movement
+        up_move = curr_high - prev_high
+        down_move = prev_low - curr_low
+
+        plus_dm = up_move if up_move > down_move and up_move > 0 else 0.0
+        minus_dm = down_move if down_move > up_move and down_move > 0 else 0.0
+
+        # Initialize EMAs with first values
+        if not state.adx_initialized and len(prices) >= self._adx_period:
+            # Initialize with average of first N periods
+            state.tr_ema = tr
+            state.plus_dm_ema = plus_dm
+            state.minus_dm_ema = minus_dm
+            state.adx_ema = 25.0  # Start at threshold
+            state.adx_initialized = True
+        elif not state.adx_initialized:
+            return 0.0
+
+        # Update Wilder smoothing EMAs
+        state.tr_ema = state.tr_ema + alpha * (tr - state.tr_ema)
+        state.plus_dm_ema = state.plus_dm_ema + alpha * (plus_dm - state.plus_dm_ema)
+        state.minus_dm_ema = state.minus_dm_ema + alpha * (minus_dm - state.minus_dm_ema)
+
+        # Calculate +DI and -DI
+        if state.tr_ema > 0:
+            plus_di = 100.0 * state.plus_dm_ema / state.tr_ema
+            minus_di = 100.0 * state.minus_dm_ema / state.tr_ema
+        else:
+            plus_di = 0.0
+            minus_di = 0.0
+
+        # Calculate DX
+        di_sum = plus_di + minus_di
+        if di_sum > 0:
+            dx = 100.0 * abs(plus_di - minus_di) / di_sum
+        else:
+            dx = 0.0
+
+        # Update ADX with Wilder smoothing
+        state.adx_ema = state.adx_ema + alpha * (dx - state.adx_ema)
+        state.adx = state.adx_ema
+
+        return state.adx
 
     def _evaluate_indicators(
         self,

@@ -57,7 +57,7 @@ class AgentCriticality(Enum):
 class QuorumConfig:
     """Configuration for quorum-based signal barrier."""
     threshold: float = 0.8  # 80% of agents must respond for quorum
-    fast_path_timeout_ms: int = 100  # Fast path - release if quorum met
+    fast_path_timeout_ms: int = 500  # Fast path - release if quorum met (was 100ms - too short)
     full_timeout_seconds: float = 10.0  # Full barrier timeout
     require_critical: bool = True  # All CRITICAL agents must respond
     confidence_decay_per_second: float = 0.05  # Decay rate for fallback signals
@@ -66,7 +66,7 @@ class QuorumConfig:
 @dataclass
 class AgentTimeoutConfig:
     """Per-agent timeout configuration."""
-    default_timeout_ms: int = 200
+    default_timeout_ms: int = 1000  # 1 second default (was 200ms - too short for HMM/Kalman)
     agent_timeouts_ms: dict[str, int] = field(default_factory=dict)
 
     def get_timeout_ms(self, agent_name: str) -> int:
@@ -74,9 +74,29 @@ class AgentTimeoutConfig:
         return self.agent_timeouts_ms.get(agent_name, self.default_timeout_ms)
 
 
+@dataclass
+class BarrierResult:
+    """
+    Result of a signal barrier wait (Phase 12 fix).
+
+    Provides barrier validity info alongside signals so the CIO can make
+    an informed decision about whether to proceed.
+
+    Per Architecture Invariant #2:
+    'Barrier MUST NOT release if ANY CRITICAL agent is missing'
+    """
+    signals: dict[str, SignalEvent]
+    is_valid: bool = True  # False if CRITICAL agents are missing
+    missing_critical: list[str] = field(default_factory=list)
+    quorum_met: bool = True  # Whether quorum threshold was reached
+    total_expected: int = 0  # Total agents expected
+    total_received: int = 0  # Total agents that responded
+    missing_agents: list[str] = field(default_factory=list)  # All missing agents
+
+
 # Default agent criticality mappings
 DEFAULT_AGENT_CRITICALITY: dict[str, AgentCriticality] = {
-    "MacroAgent": AgentCriticality.CRITICAL,
+    "MacroAgent": AgentCriticality.HIGH,
     "RiskAgent": AgentCriticality.CRITICAL,
     "MomentumAgent": AgentCriticality.HIGH,
     "StatArbAgent": AgentCriticality.HIGH,
@@ -324,6 +344,9 @@ class SignalBarrier:
     # Track missing critical agents after barrier close
     _missing_critical_agents: list[str] = field(default_factory=list)
 
+    # Phase 12: Full barrier result with validity info
+    _barrier_result: BarrierResult | None = field(default=None)
+
     async def add_signal(self, agent_name: str, signal: SignalEvent) -> bool:
         """
         Add a signal from an agent (thread-safe).
@@ -534,6 +557,18 @@ class SignalBarrier:
                     f"{missing_critical}. Decision should NOT proceed."
                 )
 
+            # Build BarrierResult with full validity info
+            quorum_met = self._is_quorum_met_unsafe()
+            self._barrier_result = BarrierResult(
+                signals=final_signals,
+                is_valid=len(missing_critical) == 0,
+                missing_critical=missing_critical,
+                quorum_met=quorum_met,
+                total_expected=len(self.expected_agents),
+                total_received=len(self.signals),  # Only real signals, not fallbacks
+                missing_agents=list(missing_agents),
+            )
+
             return final_signals
 
     def _get_fallback_signal(
@@ -602,6 +637,25 @@ class SignalBarrier:
     def get_missing_critical_agents(self) -> list[str]:
         """Get list of missing CRITICAL agents (empty if barrier is valid)."""
         return list(self._missing_critical_agents)
+
+    def get_barrier_result(self) -> BarrierResult:
+        """
+        Get full barrier result with validity info (Phase 12).
+
+        Returns BarrierResult with signals, validity, missing agents, quorum status.
+        Must be called AFTER wait_with_quorum() or wait() completes.
+        """
+        if self._barrier_result is not None:
+            return self._barrier_result
+        # Fallback if wait_with_quorum wasn't used
+        return BarrierResult(
+            signals=dict(self.signals),
+            is_valid=self.is_valid(),
+            missing_critical=list(self._missing_critical_agents),
+            quorum_met=True,
+            total_expected=len(self.expected_agents),
+            total_received=len(self.signals),
+        )
 
     def get_quorum_status(self) -> dict[str, Any]:
         """Get current quorum status for monitoring."""
@@ -1165,7 +1219,7 @@ class EventBus:
         # Add signal outside the event bus lock (barrier has its own lock)
         await barrier.add_signal(signal.source_agent, signal)
 
-    async def wait_for_signals(self, use_quorum: bool = True) -> dict[str, SignalEvent]:
+    async def wait_for_signals(self, use_quorum: bool = True) -> BarrierResult:
         """
         Wait for signal barrier to complete (fan-in, race-condition safe).
 
@@ -1173,15 +1227,20 @@ class EventBus:
         The barrier is atomically consumed and reset to prevent race conditions
         where late signals go to the wrong barrier.
 
+        Phase 12 fix: Returns BarrierResult with validity info instead of just signals.
+        The CIO MUST check result.is_valid before making decisions
+        (Architecture Invariant #2).
+
         Args:
             use_quorum: If True, use quorum-based fast path (default: True)
 
         Returns:
-            Dict of agent_name -> SignalEvent (may include fallback signals)
+            BarrierResult with signals, validity status, and missing agent info.
+            Empty BarrierResult if no barrier is active.
         """
         async with self._lock:
             if self._current_barrier is None:
-                return {}
+                return BarrierResult(signals={})
 
             # Take ownership of the barrier - no one else can use it
             barrier = self._current_barrier
@@ -1199,9 +1258,16 @@ class EventBus:
         else:
             signals = await barrier.wait()
 
+        # Get full barrier result with validity info
+        result = barrier.get_barrier_result()
+
         # Update last known signals cache
         for agent_name, signal in signals.items():
             self._last_known_signals[agent_name] = signal
+
+        # Phase 12: Emit RiskAlertEvent if barrier is invalid (critical agents missing)
+        if not result.is_valid:
+            await self._emit_barrier_failure_alert(result)
 
         # Now atomically reset the barrier
         async with self._lock:
@@ -1210,7 +1276,37 @@ class EventBus:
                 self._current_barrier = None
                 logger.debug(f"Signal barrier {barrier_id} consumed with {len(signals)} signals")
 
-        return signals
+        return result
+
+    async def _emit_barrier_failure_alert(self, result: BarrierResult) -> None:
+        """
+        Emit RiskAlertEvent when barrier fails due to missing CRITICAL agents.
+
+        Phase 12: Makes barrier failures visible in the dashboard instead of
+        silently logging them.
+        """
+        from core.events import RiskAlertEvent, RiskAlertSeverity
+
+        alert = RiskAlertEvent(
+            source_agent="EventBus",
+            severity=RiskAlertSeverity.CRITICAL,
+            alert_type="barrier_failure",
+            message=(
+                f"Signal barrier INVALID: {len(result.missing_critical)} CRITICAL agent(s) "
+                f"did not respond: {', '.join(result.missing_critical)}. "
+                f"Received {result.total_received}/{result.total_expected} signals. "
+                f"CIO decisions BLOCKED until agents recover."
+            ),
+            current_value=float(result.total_received),
+            threshold_value=float(result.total_expected),
+            halt_trading=False,  # CIO handles this, not kill-switch
+        )
+
+        # Publish to all subscribers (including dashboard)
+        await self.publish(alert)
+        logger.warning(
+            f"BARRIER FAILURE ALERT emitted: missing {result.missing_critical}"
+        )
 
     def get_quorum_config(self) -> QuorumConfig:
         """Get current quorum configuration."""
