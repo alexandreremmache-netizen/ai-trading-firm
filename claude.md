@@ -473,7 +473,7 @@ ai-trading-firm/
 
 ---
 
-## Fonctionnalites Implementees (Phases 1-12)
+## Fonctionnalites Implementees (Phases 1-14)
 
 ### Phase 1-4: Core Enhancements
 - Oscillator parameters par asset class
@@ -611,6 +611,57 @@ cio:
     time_exit_hours: 48             # was 0 (disabled)
 ```
 
+### Phase 13: Intraday Conversion (Feb 2026)
+- **RiskAgent price fix** - Uses CONTRACT_SPECS.multiplier (was hardcoded price=100)
+- **Max 6 open positions** - CIO rejects new trades beyond limit
+- **120s cooldown per symbol** - Prevents overtrading same instrument
+- **EOD close** - Force close at 15:30/15:45 ET, no new positions after 15:00 ET
+- **Time decay on conviction** - 0.9x at 2h, 0.8x at 3h, 0x at 15:00 ET
+- **Consensus threshold** - 40% → 55% for signal agreement
+- **Tightened config** - profit_target 4%→1.5%, max_hold 2d→6h, stops 3%→1%
+
+### Phase 14: Expert Strategy Review - 40 Fixes (Feb 2026)
+
+**Root cause of 45% loss:** CIO sizing ignored futures multiplier → 20x+ over-leverage.
+
+**Pipeline Fixes (28):**
+- **FIX-01**: CIO sizing divides by `price * multiplier` (was price only)
+- **FIX-02/03**: RiskAgent allows exit orders in defensive mode + BUY to close shorts
+- **FIX-04**: Leverage guard uses config `max_leverage` (was hardcoded 1.5x)
+- **FIX-05**: `max_position_pct: 1%→5%` (1% blocked ALL futures)
+- **FIX-06**: Min order `10→1` for futures
+- **FIX-08/09**: TrackedPosition `quantity = abs()`, added `contract_multiplier`
+- **FIX-10**: `base_position_size: 100→5000` (dollars, not contracts)
+- **FIX-11**: Removed stock pairs from StatArb (futures-only system)
+- **FIX-12/13**: TTM Squeeze SQUEEZE_FIRING + config keys aligned
+- **FIX-16/17**: EventDriven surprise computation + heartbeats on all paths
+- **FIX-19**: Mean Reversion RSI(14,30/70) → RSI(2,5/95) Connors
+- **FIX-20**: MACD-v min_confidence 0.75→0.50
+- **FIX-21**: Session breakout_threshold_atr 0.5→1.5
+- **FIX-22**: Momentum slow_period 30→50
+- **FIX-23/26**: Index Spread config keys + FLAT exit handling
+- **FIX-25**: StatArb min data 10→120 bars
+- **FIX-29**: HMM fit() in thread pool (was blocking 500-2000ms)
+- **FIX-30**: Macro signals emit "MES" (was "SPY")
+- **FIX-34**: EventDriven ATR 0.015→0.001 (1-min bars)
+- **FIX-38**: Economic calendar `await` init
+- **FIX-42**: Added M2K/MYM to EventDriven sensitivity map
+
+**Strategy Fixes (9):**
+- **FIX-24**: Index Spread lookback days→bars conversion (was using 60 bars as "60 days")
+- **FIX-27/28**: StatArb emits 2 separate signals per leg + 5s staleness guard
+- **FIX-31**: Momentum confidence blended (was overwritten at line 2020)
+- **FIX-32**: TTM momentum linreg smoothing (Carter's original)
+- **FIX-33**: TTM ATR 3-component True Range fix
+- **FIX-35**: Macro R:R `round()` before comparison (float precision)
+- **FIX-36**: MACD-v neutral counter per-bar (60s), not per-tick
+- **FIX-37**: Dollar-neutral sizing via notional equalization
+
+**Tuning Fixes (3):**
+- **FIX-44**: EventDriven pre-event window 24h→2h (intraday, no overnight)
+- **FIX-45**: min_surprise_std 3.0→1.5 (3σ=0 signals/year → 1.5σ=~8/year)
+- **NEW**: EventDriven R:R validation with `round()` + reject < 2.0
+
 ### Infrastructure Avancee
 - HMM regime detection (Hidden Markov Model)
 - Yield curve analysis (2s10s, recession probability)
@@ -704,7 +755,7 @@ Les agents peuvent etre actives/desactives depuis le dashboard:
 ## Tests
 
 ```bash
-# Tous les tests (1127)
+# Tous les tests (1204)
 python -m pytest tests/ -v
 
 # Tests rapides
@@ -740,7 +791,12 @@ python -m pytest tests/ --cov=core --cov=agents --cov=strategies --cov-report=ht
 | Mean Reversion | 27 |
 | TTM Squeeze | 21 |
 | Session Strategy | 18 |
-| **TOTAL** | **1127** |
+| Execution Agent | 24 |
+| MACD-v Strategy | 18 |
+| Momentum Strategy | 22 |
+| Macro Strategy | 16 |
+| StatArb Strategy | 25 |
+| **TOTAL** | **1204** |
 
 ---
 
@@ -979,6 +1035,12 @@ position.r_multiple     # PnL / initial_risk
 | CIO decide sur signaux incomplets | Barrier retourne signaux sans validite | Phase 12: BarrierResult avec is_valid, CIO bloque si CRITICAL manquant |
 | Erreurs barrier invisibles dashboard | Seulement loggees en texte | Phase 12: RiskAlertEvent emis sur barrier failure |
 | Test session momentum time-dependent | get_current_session() utilise datetime.now() | Mock de la session dans les tests |
+| 45% portfolio loss | CIO sizing ignored futures multiplier | Phase 14: divide by price*multiplier, 40 fixes total |
+| StatArb "MES:MNQ" unexecutable | Single signal for pair | Phase 14: 2 separate signals per leg |
+| R:R 2.00 < 2.00 false reject | Float precision 1.999999 | Phase 14: `round(rr_ratio, 2)` before comparison |
+| Momentum confidence overwritten | Agreement calc replaced all prior work | Phase 14: Blend 50/50 with prior confidence |
+| EventDriven 0 signals/year | min_surprise_std=3.0 (0.3% probability) | Phase 14: lowered to 1.5σ (~8 signals/year) |
+| Index Spread 60 bars = "60 days" | lookback_days not converted to bars | Phase 14: lookback_bars = days * bars_per_day |
 
 ---
 
@@ -1036,7 +1098,7 @@ class MyNewAgent:
 
 **PRODUCTION-READY pour paper trading**
 
-- 1127 tests passent (100% coverage sur modules critiques)
+- 1204 tests passent (100% coverage sur modules critiques)
 - 15 agents de signal
 - 12 strategies
 - Dashboard avec analytics avances
@@ -1108,6 +1170,21 @@ Python `deque` ne supporte pas le slicing `[-N:]`. Corrections:
 ---
 
 ## Changelog
+
+### v0.14.0 (2026-02-05) - Phase 14: Expert Strategy Review (40 Fixes)
+- 🔧 Root cause: CIO sizing ignored futures multiplier → 20x+ over-leverage
+- 🔧 28 pipeline fixes: sizing, risk guards, config alignment, heartbeats
+- 🔧 9 strategy fixes: StatArb legs, momentum blend, TTM linreg, MACD-v counter
+- 🔧 3 tuning fixes: EventDriven pre-event 24h→2h, surprise 3σ→1.5σ, R:R validation
+- 📊 1204 tests passing
+
+### v0.13.0 (2026-02-05) - Phase 13: Intraday Conversion
+- 🔧 RiskAgent uses CONTRACT_SPECS.multiplier (was price=100)
+- ✨ Max 6 open positions, 120s cooldown per symbol
+- ✨ EOD close at 15:30/15:45 ET, no new positions after 15:00 ET
+- ✨ Time decay on conviction (0.9x at 2h, 0.8x at 3h)
+- 🔧 Consensus threshold 40%→55%
+- 🔧 Tightened config: profit_target 1.5%, max_hold 6h, stops 1%
 
 ### v0.12.0 (2026-02-xx) - Phase 12: Active Position Protection & Barrier Integrity
 - ✨ Breakeven stop at 1R, trailing stop at 1.5R
